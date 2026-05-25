@@ -1,0 +1,19 @@
+{
+  "name": "e2b-demo-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh",
+    "dev": "bun build ./frontend.tsx --outdir ./dist --splitting --watch"
+  },
+  "dependencies": {
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "bun-plugin-tailwind": "^0.1.2",
+    "tailwindcss": "^4.2.2"
+  }
+}
