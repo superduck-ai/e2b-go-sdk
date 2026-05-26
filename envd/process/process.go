@@ -1,5 +1,7 @@
 package process
 
+import "encoding/json"
+
 // Signal enum
 type Signal int32
 
@@ -11,6 +13,10 @@ const (
 
 // PTY size
 type PTY struct {
+	Size *PTYSize `json:"size,omitempty"`
+}
+
+type PTYSize struct {
 	Cols uint32 `json:"cols"`
 	Rows uint32 `json:"rows"`
 }
@@ -30,12 +36,74 @@ type ProcessInfo struct {
 	Tag    string         `json:"tag,omitempty"`
 }
 
+type ProcessSelector struct {
+	Pid uint32 `json:"pid,omitempty"`
+	Tag string `json:"tag,omitempty"`
+}
+
+func PidSelector(pid uint32) *ProcessSelector {
+	return &ProcessSelector{Pid: pid}
+}
+
 // ProcessEvent from a running process stream
 type ProcessEvent struct {
 	Start     *ProcessStartEvent `json:"start,omitempty"`
 	Data      *ProcessDataEvent  `json:"data,omitempty"`
 	End       *ProcessEndEvent   `json:"end,omitempty"`
 	Keepalive bool               `json:"keepalive,omitempty"`
+}
+
+func (e *ProcessEvent) UnmarshalJSON(data []byte) error {
+	type eventJSON struct {
+		Start     *ProcessStartEvent `json:"start,omitempty"`
+		Data      *ProcessDataEvent  `json:"data,omitempty"`
+		End       *ProcessEndEvent   `json:"end,omitempty"`
+		Keepalive json.RawMessage    `json:"keepalive,omitempty"`
+	}
+
+	var wrapped struct {
+		Event *eventJSON `json:"event"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	if wrapped.Event != nil {
+		applyProcessEventJSON(e, *wrapped.Event)
+		return nil
+	}
+
+	var direct eventJSON
+	if err := json.Unmarshal(data, &direct); err != nil {
+		return err
+	}
+	applyProcessEventJSON(e, direct)
+	return nil
+}
+
+func applyProcessEventJSON(event *ProcessEvent, data struct {
+	Start     *ProcessStartEvent `json:"start,omitempty"`
+	Data      *ProcessDataEvent  `json:"data,omitempty"`
+	End       *ProcessEndEvent   `json:"end,omitempty"`
+	Keepalive json.RawMessage    `json:"keepalive,omitempty"`
+}) {
+	event.Start = data.Start
+	event.Data = data.Data
+	event.End = data.End
+	event.Keepalive = parseKeepalive(data.Keepalive)
+}
+
+func parseKeepalive(data json.RawMessage) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	var value bool
+	if err := json.Unmarshal(data, &value); err == nil {
+		return value
+	}
+
+	var object map[string]any
+	return json.Unmarshal(data, &object) == nil
 }
 
 type ProcessStartEvent struct {
@@ -66,7 +134,12 @@ type StartRequest struct {
 }
 
 type ConnectRequest struct {
-	Pid uint32 `json:"pid"`
+	Process *ProcessSelector `json:"process,omitempty"`
+}
+
+type ProcessInput struct {
+	Stdin []byte `json:"stdin,omitempty"`
+	Pty   []byte `json:"pty,omitempty"`
 }
 
 type ListRequest struct{}
@@ -76,21 +149,20 @@ type ListResponse struct {
 }
 
 type SendInputRequest struct {
-	Pid   uint32 `json:"pid"`
-	Stdin []byte `json:"stdin,omitempty"`
-	Pty   []byte `json:"pty,omitempty"`
+	Process *ProcessSelector `json:"process,omitempty"`
+	Input   *ProcessInput    `json:"input,omitempty"`
 }
 
 type SendSignalRequest struct {
-	Pid    uint32 `json:"pid"`
-	Signal Signal `json:"signal"`
+	Process *ProcessSelector `json:"process,omitempty"`
+	Signal  Signal           `json:"signal"`
 }
 
 type UpdateRequest struct {
-	Pid  uint32 `json:"pid"`
-	Size *PTY   `json:"size,omitempty"`
+	Process *ProcessSelector `json:"process,omitempty"`
+	Pty     *PTY             `json:"pty,omitempty"`
 }
 
 type CloseStdinRequest struct {
-	Pid uint32 `json:"pid"`
+	Process *ProcessSelector `json:"process,omitempty"`
 }

@@ -3,6 +3,7 @@ package envd
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,13 @@ func (e *RpcError) Error() string {
 // HandleRpcError maps gRPC/Connect error codes to an RpcError.
 func HandleRpcError(code string, message string) error {
 	return &RpcError{Code: code, Message: message}
+}
+
+func EncodeConnectEnvelope(payload []byte) []byte {
+	envelope := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(envelope[1:5], uint32(len(payload)))
+	copy(envelope[5:], payload)
+	return envelope
 }
 
 func HandleRequestTimeoutError() error {

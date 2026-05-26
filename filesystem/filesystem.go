@@ -226,7 +226,7 @@ func (f *Filesystem) connectServerStream(ctx context.Context, path string, reqBo
 		return nil, err
 	}
 	u := f.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -686,7 +686,8 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 		body.Close()
 		return nil, fmt.Errorf("failed to parse watch start event: %w", err)
 	}
-	if firstResp.Started == nil || !*firstResp.Started {
+	started := firstResp.Start != nil || (firstResp.Started != nil && *firstResp.Started)
+	if !started {
 		streamCancel()
 		body.Close()
 		return nil, fmt.Errorf("Expected start event")
@@ -730,8 +731,12 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 				if json.Unmarshal(msg.payload, &resp) != nil {
 					continue
 				}
-				if resp.Event != nil && onEvent != nil {
-					if event, ok := convertFsEvent(resp.Event); ok {
+				eventResp := resp.Filesystem
+				if eventResp == nil {
+					eventResp = resp.Event
+				}
+				if eventResp != nil && onEvent != nil {
+					if event, ok := convertFsEvent(eventResp); ok {
 						onEvent(event)
 					}
 				}

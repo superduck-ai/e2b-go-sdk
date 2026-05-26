@@ -77,11 +77,13 @@ type SandboxMetrics struct {
 
 type SnapshotInfo struct {
 	SnapshotID string
+	Names      []string
 }
 
 func snapshotInfoFromAPI(info api.SnapshotInfo) SnapshotInfo {
 	return SnapshotInfo{
 		SnapshotID: info.SnapshotID,
+		Names:      info.Names,
 	}
 }
 
@@ -143,6 +145,11 @@ type SnapshotListOpts struct {
 	NextToken string
 }
 
+type CreateSnapshotOpts struct {
+	SandboxApiOpts
+	Name string
+}
+
 // sandboxConnectionInfo holds connection details returned when creating/connecting a sandbox.
 type sandboxConnectionInfo struct {
 	SandboxID          string
@@ -152,8 +159,8 @@ type sandboxConnectionInfo struct {
 	TrafficAccessToken string
 }
 
-// sandboxFullInfo holds detailed sandbox info plus connection fields returned by getFullInfo.
-type sandboxFullInfo struct {
+// SandboxFullInfo holds detailed sandbox info plus connection fields returned by GetFullInfo.
+type SandboxFullInfo struct {
 	SandboxID           string
 	TemplateID          string
 	Name                string
@@ -230,6 +237,10 @@ func GetInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*Sand
 	return (&sandboxApi{}).GetInfo(ctx, sandboxId, opts)
 }
 
+func GetFullInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxFullInfo, error) {
+	return (&sandboxApi{}).getFullInfo(ctx, sandboxId, opts)
+}
+
 func GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts) ([]SandboxMetrics, error) {
 	return (&sandboxApi{}).GetMetrics(ctx, sandboxId, opts)
 }
@@ -247,7 +258,7 @@ func BetaPause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (boo
 	return (&sandboxApi{}).BetaPause(ctx, sandboxId, opts)
 }
 
-func CreateSnapshot(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SnapshotInfo, error) {
+func CreateSnapshot(ctx context.Context, sandboxId string, opts *CreateSnapshotOpts) (*SnapshotInfo, error) {
 	return (&sandboxApi{}).CreateSnapshot(ctx, sandboxId, opts)
 }
 
@@ -296,7 +307,7 @@ func (a *sandboxApi) GetInfo(ctx context.Context, sandboxId string, opts *Sandbo
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return nil, &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
 		}
 		return nil, err
 	}
@@ -305,7 +316,7 @@ func (a *sandboxApi) GetInfo(ctx context.Context, sandboxId string, opts *Sandbo
 	return &info, nil
 }
 
-func (a *sandboxApi) getFullInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*sandboxFullInfo, error) {
+func (a *sandboxApi) getFullInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxFullInfo, error) {
 	if opts == nil {
 		opts = &SandboxApiOpts{}
 	}
@@ -318,7 +329,7 @@ func (a *sandboxApi) getFullInfo(ctx context.Context, sandboxId string, opts *Sa
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return nil, &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
 		}
 		return nil, err
 	}
@@ -418,7 +429,7 @@ func (a *sandboxApi) SetTimeout(ctx context.Context, sandboxId string, timeoutMs
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
 		}
 		return err
 	}
@@ -438,7 +449,7 @@ func (a *sandboxApi) Pause(ctx context.Context, sandboxId string, opts *SandboxA
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return false, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return false, &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
 		}
 		// Check for 409 Conflict (already paused)
 		if resp != nil && resp.StatusCode == http.StatusConflict {
@@ -454,21 +465,24 @@ func (a *sandboxApi) BetaPause(ctx context.Context, sandboxId string, opts *Sand
 	return a.Pause(ctx, sandboxId, opts)
 }
 
-func (a *sandboxApi) CreateSnapshot(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SnapshotInfo, error) {
+func (a *sandboxApi) CreateSnapshot(ctx context.Context, sandboxId string, opts *CreateSnapshotOpts) (*SnapshotInfo, error) {
 	if opts == nil {
-		opts = &SandboxApiOpts{}
+		opts = &CreateSnapshotOpts{}
 	}
-	client, err := a.newClient(opts)
+	client, err := a.newClient(&opts.SandboxApiOpts)
 	if err != nil {
 		return nil, err
 	}
 
 	var resp api.SnapshotInfo
-	_, err = client.Post(ctx, fmt.Sprintf("/sandboxes/%s/snapshots", sandboxId), struct{}{}, &resp)
+	body := struct {
+		Name string `json:"name,omitempty"`
+	}{Name: opts.Name}
+	_, err = client.Post(ctx, fmt.Sprintf("/sandboxes/%s/snapshots", sandboxId), body, &resp)
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return nil, &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
 		}
 		return nil, err
 	}
@@ -607,7 +621,7 @@ func (a *sandboxApi) connectSandbox(ctx context.Context, sandboxId string, opts 
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Paused sandbox %s not found", sandboxId)}}}
+			return nil, &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Paused sandbox %s not found", sandboxId)}}}
 		}
 		return nil, err
 	}
@@ -710,10 +724,10 @@ func sandboxRespToConnectionInfo(r *api.SandboxResponse) *sandboxConnectionInfo 
 	}
 }
 
-func sandboxRespToFullInfo(r *api.SandboxResponse) *sandboxFullInfo {
+func sandboxRespToFullInfo(r *api.SandboxResponse) *SandboxFullInfo {
 	info := sandboxResponseToInfo(r)
 
-	return &sandboxFullInfo{
+	return &SandboxFullInfo{
 		SandboxID:           info.SandboxID,
 		TemplateID:          info.TemplateID,
 		Name:                info.Name,
@@ -830,7 +844,7 @@ func ensureSupportedTemplateEnvd(ctx context.Context, client *api.ApiClient, san
 		_, _ = client.Delete(ctx, fmt.Sprintf("/sandboxes/%s", sandboxID), nil)
 	}
 
-	return &TemplateError{SandboxError{Message: "You need to update the template to use the new SDK. You can do this by running `e2b template build` in the directory with the template."}}
+	return &TemplateError{SandboxError: SandboxError{Message: "You need to update the template to use the new SDK. You can do this by running `e2b template build` in the directory with the template."}}
 }
 
 func resolveAllowInternetAccess(value *bool) *bool {

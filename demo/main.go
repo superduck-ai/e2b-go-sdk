@@ -19,6 +19,7 @@ import (
 	_ "github.com/lib/pq"
 
 	e2b "github.com/e2b-dev/e2b-go-sdk"
+	"github.com/e2b-dev/e2b-go-sdk/commands"
 	"github.com/e2b-dev/e2b-go-sdk/filesystem"
 	"github.com/e2b-dev/e2b-go-sdk/volume"
 )
@@ -334,7 +335,9 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := sb.Commands.Run(ctx, body.Command, nil)
+	result, err := sb.Commands.Run(ctx, body.Command, &commands.CommandStartOpts{
+		User: "root",
+	})
 	if err != nil {
 		errMsg := err.Error()
 		stdout, stderr := "", errMsg

@@ -64,6 +64,11 @@ func Exists(ctx context.Context, name string, opts *BuildOptions) (bool, error) 
 	return roottmpl.Exists(ctx, name, opts)
 }
 
+// AliasExists is deprecated. Use Exists instead.
+func AliasExists(ctx context.Context, alias string, opts *BuildOptions) (bool, error) {
+	return roottmpl.AliasExists(ctx, alias, opts)
+}
+
 type BuildStatusReason = roottmpl.BuildStatusReason
 
 func AssignTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) (*TemplateTagInfo, error) {

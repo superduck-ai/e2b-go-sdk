@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/e2b-dev/e2b-go-sdk/api"
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
 type TemplateBase struct {
@@ -27,19 +31,23 @@ func Template(options *TemplateOptions) *TemplateBase {
 }
 
 func newTemplate(options *TemplateOptions) *TemplateBase {
-	return &TemplateBase{options: options}
+	return &TemplateBase{baseImage: "e2bdev/base", options: options}
 }
 
 // From* methods
 
-func (t *TemplateBase) FromImage(baseImage string, credentials *RegistryCredentials) *TemplateBase {
+func (t *TemplateBase) FromImage(baseImage string, credentials ...*RegistryCredentials) *TemplateBase {
 	t.baseImage = baseImage
 	t.baseTemplate = ""
-	if credentials != nil {
+	var creds *RegistryCredentials
+	if len(credentials) > 0 {
+		creds = credentials[0]
+	}
+	if creds != nil {
 		t.registryConfig = &registryConfigPayload{
 			Type:     "registry",
-			Username: credentials.Username,
-			Password: credentials.Password,
+			Username: creds.Username,
+			Password: creds.Password,
 		}
 	} else {
 		t.registryConfig = nil
@@ -51,7 +59,7 @@ func (t *TemplateBase) FromImage(baseImage string, credentials *RegistryCredenti
 }
 
 func (t *TemplateBase) FromDebianImage(variant ...string) *TemplateBase {
-	v := "bookworm-slim"
+	v := "stable"
 	if len(variant) > 0 {
 		v = variant[0]
 	}
@@ -59,7 +67,7 @@ func (t *TemplateBase) FromDebianImage(variant ...string) *TemplateBase {
 }
 
 func (t *TemplateBase) FromUbuntuImage(variant ...string) *TemplateBase {
-	v := "24.04"
+	v := "latest"
 	if len(variant) > 0 {
 		v = variant[0]
 	}
@@ -67,7 +75,7 @@ func (t *TemplateBase) FromUbuntuImage(variant ...string) *TemplateBase {
 }
 
 func (t *TemplateBase) FromPythonImage(version ...string) *TemplateBase {
-	v := "3.12"
+	v := "3"
 	if len(version) > 0 {
 		v = version[0]
 	}
@@ -75,7 +83,7 @@ func (t *TemplateBase) FromPythonImage(version ...string) *TemplateBase {
 }
 
 func (t *TemplateBase) FromNodeImage(variant ...string) *TemplateBase {
-	v := "22"
+	v := "lts"
 	if len(variant) > 0 {
 		v = variant[0]
 	}
@@ -138,7 +146,7 @@ func (t *TemplateBase) FromGCPRegistry(image string, credentials *GCPRegistryCre
 	if credentials != nil {
 		t.registryConfig = &registryConfigPayload{
 			Type:               "gcp",
-			ServiceAccountJSON: credentials.ServiceAccountJSON,
+			ServiceAccountJSON: readGCPServiceAccountJSON(t.fileContextPath(), credentials.ServiceAccountJSON),
 		}
 	} else {
 		t.registryConfig = nil
@@ -151,111 +159,98 @@ func (t *TemplateBase) FromGCPRegistry(image string, credentials *GCPRegistryCre
 
 // Builder methods
 
-func (t *TemplateBase) Copy(src, dest string, opts *struct {
-	User            string
-	Mode            string
-	ForceUpload     bool
-	ResolveSymlinks bool
-}) *TemplateBase {
-	args := []string{src, dest, "", ""}
-	forceUpload := false
-	resolveSymlinks := false
-	if opts != nil {
-		args[2] = opts.User
-		args[3] = opts.Mode
-		forceUpload = opts.ForceUpload
-		resolveSymlinks = opts.ResolveSymlinks
+func (t *TemplateBase) Copy(src any, dest string, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	forceUpload := optionBool(opt, "ForceUpload", "forceUpload")
+	resolveSymlinks := optionBool(opt, "ResolveSymlinks", "resolveSymlinks")
+	user := optionString(opt, "User", "user")
+	mode := optionMode(opt)
+	for _, source := range stringList(src) {
+		args := []string{source, dest, user, mode}
+		t.instructions = append(t.instructions, Instruction{
+			Type:            InstructionCopy,
+			Args:            args,
+			Force:           forceUpload || t.forceNextLayer,
+			ForceUpload:     forceUpload,
+			ResolveSymlinks: resolveSymlinks,
+		})
 	}
-	t.instructions = append(t.instructions, Instruction{
-		Type:            InstructionCopy,
-		Args:            args,
-		Force:           forceUpload || t.forceNextLayer,
-		ForceUpload:     forceUpload,
-		ResolveSymlinks: resolveSymlinks,
-	})
 	return t
 }
 
 func (t *TemplateBase) CopyItems(items []CopyItem) *TemplateBase {
 	for _, item := range items {
-		t.Copy(item.Src, item.Dest, nil)
+		t.Copy(item.Src, item.Dest, &struct {
+			ForceUpload     bool
+			User            string
+			Mode            int
+			ResolveSymlinks bool
+		}{
+			ForceUpload:     item.ForceUpload,
+			User:            item.User,
+			Mode:            item.Mode,
+			ResolveSymlinks: item.ResolveSymlinks,
+		})
 	}
 	return t
 }
 
-func (t *TemplateBase) Remove(path string, opts *struct {
-	Force bool
-}) *TemplateBase {
-	force := ""
-	if opts != nil && opts.Force {
-		force = "-f "
+func (t *TemplateBase) Remove(path any, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	args := []string{"rm"}
+	if optionBool(opt, "Recursive", "recursive") {
+		args = append(args, "-r")
 	}
-	t.instructions = append(t.instructions, Instruction{
-		Type:  InstructionRun,
-		Args:  []string{"rm -r " + force + path},
-		Force: t.forceNextLayer,
-	})
-	return t
+	if optionBool(opt, "Force", "force") {
+		args = append(args, "-f")
+	}
+	args = append(args, stringList(path)...)
+	return t.RunCmd(strings.Join(args, " "), &struct {
+		User string
+	}{User: optionString(opt, "User", "user")})
 }
 
-func (t *TemplateBase) Rename(src, dest string, opts *struct {
-	User            string
-	Mode            string
-	ForceUpload     bool
-	ResolveSymlinks bool
-}) *TemplateBase {
-	args := []string{"mv " + src + " " + dest}
-	if opts != nil && opts.User != "" {
-		args = append(args, opts.User)
+func (t *TemplateBase) Rename(src, dest string, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	args := []string{"mv", src, dest}
+	if optionBool(opt, "Force", "force") {
+		args = append(args, "-f")
 	}
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
-	return t
+	return t.RunCmd(strings.Join(args, " "), &struct {
+		User string
+	}{User: optionString(opt, "User", "user")})
 }
 
-func (t *TemplateBase) MakeDir(path string, opts *struct {
-	User            string
-	Mode            string
-	ForceUpload     bool
-	ResolveSymlinks bool
-}) *TemplateBase {
-	cmd := "mkdir -p " + path
-	if opts != nil && opts.Mode != "" {
-		cmd = "mkdir -p -m " + opts.Mode + " " + path
+func (t *TemplateBase) MakeDir(path any, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	args := []string{"mkdir", "-p"}
+	if mode := optionMode(opt); mode != "" {
+		args = append(args, "-m "+mode)
 	}
-	args := []string{cmd}
-	if opts != nil && opts.User != "" {
-		args = append(args, opts.User)
-	}
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
-	return t
+	args = append(args, stringList(path)...)
+	return t.RunCmd(strings.Join(args, " "), &struct {
+		User string
+	}{User: optionString(opt, "User", "user")})
 }
 
-func (t *TemplateBase) MakeSymlink(src, dest string, opts *struct {
-	User            string
-	Mode            string
-	ForceUpload     bool
-	ResolveSymlinks bool
-}) *TemplateBase {
-	cmd := "ln -s " + src + " " + dest
-	args := []string{cmd}
-	if opts != nil && opts.User != "" {
-		args = append(args, opts.User)
+func (t *TemplateBase) MakeSymlink(src, dest string, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	args := []string{"ln", "-s"}
+	if optionBool(opt, "Force", "force") {
+		args = append(args, "-f")
 	}
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
-	return t
+	args = append(args, src, dest)
+	return t.RunCmd(strings.Join(args, " "), &struct {
+		User string
+	}{User: optionString(opt, "User", "user")})
 }
 
-func (t *TemplateBase) RunCmd(command string, opts *struct {
-	Force bool
-	User  string
-}) *TemplateBase {
-	args := []string{command}
-	force := t.forceNextLayer
-	if opts != nil {
-		force = force || opts.Force
-		if opts.User != "" {
-			args = append(args, opts.User)
-		}
+func (t *TemplateBase) RunCmd(command any, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	args := []string{strings.Join(stringList(command), " && ")}
+	force := t.forceNextLayer || optionBool(opt, "Force", "force")
+	if user := optionString(opt, "User", "user"); user != "" {
+		args = append(args, user)
 	}
 	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: force})
 	return t
@@ -271,74 +266,135 @@ func (t *TemplateBase) SetUser(user string) *TemplateBase {
 	return t
 }
 
-func (t *TemplateBase) PipInstall(packages []string, opts *struct {
-	Force bool
-}) *TemplateBase {
-	if len(packages) == 0 {
-		return t.RunCmd("pip install -r requirements.txt", nil)
+func (t *TemplateBase) PipInstall(values ...any) *TemplateBase {
+	packages, opts := installArgs(values)
+	global := optionBoolDefault(opts, true, "G", "g")
+	args := []string{"pip", "install"}
+	if !global {
+		args = append(args, "--user")
 	}
-	return t.RunCmd("pip install "+joinPackages(packages), nil)
+	pkgs := stringList(packages)
+	if len(pkgs) == 0 {
+		pkgs = []string{"."}
+	}
+	args = append(args, pkgs...)
+	runOpts := &struct {
+		User string
+	}{}
+	if global {
+		runOpts.User = "root"
+	}
+	return t.RunCmd(strings.Join(args, " "), runOpts)
 }
 
-func (t *TemplateBase) NpmInstall(packages []string, opts *struct {
-	Force bool
-}) *TemplateBase {
-	if len(packages) == 0 {
-		return t.RunCmd("npm install", nil)
+func (t *TemplateBase) NpmInstall(values ...any) *TemplateBase {
+	packages, opts := installArgs(values)
+	global := optionBool(opts, "G", "g")
+	args := []string{"npm", "install"}
+	if global {
+		args = append(args, "-g")
 	}
-	return t.RunCmd("npm install "+joinPackages(packages), nil)
+	if optionBool(opts, "Dev", "dev") {
+		args = append(args, "--save-dev")
+	}
+	args = append(args, stringList(packages)...)
+	runOpts := &struct {
+		User string
+	}{}
+	if global {
+		runOpts.User = "root"
+	}
+	return t.RunCmd(strings.Join(args, " "), runOpts)
 }
 
-func (t *TemplateBase) BunInstall(packages []string, opts *struct {
-	Force bool
-}) *TemplateBase {
-	if len(packages) == 0 {
-		return t.RunCmd("bun install", nil)
+func (t *TemplateBase) BunInstall(values ...any) *TemplateBase {
+	packages, opts := installArgs(values)
+	global := optionBool(opts, "G", "g")
+	args := []string{"bun", "install"}
+	if global {
+		args = append(args, "-g")
 	}
-	return t.RunCmd("bun add "+joinPackages(packages), nil)
+	if optionBool(opts, "Dev", "dev") {
+		args = append(args, "--dev")
+	}
+	args = append(args, stringList(packages)...)
+	runOpts := &struct {
+		User string
+	}{}
+	if global {
+		runOpts.User = "root"
+	}
+	return t.RunCmd(strings.Join(args, " "), runOpts)
 }
 
-func (t *TemplateBase) AptInstall(packages []string, opts *struct {
-	Force bool
-}) *TemplateBase {
-	return t.RunCmd("apt-get update && apt-get install -y "+joinPackages(packages), nil)
-}
-
-func (t *TemplateBase) AddMcpServer(servers ...string) *TemplateBase {
-	if len(servers) == 0 {
-		return t
+func (t *TemplateBase) AptInstall(packages any, opts ...any) *TemplateBase {
+	opt := firstOpt(opts)
+	pkgs := stringList(packages)
+	install := "DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes apt-get install -y "
+	if optionBool(opt, "NoInstallRecommends", "noInstallRecommends") {
+		install += "--no-install-recommends "
 	}
-	return t.RunCmd("mcp-gateway pull "+strings.Join(servers, " "), &struct {
-		Force bool
-		User  string
+	if optionBool(opt, "FixMissing", "fixMissing") {
+		install += "--fix-missing "
+	}
+	install += strings.Join(pkgs, " ")
+	return t.RunCmd([]string{"apt-get update", install}, &struct {
+		User string
 	}{User: "root"})
 }
 
-func (t *TemplateBase) GitClone(url, path string, opts *struct {
-	User            string
-	Mode            string
-	ForceUpload     bool
-	ResolveSymlinks bool
-}) *TemplateBase {
-	cmd := "git clone " + url
+func (t *TemplateBase) AddMcpServer(servers ...any) *TemplateBase {
+	if t.baseTemplate != "mcp-gateway" {
+		panic(&shared.BuildError{Message: "MCP servers can only be added to mcp-gateway template"})
+	}
+	serverList := flattenStringArgs(servers)
+	if len(serverList) == 0 {
+		return t
+	}
+	return t.RunCmd("mcp-gateway pull "+strings.Join(serverList, " "), &struct {
+		User string
+	}{User: "root"})
+}
+
+func (t *TemplateBase) GitClone(url string, args ...any) *TemplateBase {
+	path := ""
+	var opts any
+	if len(args) > 0 {
+		if p, ok := args[0].(string); ok {
+			path = p
+			if len(args) > 1 {
+				opts = args[1]
+			}
+		} else {
+			opts = args[0]
+		}
+	}
+	parts := []string{"git", "clone", url}
+	if branch := optionString(opts, "Branch", "branch"); branch != "" {
+		parts = append(parts, "--branch "+branch, "--single-branch")
+	}
+	if depth := optionInt(opts, "Depth", "depth"); depth > 0 {
+		parts = append(parts, "--depth "+strconv.Itoa(depth))
+	}
 	if path != "" {
-		cmd += " " + path
+		parts = append(parts, path)
 	}
-	runOpts := &struct {
-		Force bool
-		User  string
-	}{}
-	if opts != nil {
-		runOpts.User = opts.User
-	}
-	return t.RunCmd(cmd, runOpts)
+	return t.RunCmd(strings.Join(parts, " "), &struct {
+		User string
+	}{User: optionString(opts, "User", "user")})
 }
 
 func (t *TemplateBase) SetEnvs(envs map[string]string) *TemplateBase {
 	if len(envs) == 0 {
 		return t
 	}
-	for k, v := range envs {
+	keys := make([]string, 0, len(envs))
+	for k := range envs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := envs[k]
 		t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: []string{k, v}, Force: t.forceNextLayer})
 	}
 	return t
@@ -349,9 +405,9 @@ func (t *TemplateBase) SkipCache() *TemplateBase {
 	return t
 }
 
-func (t *TemplateBase) SetStartCmd(startCommand string, readyCommand interface{}) *TemplateBase {
+func (t *TemplateBase) SetStartCmd(startCommand string, readyCommand ...interface{}) *TemplateBase {
 	t.startCmd = startCommand
-	if cmd, ok := resolveReadyCommand(readyCommand); ok {
+	if cmd, ok := resolveReadyCommand(firstOpt(readyCommand)); ok {
 		t.readyCmd = cmd
 	}
 	return t
@@ -365,13 +421,18 @@ func (t *TemplateBase) SetReadyCmd(readyCommand interface{}) *TemplateBase {
 }
 
 func (t *TemplateBase) BetaDevContainerPrebuild(devcontainerDirectory string) *TemplateBase {
+	if t.baseTemplate != "devcontainer" {
+		panic(&shared.BuildError{Message: "Devcontainers can only used in the devcontainer template"})
+	}
 	return t.RunCmd("devcontainer build --workspace-folder "+devcontainerDirectory, &struct {
-		Force bool
-		User  string
+		User string
 	}{User: "root"})
 }
 
 func (t *TemplateBase) BetaSetDevContainerStart(devcontainerDirectory string) *TemplateBase {
+	if t.baseTemplate != "devcontainer" {
+		panic(&shared.BuildError{Message: "Devcontainers can only used in the devcontainer template"})
+	}
 	return t.SetStartCmd(
 		"sudo devcontainer up --workspace-folder "+devcontainerDirectory+
 			" && sudo /prepare-exec.sh "+devcontainerDirectory+
@@ -630,6 +691,25 @@ func resolveReadyCommand(readyCommand interface{}) (string, bool) {
 	}
 }
 
+func readGCPServiceAccountJSON(contextPath string, pathOrContent any) string {
+	switch value := pathOrContent.(type) {
+	case nil:
+		return ""
+	case string:
+		data, err := os.ReadFile(filepathJoinIfRelative(contextPath, value))
+		if err != nil {
+			panic(&shared.BuildError{Message: err.Error()})
+		}
+		return string(data)
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			panic(&shared.BuildError{Message: err.Error()})
+		}
+		return string(data)
+	}
+}
+
 func filepathJoinIfRelative(base, value string) string {
 	if base == "" || value == "" {
 		return value
@@ -638,6 +718,227 @@ func filepathJoinIfRelative(base, value string) string {
 		return value
 	}
 	return base + string(os.PathSeparator) + value
+}
+
+func firstOpt(values []any) any {
+	if len(values) == 0 {
+		return nil
+	}
+	return values[0]
+}
+
+func installArgs(values []any) (packages any, opts any) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) == 1 {
+		return values[0], nil
+	}
+	return values[0], values[1]
+}
+
+func stringList(value any) []string {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []string{v}
+	case []string:
+		return append([]string{}, v...)
+	case []any:
+		result := make([]string, 0, len(v))
+		for _, item := range v {
+			result = append(result, fmt.Sprint(item))
+		}
+		return result
+	default:
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) {
+			result := make([]string, 0, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				result = append(result, fmt.Sprint(rv.Index(i).Interface()))
+			}
+			return result
+		}
+		return []string{fmt.Sprint(value)}
+	}
+}
+
+func flattenStringArgs(values []any) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, stringList(value)...)
+	}
+	return result
+}
+
+func optionBool(opts any, names ...string) bool {
+	value, ok := optionValue(opts, names...)
+	if !ok {
+		return false
+	}
+	switch v := value.(type) {
+	case bool:
+		return v
+	case *bool:
+		return v != nil && *v
+	case string:
+		parsed, _ := strconv.ParseBool(v)
+		return parsed
+	default:
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && rv.Kind() == reflect.Bool {
+			return rv.Bool()
+		}
+		return false
+	}
+}
+
+func optionBoolDefault(opts any, defaultValue bool, names ...string) bool {
+	if _, ok := optionValue(opts, names...); !ok {
+		return defaultValue
+	}
+	return optionBool(opts, names...)
+}
+
+func optionString(opts any, names ...string) string {
+	value, ok := optionValue(opts, names...)
+	if !ok || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	case *string:
+		if v == nil {
+			return ""
+		}
+		return *v
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
+func optionInt(opts any, names ...string) int {
+	value, ok := optionValue(opts, names...)
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case int:
+		return v
+	case int8, int16, int32, int64:
+		return int(reflect.ValueOf(value).Int())
+	case uint, uint8, uint16, uint32, uint64:
+		return int(reflect.ValueOf(value).Uint())
+	case string:
+		parsed, _ := strconv.Atoi(v)
+		return parsed
+	default:
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() {
+			switch rv.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				return int(rv.Int())
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				return int(rv.Uint())
+			}
+		}
+		return 0
+	}
+}
+
+func optionMode(opts any) string {
+	value, ok := optionValue(opts, "Mode", "mode")
+	if !ok || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	case int:
+		if v == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%04o", v)
+	case int8, int16, int32, int64:
+		n := reflect.ValueOf(value).Int()
+		if n == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%04o", n)
+	case uint, uint8, uint16, uint32, uint64:
+		n := reflect.ValueOf(value).Uint()
+		if n == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%04o", n)
+	default:
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() {
+			switch rv.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				n := rv.Int()
+				if n == 0 {
+					return ""
+				}
+				return fmt.Sprintf("%04o", n)
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				n := rv.Uint()
+				if n == 0 {
+					return ""
+				}
+				return fmt.Sprintf("%04o", n)
+			}
+		}
+		return fmt.Sprint(value)
+	}
+}
+
+func optionValue(opts any, names ...string) (any, bool) {
+	if opts == nil {
+		return nil, false
+	}
+	if m, ok := opts.(map[string]any); ok {
+		for _, name := range names {
+			if value, ok := m[name]; ok {
+				return value, true
+			}
+		}
+	}
+
+	rv := reflect.ValueOf(opts)
+	for rv.IsValid() && rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil, false
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return nil, false
+	}
+	if rv.Kind() == reflect.Map && rv.Type().Key().Kind() == reflect.String {
+		for _, name := range names {
+			value := rv.MapIndex(reflect.ValueOf(name))
+			if value.IsValid() && value.CanInterface() {
+				return value.Interface(), true
+			}
+		}
+		return nil, false
+	}
+	if rv.Kind() != reflect.Struct {
+		return nil, false
+	}
+	for _, name := range names {
+		field := rv.FieldByName(name)
+		if field.IsValid() && field.CanInterface() {
+			return field.Interface(), true
+		}
+	}
+	return nil, false
 }
 
 // newApiClientFromBuildOptions creates an ApiClient from BuildOptions.
@@ -654,7 +955,7 @@ func newApiClientFromBuildOptions(opts *BuildOptions) (*api.ApiClient, error) {
 		config.RequestTimeoutMs = *opts.RequestTimeoutMs
 	}
 	if config.Domain == "" {
-		config.Domain = "e2b.dev"
+		config.Domain = "e2b.app"
 	}
 	return api.NewApiClient(config, api.WithRequireApiKey())
 }
@@ -673,7 +974,7 @@ func newApiClientFromStatusOptions(opts *GetBuildStatusOptions) (*api.ApiClient,
 		config.RequestTimeoutMs = *opts.RequestTimeoutMs
 	}
 	if config.Domain == "" {
-		config.Domain = "e2b.dev"
+		config.Domain = "e2b.app"
 	}
 	return api.NewApiClient(config, api.WithRequireApiKey())
 }
@@ -815,6 +1116,13 @@ func Exists(ctx context.Context, name string, opts *BuildOptions) (bool, error) 
 	return checkAliasExists(ctx, client, name)
 }
 
+// AliasExists checks whether a template with the given alias exists.
+//
+// Deprecated: Use Exists instead.
+func AliasExists(ctx context.Context, alias string, opts *BuildOptions) (bool, error) {
+	return Exists(ctx, alias, opts)
+}
+
 // AssignTags assigns tags to a template.
 func AssignTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) (*TemplateTagInfo, error) {
 	if opts == nil {
@@ -855,15 +1163,4 @@ func GetTags(ctx context.Context, templateID string, opts *BuildOptions) ([]Temp
 	}
 
 	return getTemplateTags(ctx, client, templateID)
-}
-
-func joinPackages(packages []string) string {
-	result := ""
-	for i, p := range packages {
-		if i > 0 {
-			result += " "
-		}
-		result += p
-	}
-	return result
 }

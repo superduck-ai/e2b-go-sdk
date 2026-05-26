@@ -20,7 +20,7 @@ type TemplateFromImage interface {
 	FromNodeImage(variant ...string) *TemplateBase
 	FromBunImage(variant ...string) *TemplateBase
 	FromBaseImage() *TemplateBase
-	FromImage(baseImage string, credentials *RegistryCredentials) *TemplateBase
+	FromImage(baseImage string, credentials ...*RegistryCredentials) *TemplateBase
 	FromTemplate(template string) *TemplateBase
 	FromDockerfile(dockerfileContentOrPath string) *TemplateBase
 	FromAWSRegistry(image string, credentials *AWSRegistryCredentials) *TemplateBase
@@ -29,62 +29,24 @@ type TemplateFromImage interface {
 }
 
 type TemplateBuilder interface {
-	Copy(src, dest string, opts *struct {
-		User            string
-		Mode            string
-		ForceUpload     bool
-		ResolveSymlinks bool
-	}) *TemplateBase
+	Copy(src any, dest string, opts ...any) *TemplateBase
 	CopyItems(items []CopyItem) *TemplateBase
-	Remove(path string, opts *struct {
-		Force bool
-	}) *TemplateBase
-	Rename(src, dest string, opts *struct {
-		User            string
-		Mode            string
-		ForceUpload     bool
-		ResolveSymlinks bool
-	}) *TemplateBase
-	MakeDir(path string, opts *struct {
-		User            string
-		Mode            string
-		ForceUpload     bool
-		ResolveSymlinks bool
-	}) *TemplateBase
-	MakeSymlink(src, dest string, opts *struct {
-		User            string
-		Mode            string
-		ForceUpload     bool
-		ResolveSymlinks bool
-	}) *TemplateBase
-	RunCmd(command string, opts *struct {
-		Force bool
-		User  string
-	}) *TemplateBase
+	Remove(path any, opts ...any) *TemplateBase
+	Rename(src, dest string, opts ...any) *TemplateBase
+	MakeDir(path any, opts ...any) *TemplateBase
+	MakeSymlink(src, dest string, opts ...any) *TemplateBase
+	RunCmd(command any, opts ...any) *TemplateBase
 	SetWorkdir(workdir string) *TemplateBase
 	SetUser(user string) *TemplateBase
-	PipInstall(packages []string, opts *struct {
-		Force bool
-	}) *TemplateBase
-	NpmInstall(packages []string, opts *struct {
-		Force bool
-	}) *TemplateBase
-	BunInstall(packages []string, opts *struct {
-		Force bool
-	}) *TemplateBase
-	AptInstall(packages []string, opts *struct {
-		Force bool
-	}) *TemplateBase
-	AddMcpServer(servers ...string) *TemplateBase
-	GitClone(url, path string, opts *struct {
-		User            string
-		Mode            string
-		ForceUpload     bool
-		ResolveSymlinks bool
-	}) *TemplateBase
+	PipInstall(args ...any) *TemplateBase
+	NpmInstall(args ...any) *TemplateBase
+	BunInstall(args ...any) *TemplateBase
+	AptInstall(packages any, opts ...any) *TemplateBase
+	AddMcpServer(servers ...any) *TemplateBase
+	GitClone(url string, args ...any) *TemplateBase
 	SetEnvs(envs map[string]string) *TemplateBase
 	SkipCache() *TemplateBase
-	SetStartCmd(startCommand string, readyCommand interface{}) *TemplateBase
+	SetStartCmd(startCommand string, readyCommand ...interface{}) *TemplateBase
 	SetReadyCmd(readyCommand interface{}) *TemplateBase
 	BetaDevContainerPrebuild(devcontainerDirectory string) *TemplateBase
 	BetaSetDevContainerStart(devcontainerDirectory string) *TemplateBase
@@ -192,11 +154,11 @@ type Instruction struct {
 }
 
 type CopyItem struct {
-	Src             string
+	Src             any
 	Dest            string
 	ForceUpload     bool
 	User            string
-	Mode            string
+	Mode            int
 	ResolveSymlinks bool
 }
 
@@ -213,5 +175,5 @@ type AWSRegistryCredentials struct {
 }
 
 type GCPRegistryCredentials struct {
-	ServiceAccountJSON string
+	ServiceAccountJSON any
 }

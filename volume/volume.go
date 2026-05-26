@@ -628,5 +628,9 @@ func isZeroVolumeEntryStat(entry VolumeEntryStat) bool {
 		entry.Type == "" &&
 		entry.Name == "" &&
 		entry.Path == "" &&
-		entry.Size == 0
+		entry.Size == 0 &&
+		entry.UID == 0 &&
+		entry.GID == 0 &&
+		entry.Mode == 0 &&
+		entry.Target == ""
 }

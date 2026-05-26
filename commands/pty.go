@@ -126,7 +126,7 @@ func (p *Pty) connectServerStream(ctx context.Context, path string, reqBody inte
 		return nil, err
 	}
 	url := p.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +184,10 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 			Cwd:  opts.Cwd,
 		},
 		Pty: &process.PTY{
-			Cols: cols,
-			Rows: rows,
+			Size: &process.PTYSize{
+				Cols: cols,
+				Rows: rows,
+			},
 		},
 	}
 
@@ -292,7 +294,7 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 		opts = &PtyConnectOpts{}
 	}
 
-	req := &process.ConnectRequest{Pid: pid}
+	req := &process.ConnectRequest{Process: process.PidSelector(pid)}
 	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, p.requestTimeoutFromConnectOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := p.connectServerStream(streamCtx, "/process.Process/Connect", req, "")
@@ -394,8 +396,8 @@ func (p *Pty) SendInput(ctx context.Context, pid uint32, data []byte, opts *Comm
 	defer cancel()
 
 	req := &process.SendInputRequest{
-		Pid: pid,
-		Pty: data,
+		Process: process.PidSelector(pid),
+		Input:   &process.ProcessInput{Pty: data},
 	}
 	return p.connectUnary(reqCtx, "/process.Process/SendInput", req, nil, "")
 }
@@ -405,10 +407,12 @@ func (p *Pty) Resize(ctx context.Context, pid uint32, cols, rows uint32, opts *C
 	defer cancel()
 
 	req := &process.UpdateRequest{
-		Pid: pid,
-		Size: &process.PTY{
-			Cols: cols,
-			Rows: rows,
+		Process: process.PidSelector(pid),
+		Pty: &process.PTY{
+			Size: &process.PTYSize{
+				Cols: cols,
+				Rows: rows,
+			},
 		},
 	}
 	return p.connectUnary(reqCtx, "/process.Process/Update", req, nil, "")
@@ -419,8 +423,8 @@ func (p *Pty) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (b
 	defer cancel()
 
 	req := &process.SendSignalRequest{
-		Pid:    pid,
-		Signal: process.SignalSIGKILL,
+		Process: process.PidSelector(pid),
+		Signal:  process.SignalSIGKILL,
 	}
 	err := p.connectUnary(reqCtx, "/process.Process/SendSignal", req, nil, "")
 	if err != nil {

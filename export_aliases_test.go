@@ -23,8 +23,12 @@ func TestRootAliasesExposeJsStyleFilesystemCommandAndGitTypes(t *testing.T) {
 	var _ WriteInfo = rootfs.WriteInfo{}
 	var _ EntryInfo = rootfs.EntryInfo{}
 	var _ *Filesystem = (*rootfs.Filesystem)(nil)
+	var _ FilesystemRequestOpts = rootfs.FilesystemRequestOpts{}
 	var _ FilesystemWriteOpts = rootfs.FilesystemWriteOpts{}
 	var _ FilesystemReadOpts = rootfs.FilesystemReadOpts{}
+	var _ FilesystemListOpts = rootfs.FilesystemListOpts{}
+	var _ WatchOpts = rootfs.WatchOpts{}
+	var _ WriteEntry = rootfs.WriteEntry{}
 	var _ FilesystemEventType = rootfs.FilesystemEventCreate
 	var _ FilesystemEvent = rootfs.FilesystemEvent{}
 	var _ *WatchHandle = (*rootfs.WatchHandle)(nil)
@@ -41,6 +45,8 @@ func TestRootAliasesExposeJsStyleFilesystemCommandAndGitTypes(t *testing.T) {
 	var _ CommandStartOpts = rootcmd.CommandStartOpts{}
 	var _ *Commands = (*rootcmd.Commands)(nil)
 	var _ *Pty = (*rootcmd.Pty)(nil)
+	var _ PtyCreateOpts = rootcmd.PtyCreateOpts{}
+	var _ PtyConnectOpts = rootcmd.PtyConnectOpts{}
 
 	var _ *Git = (*rootgit.Git)(nil)
 	var _ GitRequestOpts = rootgit.GitRequestOpts{}
@@ -52,6 +58,9 @@ func TestRootAliasesExposeJsStyleFilesystemCommandAndGitTypes(t *testing.T) {
 	var _ GitDeleteBranchOpts = rootgit.GitDeleteBranchOpts{}
 	var _ GitPushOpts = rootgit.GitPushOpts{}
 	var _ GitPullOpts = rootgit.GitPullOpts{}
+	var _ GitResetOpts = rootgit.GitResetOpts{}
+	var _ GitRestoreOpts = rootgit.GitRestoreOpts{}
+	var _ GitResetMode = rootgit.GitResetHard
 	var _ GitDangerouslyAuthenticateOpts = rootgit.GitDangerouslyAuthenticateOpts{}
 	var _ GitConfigOpts = rootgit.GitConfigOpts{}
 	var _ GitConfigScope = rootgit.GitConfigLocal

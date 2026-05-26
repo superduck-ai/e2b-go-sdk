@@ -9,7 +9,7 @@ import (
 // formatSandboxTimeoutError wraps message with sandbox timeout hint.
 func formatSandboxTimeoutError(message string) *TimeoutError {
 	return &TimeoutError{
-		SandboxError{
+		SandboxError: SandboxError{
 			Message: fmt.Sprintf("%s. You can increase the timeout by passing a longer timeout to the sandbox or by calling sandbox.SetTimeout()", message),
 		},
 	}

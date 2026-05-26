@@ -384,14 +384,24 @@ func (s *Sandbox) BetaPause(ctx context.Context, opts *ConnectionOpts) (bool, er
 }
 
 // CreateSnapshot creates a snapshot of the sandbox.
-func (s *Sandbox) CreateSnapshot(ctx context.Context, opts *SandboxApiOpts) (*SnapshotInfo, error) {
-	connConfig := s.resolveSandboxApiConnectionConfig(opts)
+func (s *Sandbox) CreateSnapshot(ctx context.Context, opts *CreateSnapshotOpts) (*SnapshotInfo, error) {
+	var apiOpts *SandboxApiOpts
+	if opts != nil {
+		apiOpts = &opts.SandboxApiOpts
+	}
+	connConfig := s.resolveSandboxApiConnectionConfig(apiOpts)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
 		return nil, err
 	}
 	var snapshot api.SnapshotInfo
-	_, err = apiClient.Post(ctx, "/sandboxes/"+s.SandboxID+"/snapshots", struct{}{}, &snapshot)
+	body := struct {
+		Name string `json:"name,omitempty"`
+	}{}
+	if opts != nil {
+		body.Name = opts.Name
+	}
+	_, err = apiClient.Post(ctx, "/sandboxes/"+s.SandboxID+"/snapshots", body, &snapshot)
 	if err != nil {
 		return nil, wrapSandboxNotFoundError(s.SandboxID, err)
 	}
@@ -627,7 +637,7 @@ func (s *Sandbox) GetMetrics(ctx context.Context, opts *SandboxMetricsOpts) ([]S
 		path += "?" + q
 	}
 
-	var metricsResp []api.SandboxMetrics
+	var metricsResp api.SandboxMetricsList
 	_, err = apiClient.Get(ctx, path, &metricsResp)
 	if err != nil {
 		return nil, err
@@ -635,12 +645,16 @@ func (s *Sandbox) GetMetrics(ctx context.Context, opts *SandboxMetricsOpts) ([]S
 
 	metrics := make([]SandboxMetrics, len(metricsResp))
 	for i, m := range metricsResp {
+		timestamp := m.Timestamp
+		if timestamp.IsZero() && m.TimestampUnix != 0 {
+			timestamp = time.Unix(m.TimestampUnix, 0)
+		}
 		memUsed := resolveMetricValue(m.MemUsed, m.MemUsedMiB)
 		memTotal := resolveMetricValue(m.MemTotal, m.MemTotalMiB)
 		diskUsed := resolveMetricValue(m.DiskUsed, m.DiskUsedMiB)
 		diskTotal := resolveMetricValue(m.DiskTotal, m.DiskTotalMiB)
 		metrics[i] = SandboxMetrics{
-			Timestamp:  m.Timestamp,
+			Timestamp:  timestamp,
 			CpuUsedPct: m.CpuUsedPct,
 			CpuCount:   m.CpuCount,
 			MemUsed:    memUsed,
@@ -659,7 +673,7 @@ func wrapSandboxNotFoundError(sandboxID string, err error) error {
 
 	var nfe *api.NotFoundError
 	if errors.As(err, &nfe) {
-		return &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxID)}}}
+		return &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxID)}}}
 	}
 
 	return err
@@ -672,7 +686,7 @@ func wrapPausedSandboxNotFoundError(sandboxID string, err error) error {
 
 	var nfe *api.NotFoundError
 	if errors.As(err, &nfe) {
-		return &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Paused sandbox %s not found", sandboxID)}}}
+		return &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Paused sandbox %s not found", sandboxID)}}}
 	}
 
 	return err

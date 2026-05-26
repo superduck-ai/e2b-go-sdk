@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Request/Response types for the E2B Cloud API
 
@@ -77,17 +80,80 @@ type SandboxListResponse struct {
 }
 
 type SandboxMetrics struct {
-	Timestamp    time.Time `json:"timestamp"`
-	CpuUsedPct   float64   `json:"cpuUsedPct"`
-	CpuCount     int       `json:"cpuCount"`
-	MemUsed      int64     `json:"memUsed"`
-	MemTotal     int64     `json:"memTotal"`
-	DiskUsed     int64     `json:"diskUsed"`
-	DiskTotal    int64     `json:"diskTotal"`
-	MemUsedMiB   int64     `json:"memUsedMiB"`
-	MemTotalMiB  int64     `json:"memTotalMiB"`
-	DiskUsedMiB  int64     `json:"diskUsedMiB"`
-	DiskTotalMiB int64     `json:"diskTotalMiB"`
+	Timestamp     time.Time `json:"timestamp"`
+	TimestampUnix int64     `json:"timestampUnix"`
+	CpuUsedPct    float64   `json:"cpuUsedPct"`
+	CpuCount      int       `json:"cpuCount"`
+	MemUsed       int64     `json:"memUsed"`
+	MemTotal      int64     `json:"memTotal"`
+	DiskUsed      int64     `json:"diskUsed"`
+	DiskTotal     int64     `json:"diskTotal"`
+	MemUsedMiB    int64     `json:"memUsedMiB"`
+	MemTotalMiB   int64     `json:"memTotalMiB"`
+	DiskUsedMiB   int64     `json:"diskUsedMiB"`
+	DiskTotalMiB  int64     `json:"diskTotalMiB"`
+}
+
+type SandboxMetricsList []SandboxMetrics
+
+func (m *SandboxMetricsList) UnmarshalJSON(data []byte) error {
+	var direct []SandboxMetrics
+	if err := json.Unmarshal(data, &direct); err == nil {
+		*m = direct
+		return nil
+	}
+
+	var wrapped struct {
+		Data    []SandboxMetrics `json:"data"`
+		Metrics []SandboxMetrics `json:"metrics"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	if wrapped.Data != nil {
+		*m = wrapped.Data
+		return nil
+	}
+	if wrapped.Metrics != nil {
+		*m = wrapped.Metrics
+		return nil
+	}
+
+	var bySandbox map[string][]SandboxMetrics
+	if err := json.Unmarshal(data, &bySandbox); err == nil {
+		result := make([]SandboxMetrics, 0)
+		for _, metrics := range bySandbox {
+			result = append(result, metrics...)
+		}
+		*m = result
+		return nil
+	}
+
+	var bySandboxSingle map[string]SandboxMetrics
+	result := make([]SandboxMetrics, 0)
+	if err := json.Unmarshal(data, &bySandboxSingle); err == nil {
+		for _, metric := range bySandboxSingle {
+			result = append(result, metric)
+		}
+		*m = result
+		return nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	if _, ok := object["sandboxID"]; ok {
+		*m = nil
+		return nil
+	}
+	if _, ok := object["templateID"]; ok {
+		*m = nil
+		return nil
+	}
+
+	*m = result
+	return nil
 }
 
 type SnapshotInfo struct {

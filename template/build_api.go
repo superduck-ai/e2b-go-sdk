@@ -242,6 +242,9 @@ func checkAliasExists(ctx context.Context, client *api.ApiClient, name string) (
 		if _, ok := err.(*api.NotFoundError); ok {
 			return false, nil
 		}
+		if apiErr, ok := err.(*api.ApiError); ok && apiErr.StatusCode == http.StatusForbidden {
+			return true, nil
+		}
 		return false, err
 	}
 	return true, nil

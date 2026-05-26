@@ -178,7 +178,7 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 		return nil, err
 	}
 	url := c.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +269,8 @@ func (c *Commands) SendStdin(ctx context.Context, pid uint32, data []byte, opts 
 	defer cancel()
 
 	req := &process.SendInputRequest{
-		Pid:   pid,
-		Stdin: data,
+		Process: process.PidSelector(pid),
+		Input:   &process.ProcessInput{Stdin: data},
 	}
 	return c.connectUnary(reqCtx, "/process.Process/SendInput", req, nil, "")
 }
@@ -281,8 +281,12 @@ func (c *Commands) closeStdin(ctx context.Context, pid uint32, opts *CommandRequ
 	}
 	reqCtx, cancel := requestContext(ctx, c.requestTimeout(opts))
 	defer cancel()
-	req := &process.CloseStdinRequest{Pid: pid}
+	req := &process.CloseStdinRequest{Process: process.PidSelector(pid)}
 	return c.connectUnary(reqCtx, "/process.Process/CloseStdin", req, nil, "")
+}
+
+func (c *Commands) CloseStdin(ctx context.Context, pid uint32, opts *CommandRequestOpts) error {
+	return c.closeStdin(ctx, pid, opts)
 }
 
 func (c *Commands) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (bool, error) {
@@ -290,8 +294,8 @@ func (c *Commands) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpt
 	defer cancel()
 
 	req := &process.SendSignalRequest{
-		Pid:    pid,
-		Signal: process.SignalSIGKILL,
+		Process: process.PidSelector(pid),
+		Signal:  process.SignalSIGKILL,
 	}
 	err := c.connectUnary(reqCtx, "/process.Process/SendSignal", req, nil, "")
 	if err != nil {
@@ -310,7 +314,7 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 		opts = &CommandConnectOpts{}
 	}
 	user := ""
-	req := &process.ConnectRequest{Pid: pid}
+	req := &process.ConnectRequest{Process: process.PidSelector(pid)}
 	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, c.requestTimeoutFromConnectOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := c.connectServerStream(streamCtx, "/process.Process/Connect", req, user)
@@ -381,6 +385,9 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 					return
 				}
 				c.handleProcessEvent(msg.payload, handle)
+				if handle.GetExitCode() != nil {
+					return
+				}
 			}
 		}
 	}()

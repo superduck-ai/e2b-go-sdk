@@ -404,6 +404,82 @@ func TestWatchDirSkipsUnknownEventTypes(t *testing.T) {
 	}
 }
 
+func TestWatchDirSendsConnectEnvelopeRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/WatchDir" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		payload := assertConnectEnvelopeRequest(t, r)
+		if !bytes.Contains(payload, []byte(`"/tmp"`)) {
+			t.Fatalf("unexpected watch payload: %s", string(payload))
+		}
+		w.WriteHeader(http.StatusOK)
+		writeEnvelope(t, w, 0x00, []byte(`{"started":true}`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	fs := NewFilesystem(testFilesystemConfig(server.URL, 0), "1.0.0")
+	handle, err := fs.WatchDir(context.Background(), "/tmp", nil, nil)
+	if err != nil {
+		t.Fatalf("WatchDir returned error: %v", err)
+	}
+	handle.Stop()
+}
+
+func TestWatchDirHandlesCurrentConnectJSONEventShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/filesystem.Filesystem/WatchDir" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		writeEnvelope(t, w, 0x00, []byte(`{"start":{}}`))
+		writeEnvelope(t, w, 0x00, []byte(`{"filesystem":{"name":"file.txt","type":1}}`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	fs := NewFilesystem(testFilesystemConfig(server.URL, 0), "1.0.0")
+	eventCh := make(chan FilesystemEvent, 1)
+	handle, err := fs.WatchDir(context.Background(), "/tmp", func(event FilesystemEvent) {
+		eventCh <- event
+	}, nil)
+	if err != nil {
+		t.Fatalf("WatchDir returned error: %v", err)
+	}
+	defer handle.Stop()
+
+	select {
+	case event := <-eventCh:
+		if event.Name != "file.txt" || event.Type != FilesystemEventCreate {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem event")
+	}
+}
+
+func TestFilesystemEventTypeValuesMatchCurrentTs(t *testing.T) {
+	expected := map[FilesystemEventType]string{
+		FilesystemEventChmod:  "chmod",
+		FilesystemEventCreate: "create",
+		FilesystemEventRemove: "remove",
+		FilesystemEventRename: "rename",
+		FilesystemEventWrite:  "write",
+	}
+	for got, want := range expected {
+		if string(got) != want {
+			t.Fatalf("unexpected filesystem event value: got %q want %q", got, want)
+		}
+	}
+}
+
 func TestWatchDirStopCallsOnExitWithoutError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/filesystem.Filesystem/WatchDir" {
@@ -547,4 +623,26 @@ func writeEnvelope(t *testing.T, w http.ResponseWriter, flags byte, payload []by
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		t.Fatalf("failed to write envelope: %v", err)
 	}
+}
+
+func assertConnectEnvelopeRequest(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	if got := r.Header.Get("Content-Type"); got != "application/connect+json" {
+		t.Fatalf("expected connect content type, got %q", got)
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("failed to read request body: %v", err)
+	}
+	if len(body) < 5 {
+		t.Fatalf("expected connect envelope body, got %d bytes", len(body))
+	}
+	if body[0] != 0 {
+		t.Fatalf("expected uncompressed envelope flag 0, got %d", body[0])
+	}
+	length := int(binary.BigEndian.Uint32(body[1:5]))
+	if length != len(body)-5 {
+		t.Fatalf("expected envelope length %d, got %d payload bytes", length, len(body)-5)
+	}
+	return body[5:]
 }

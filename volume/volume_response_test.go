@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -87,5 +88,25 @@ func TestVolumeWriteFileErrorsWhenResponseDataIsMissing(t *testing.T) {
 	}
 	if err.Error() != "Response data is missing" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVolumeEntryStatDecodesCurrentTsSchemaFields(t *testing.T) {
+	var entry VolumeEntryStat
+	if err := json.Unmarshal([]byte(`{
+		"name":"file.txt",
+		"path":"/file.txt",
+		"type":"symlink",
+		"size":12,
+		"uid":1000,
+		"gid":1001,
+		"mode":420,
+		"target":"/target"
+	}`), &entry); err != nil {
+		t.Fatalf("failed to decode entry: %v", err)
+	}
+
+	if entry.UID != 1000 || entry.GID != 1001 || entry.Mode != 420 || entry.Target != "/target" {
+		t.Fatalf("entry metadata did not decode like TS schema: %#v", entry)
 	}
 }

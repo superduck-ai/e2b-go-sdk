@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,9 +50,7 @@ func TestInitPassesPathAsArgumentInsteadOfWorkingDirectory(t *testing.T) {
 		if r.URL.Path != "/process.Process/Start" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("failed to decode start request: %v", err)
-		}
+		got = decodeStartRequest(t, r)
 
 		w.WriteHeader(http.StatusOK)
 		var stream bytes.Buffer
@@ -138,9 +137,7 @@ func TestPushWithoutRemoteDoesNotDefaultToOrigin(t *testing.T) {
 		if r.URL.Path != "/process.Process/Start" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("failed to decode start request: %v", err)
-		}
+		got = decodeStartRequest(t, r)
 
 		w.WriteHeader(http.StatusOK)
 		var stream bytes.Buffer
@@ -177,6 +174,57 @@ func TestPushWithoutRemoteDoesNotDefaultToOrigin(t *testing.T) {
 	}
 	if got.Process.Args[2] != "git -C '/tmp/repo' push" {
 		t.Fatalf("unexpected git push command: %q", got.Process.Args[2])
+	}
+}
+
+func TestBranchesEscapesFormatArgument(t *testing.T) {
+	var got process.StartRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		got = decodeStartRequest(t, r)
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"data":{"stdout":"bWFzdGVyCSoK"}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	branches, err := g.Branches(context.Background(), "/tmp/repo", nil)
+	if err != nil {
+		t.Fatalf("Branches returned error: %v", err)
+	}
+	if branches.CurrentBranch != "master" {
+		t.Fatalf("unexpected current branch: %#v", branches)
+	}
+	if got.Process == nil || len(got.Process.Args) != 3 {
+		t.Fatalf("unexpected process config: %#v", got.Process)
+	}
+	expected := "git -C '/tmp/repo' branch '--format=%(refname:short)\t%(HEAD)'"
+	if got.Process.Args[2] != expected {
+		t.Fatalf("unexpected git branches command: %q", got.Process.Args[2])
 	}
 }
 
@@ -268,10 +316,7 @@ func TestDangerouslyAuthenticateUsesPrintfCredentialApprove(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 
-		var got process.StartRequest
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("failed to decode start request: %v", err)
-		}
+		got := decodeStartRequest(t, r)
 		if got.Process == nil || len(got.Process.Args) != 3 {
 			t.Fatalf("unexpected process config: %#v", got.Process)
 		}
@@ -338,9 +383,7 @@ func TestPushWithCredentialsRequiresExplicitRemoteWhenMultipleRemotes(t *testing
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var got process.StartRequest
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("failed to decode start request: %v", err)
-		}
+		got = decodeStartRequest(t, r)
 		if got.Process == nil || len(got.Process.Args) != 3 {
 			t.Fatalf("unexpected process config: %#v", got.Process)
 		}
@@ -392,9 +435,7 @@ func TestPullWithCredentialsRequiresExplicitRemoteWhenMultipleRemotes(t *testing
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var got process.StartRequest
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("failed to decode start request: %v", err)
-		}
+		got = decodeStartRequest(t, r)
 		if got.Process == nil || len(got.Process.Args) != 3 {
 			t.Fatalf("unexpected process config: %#v", got.Process)
 		}
@@ -453,6 +494,33 @@ func writeEnvelope(t *testing.T, buf *bytes.Buffer, flags byte, payload []byte) 
 	if _, err := buf.Write(payload); err != nil {
 		t.Fatalf("failed to write payload: %v", err)
 	}
+}
+
+func decodeStartRequest(t *testing.T, r *http.Request) process.StartRequest {
+	t.Helper()
+	if got := r.Header.Get("Content-Type"); got != "application/connect+json" {
+		t.Fatalf("expected connect content type, got %q", got)
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("failed to read start request: %v", err)
+	}
+	if len(body) < 5 {
+		t.Fatalf("expected connect envelope body, got %d bytes", len(body))
+	}
+	if body[0] != 0 {
+		t.Fatalf("expected uncompressed envelope flag 0, got %d", body[0])
+	}
+	length := int(binary.BigEndian.Uint32(body[1:5]))
+	if length != len(body)-5 {
+		t.Fatalf("expected envelope length %d, got %d payload bytes", length, len(body)-5)
+	}
+
+	var got process.StartRequest
+	if err := json.Unmarshal(body[5:], &got); err != nil {
+		t.Fatalf("failed to decode start request: %v", err)
+	}
+	return got
 }
 
 func mustJSON(t *testing.T, value any) []byte {

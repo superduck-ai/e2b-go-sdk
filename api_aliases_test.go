@@ -46,6 +46,10 @@ func TestRootApiClientUsesRootConnectionConfig(t *testing.T) {
 }
 
 func TestRootApiClientAllowsNilConfig(t *testing.T) {
+	t.Setenv("E2B_DOMAIN", "")
+	t.Setenv("E2B_API_URL", "")
+	t.Setenv("E2B_DEBUG", "")
+
 	client, err := NewApiClient(nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil config to use defaults, got %v", err)

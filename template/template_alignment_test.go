@@ -243,6 +243,27 @@ func TestSetReadyCmdAcceptsStringLikeJs(t *testing.T) {
 	}
 }
 
+func TestReadyCmdHelpersMatchCurrentTs(t *testing.T) {
+	cases := []struct {
+		name string
+		got  *ReadyCmd
+		want string
+	}{
+		{name: "port", got: WaitForPort(8000), want: "ss -tuln | grep :8000"},
+		{name: "url", got: WaitForURL("http://localhost:3000/health", 201), want: `curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health | grep -q "201"`},
+		{name: "process", got: WaitForProcess("nginx"), want: "pgrep nginx > /dev/null"},
+		{name: "file", got: WaitForFile("/tmp/ready"), want: "[ -f /tmp/ready ]"},
+		{name: "timeout-minimum", got: WaitForTimeout(500), want: "sleep 1"},
+		{name: "timeout-floor", got: WaitForTimeout(2500), want: "sleep 2"},
+	}
+
+	for _, tc := range cases {
+		if tc.got.GetCmd() != tc.want {
+			t.Fatalf("%s ready command mismatch: got %q want %q", tc.name, tc.got.GetCmd(), tc.want)
+		}
+	}
+}
+
 func TestFromDockerfileAcceptsFilePathLikeJs(t *testing.T) {
 	contextDir := t.TempDir()
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
@@ -261,24 +282,206 @@ func TestFromDockerfileAcceptsFilePathLikeJs(t *testing.T) {
 }
 
 func TestTemplateBaseExposesJsDevcontainerAndMcpHelpers(t *testing.T) {
-	template := Template(nil).
+	mcpTemplate := Template(nil).
+		FromTemplate("mcp-gateway").
 		AddMcpServer("exa", "brave").
+		serialize()
+	if len(mcpTemplate.Steps) != 1 || mcpTemplate.Steps[0].Args[0] != "mcp-gateway pull exa brave" {
+		t.Fatalf("unexpected MCP helper command: %#v", mcpTemplate.Steps)
+	}
+
+	devcontainerTemplate := Template(nil).
+		FromTemplate("devcontainer").
 		BetaDevContainerPrebuild("/workspace").
 		BetaSetDevContainerStart("/workspace")
 
-	serialized := template.serialize()
-	if len(serialized.Steps) < 2 {
+	serialized := devcontainerTemplate.serialize()
+	if len(serialized.Steps) < 1 {
 		t.Fatalf("expected helper methods to add steps, got %#v", serialized)
 	}
-	if serialized.Steps[0].Args[0] != "mcp-gateway pull exa brave" {
-		t.Fatalf("unexpected MCP helper command: %#v", serialized.Steps[0])
-	}
-	if serialized.Steps[1].Args[0] != "devcontainer build --workspace-folder /workspace" {
-		t.Fatalf("unexpected devcontainer prebuild command: %#v", serialized.Steps[1])
+	if serialized.Steps[0].Args[0] != "devcontainer build --workspace-folder /workspace" {
+		t.Fatalf("unexpected devcontainer prebuild command: %#v", serialized.Steps[0])
 	}
 	if serialized.StartCmd == "" || serialized.ReadyCmd != "[ -f /devcontainer.up ]" {
 		t.Fatalf("expected devcontainer start helper to set start and ready commands, got %#v", serialized)
 	}
+}
+
+func TestTemplateBaseRejectsMcpServerWithoutMcpGatewayBase(t *testing.T) {
+	assertBuildPanic(t, "MCP servers can only be added to mcp-gateway template", func() {
+		Template(nil).FromBaseImage().AddMcpServer("exa")
+	})
+}
+
+func TestTemplateBaseRejectsDevcontainerHelpersWithoutDevcontainerBase(t *testing.T) {
+	assertBuildPanic(t, "Devcontainers can only used in the devcontainer template", func() {
+		Template(nil).FromBaseImage().BetaDevContainerPrebuild("/workspace")
+	})
+	assertBuildPanic(t, "Devcontainers can only used in the devcontainer template", func() {
+		Template(nil).FromBaseImage().BetaSetDevContainerStart("/workspace")
+	})
+}
+
+func TestTemplateBuilderDefaultsAndHelpersMatchCurrentTs(t *testing.T) {
+	defaultTemplate := Template(nil).serialize()
+	if defaultTemplate.FromImage != "e2bdev/base" {
+		t.Fatalf("expected default base image e2bdev/base, got %#v", defaultTemplate.FromImage)
+	}
+
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "debian", got: Template(nil).FromDebianImage().serialize().FromImage, want: "debian:stable"},
+		{name: "ubuntu", got: Template(nil).FromUbuntuImage().serialize().FromImage, want: "ubuntu:latest"},
+		{name: "python", got: Template(nil).FromPythonImage().serialize().FromImage, want: "python:3"},
+		{name: "node", got: Template(nil).FromNodeImage().serialize().FromImage, want: "node:lts"},
+		{name: "bun", got: Template(nil).FromBunImage().serialize().FromImage, want: "oven/bun:latest"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Fatalf("%s default image mismatch: got %q want %q", tc.name, tc.got, tc.want)
+		}
+	}
+
+	template := Template(nil).
+		Copy([]string{"a.txt", "b.txt"}, "/app", &struct {
+			ForceUpload     bool
+			User            string
+			Mode            int
+			ResolveSymlinks bool
+		}{ForceUpload: true, User: "root", Mode: 0o755, ResolveSymlinks: true}).
+		Remove([]string{"/tmp/a", "/tmp/b"}, &struct {
+			Recursive bool
+			Force     bool
+			User      string
+		}{Recursive: true, Force: true, User: "root"}).
+		Rename("/tmp/old", "/tmp/new", &struct {
+			Force bool
+			User  string
+		}{Force: true, User: "root"}).
+		MakeDir([]string{"/app/logs", "/app/cache"}, &struct {
+			Mode int
+			User string
+		}{Mode: 0o755, User: "root"}).
+		MakeSymlink("/usr/bin/python3", "/usr/bin/python", &struct {
+			Force bool
+			User  string
+		}{Force: true, User: "root"}).
+		RunCmd([]string{"echo one", "echo two"}, &struct{ User string }{User: "root"}).
+		PipInstall("numpy", nil).
+		PipInstall([]string{"pandas"}, &struct{ G bool }{G: false}).
+		NpmInstall("tsx", &struct{ G bool }{G: true}).
+		NpmInstall("typescript", &struct{ Dev bool }{Dev: true}).
+		BunInstall("tsx", &struct{ G bool }{G: true}).
+		BunInstall("typescript", &struct{ Dev bool }{Dev: true}).
+		AptInstall([]string{"git", "curl"}, &struct {
+			NoInstallRecommends bool
+			FixMissing          bool
+		}{NoInstallRecommends: true, FixMissing: true}).
+		GitClone("https://github.com/e2b-dev/E2B.git", "/src", &struct {
+			Branch string
+			Depth  int
+			User   string
+		}{Branch: "main", Depth: 1, User: "root"})
+
+	steps := template.serialize().Steps
+	assertStepArgs := func(index int, want []string) {
+		t.Helper()
+		if !reflect.DeepEqual(steps[index].Args, want) {
+			t.Fatalf("step %d args mismatch:\n got %#v\nwant %#v", index, steps[index].Args, want)
+		}
+	}
+	assertStepArgs(0, []string{"a.txt", "/app", "root", "0755"})
+	assertStepArgs(1, []string{"b.txt", "/app", "root", "0755"})
+	assertStepArgs(2, []string{"rm -r -f /tmp/a /tmp/b", "root"})
+	assertStepArgs(3, []string{"mv /tmp/old /tmp/new -f", "root"})
+	assertStepArgs(4, []string{"mkdir -p -m 0755 /app/logs /app/cache", "root"})
+	assertStepArgs(5, []string{"ln -s -f /usr/bin/python3 /usr/bin/python", "root"})
+	assertStepArgs(6, []string{"echo one && echo two", "root"})
+	assertStepArgs(7, []string{"pip install numpy", "root"})
+	assertStepArgs(8, []string{"pip install --user pandas"})
+	assertStepArgs(9, []string{"npm install -g tsx", "root"})
+	assertStepArgs(10, []string{"npm install --save-dev typescript"})
+	assertStepArgs(11, []string{"bun install -g tsx", "root"})
+	assertStepArgs(12, []string{"bun install --dev typescript"})
+	assertStepArgs(13, []string{"apt-get update && DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes apt-get install -y --no-install-recommends --fix-missing git curl", "root"})
+	assertStepArgs(14, []string{"git clone https://github.com/e2b-dev/E2B.git --branch main --single-branch --depth 1 /src", "root"})
+}
+
+func TestTemplateBuilderOptionalArgsAndCopyItemsMatchCurrentTs(t *testing.T) {
+	template := Template(nil).
+		RunCmd("echo ok").
+		PipInstall().
+		NpmInstall().
+		BunInstall().
+		CopyItems([]CopyItem{{
+			Src:  []string{"one.txt", "two.txt"},
+			Dest: "/app",
+			Mode: 0o644,
+		}, {
+			Src:  "plain.txt",
+			Dest: "/app",
+		}})
+
+	steps := template.serialize().Steps
+	got := [][]string{
+		steps[0].Args,
+		steps[1].Args,
+		steps[2].Args,
+		steps[3].Args,
+		steps[4].Args,
+		steps[5].Args,
+		steps[6].Args,
+	}
+	want := [][]string{
+		{"echo ok"},
+		{"pip install .", "root"},
+		{"npm install"},
+		{"bun install"},
+		{"one.txt", "/app", "", "0644"},
+		{"two.txt", "/app", "", "0644"},
+		{"plain.txt", "/app", "", ""},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optional builder args mismatch:\n got %#v\nwant %#v", got, want)
+	}
+}
+
+func TestFromGCPRegistryReadsServiceAccountLikeCurrentTs(t *testing.T) {
+	contextDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(contextDir, "service-account.json"), []byte(`{"project_id":"demo"}`), 0o644); err != nil {
+		t.Fatalf("failed to write service account fixture: %v", err)
+	}
+
+	fromFile := Template(&TemplateOptions{FileContextPath: contextDir}).
+		FromGCPRegistry("gcr.io/demo/image:latest", &GCPRegistryCredentials{ServiceAccountJSON: "service-account.json"}).
+		serialize()
+	if fromFile.FromImageRegistry == nil || fromFile.FromImageRegistry.ServiceAccountJSON != `{"project_id":"demo"}` {
+		t.Fatalf("expected GCP credentials to be read from file, got %#v", fromFile.FromImageRegistry)
+	}
+
+	fromObject := Template(nil).
+		FromGCPRegistry("gcr.io/demo/image:latest", &GCPRegistryCredentials{ServiceAccountJSON: map[string]string{"project_id": "demo"}}).
+		serialize()
+	if fromObject.FromImageRegistry == nil || fromObject.FromImageRegistry.ServiceAccountJSON != `{"project_id":"demo"}` {
+		t.Fatalf("expected GCP object credentials to be stringified, got %#v", fromObject.FromImageRegistry)
+	}
+}
+
+func assertBuildPanic(t *testing.T, message string, fn func()) {
+	t.Helper()
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatalf("expected panic %q", message)
+		}
+		if err, ok := got.(error); !ok || err.Error() != message {
+			t.Fatalf("expected panic %q, got %#v", message, got)
+		}
+	}()
+	fn()
 }
 
 func TestBuildInBackgroundUsesStructuredJsTemplatePayload(t *testing.T) {

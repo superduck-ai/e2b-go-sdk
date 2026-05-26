@@ -307,7 +307,7 @@ func (g *Git) Branches(ctx context.Context, path string, opts *GitRequestOpts) (
 		opts = &GitRequestOpts{}
 	}
 
-	args := []string{"branch", "--format=%(refname:short)\t%(HEAD)"}
+	args := []string{"branch", shellEscape("--format=%(refname:short)\t%(HEAD)")}
 	result, err := g.runGit(ctx, args, path, opts)
 	if err != nil {
 		return nil, err
@@ -605,22 +605,21 @@ func (g *Git) DangerouslyAuthenticate(ctx context.Context, opts *GitDangerouslyA
 	return g.runShell(ctx, cmd, &opts.GitRequestOpts)
 }
 
-func (g *Git) ConfigureUser(ctx context.Context, name, email string, opts *GitRequestOpts) (*commands.CommandResult, error) {
+func (g *Git) ConfigureUser(ctx context.Context, name, email string, opts *GitConfigOpts) (*commands.CommandResult, error) {
 	if name == "" || email == "" {
 		return nil, fmt.Errorf("Both name and email are required.")
 	}
 	if opts == nil {
-		opts = &GitRequestOpts{}
+		opts = &GitConfigOpts{Scope: GitConfigGlobal}
+	}
+	if opts.Scope == "" {
+		opts.Scope = GitConfigGlobal
 	}
 
-	nameArgs := []string{"config", "--global", "user.name", shellEscape(name)}
-	_, err := g.runGit(ctx, nameArgs, "", opts)
-	if err != nil {
+	if _, err := g.SetConfig(ctx, "user.name", name, opts); err != nil {
 		return nil, err
 	}
-
-	emailArgs := []string{"config", "--global", "user.email", shellEscape(email)}
-	return g.runGit(ctx, emailArgs, "", opts)
+	return g.SetConfig(ctx, "user.email", email, opts)
 }
 
 // withRemoteCredentials temporarily sets credentials on the remote URL, runs the operation, then restores the original URL.

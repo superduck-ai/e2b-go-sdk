@@ -262,10 +262,14 @@ func TestListSandboxSnapshotsIgnoresOverriddenSandboxID(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxSnapshotIgnoresNames(t *testing.T) {
+func TestCreateSandboxSnapshotPreservesNamesAndSendsName(t *testing.T) {
+	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sandboxes/sbx-1/snapshots" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
 		}
 
 		if err := json.NewEncoder(w).Encode(api.SnapshotInfo{
@@ -288,19 +292,29 @@ func TestCreateSandboxSnapshotIgnoresNames(t *testing.T) {
 		},
 	}
 
-	info, err := sandbox.CreateSnapshot(context.Background(), nil)
+	info, err := sandbox.CreateSnapshot(context.Background(), &CreateSnapshotOpts{Name: "named-snapshot"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if info == nil || info.SnapshotID != "snap-1" {
 		t.Fatalf("unexpected snapshot info: %#v", info)
 	}
+	if len(info.Names) != 1 || info.Names[0] != "team/snap-1:latest" {
+		t.Fatalf("expected snapshot names to be preserved, got %#v", info.Names)
+	}
+	if gotBody["name"] != "named-snapshot" {
+		t.Fatalf("expected snapshot name request body, got %#v", gotBody)
+	}
 }
 
-func TestSandboxApiCreateSnapshotIgnoresNames(t *testing.T) {
+func TestSandboxApiCreateSnapshotPreservesNamesAndSendsName(t *testing.T) {
+	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sandboxes/sbx-1/snapshots" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
 		}
 
 		if err := json.NewEncoder(w).Encode(api.SnapshotInfo{
@@ -313,12 +327,22 @@ func TestSandboxApiCreateSnapshotIgnoresNames(t *testing.T) {
 	defer server.Close()
 
 	apiClient := &sandboxApi{}
-	info, err := apiClient.CreateSnapshot(context.Background(), "sbx-1", testSandboxApiOptsPtr(server.URL))
+	opts := &CreateSnapshotOpts{
+		SandboxApiOpts: *testSandboxApiOptsPtr(server.URL),
+		Name:           "named-snapshot",
+	}
+	info, err := apiClient.CreateSnapshot(context.Background(), "sbx-1", opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if info == nil || info.SnapshotID != "snap-1" {
 		t.Fatalf("unexpected snapshot info: %#v", info)
+	}
+	if len(info.Names) != 1 || info.Names[0] != "team/snap-1:latest" {
+		t.Fatalf("expected snapshot names to be preserved, got %#v", info.Names)
+	}
+	if gotBody["name"] != "named-snapshot" {
+		t.Fatalf("expected snapshot name request body, got %#v", gotBody)
 	}
 }
 
@@ -329,7 +353,8 @@ func TestSandboxApiCreateSnapshotErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	apiClient := &sandboxApi{}
-	_, err := apiClient.CreateSnapshot(context.Background(), "sbx-1", testSandboxApiOptsPtr(server.URL))
+	opts := &CreateSnapshotOpts{SandboxApiOpts: *testSandboxApiOptsPtr(server.URL)}
+	_, err := apiClient.CreateSnapshot(context.Background(), "sbx-1", opts)
 	if err == nil || err.Error() != "Response data is missing" {
 		t.Fatalf("expected missing response data error, got %v", err)
 	}
@@ -1517,8 +1542,8 @@ func TestSandboxInternalsDoNotExposeJsInternalDefaultsOrClientAdapter(t *testing
 	if strings.Contains(text, "type SandboxConnectionInfo ") {
 		t.Fatal("did not expect SandboxConnectionInfo to be exported")
 	}
-	if strings.Contains(text, "type SandboxFullInfo ") {
-		t.Fatal("did not expect SandboxFullInfo to be exported")
+	if !strings.Contains(text, "type SandboxFullInfo struct") {
+		t.Fatal("expected SandboxFullInfo to be exported")
 	}
 	if strings.Contains(text, "type SandboxUrlOpts ") {
 		t.Fatal("did not expect SandboxUrlOpts to be exported")
@@ -1845,6 +1870,9 @@ func TestSandboxApiDoesNotExposeInternalCreateConnectHelpers(t *testing.T) {
 	if strings.Contains(text, "func SetSandboxTimeout(") {
 		t.Fatal("did not expect SetSandboxTimeout root wrapper to be exported")
 	}
+	if !strings.Contains(text, "func GetFullInfo(") {
+		t.Fatal("expected GetFullInfo root wrapper to be exported")
+	}
 	if strings.Contains(text, "func (a *SandboxApi) GetFullInfo(") {
 		t.Fatal("did not expect SandboxApi.GetFullInfo to be exported")
 	}
@@ -1951,7 +1979,7 @@ func TestSandboxApiMethodsUseSandboxApiOpts(t *testing.T) {
 		{name: "SetTimeout", fn: SetTimeout, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "Pause", fn: Pause, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "BetaPause", fn: BetaPause, optsType: reflect.TypeOf(&SandboxApiOpts{})},
-		{name: "CreateSnapshot", fn: CreateSnapshot, optsType: reflect.TypeOf(&SandboxApiOpts{})},
+		{name: "CreateSnapshot", fn: CreateSnapshot, optsType: reflect.TypeOf(&CreateSnapshotOpts{})},
 		{name: "DeleteSnapshot", fn: DeleteSnapshot, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "GetMetrics", fn: GetMetrics, optsType: reflect.TypeOf(&SandboxMetricsOpts{})},
 		{name: "ListSnapshots", fn: ListSnapshots, optsType: reflect.TypeOf(&SnapshotListOpts{})},
@@ -2134,8 +2162,8 @@ func TestSandboxWrapperMethodsUseNarrowJsOptionShapes(t *testing.T) {
 	if !ok {
 		t.Fatal("expected Sandbox.CreateSnapshot to exist")
 	}
-	if got := createSnapshotMethod.Type.In(2); got != reflect.TypeOf(&SandboxApiOpts{}) {
-		t.Fatalf("expected Sandbox.CreateSnapshot opts type *SandboxApiOpts, got %v", got)
+	if got := createSnapshotMethod.Type.In(2); got != reflect.TypeOf(&CreateSnapshotOpts{}) {
+		t.Fatalf("expected Sandbox.CreateSnapshot opts type *CreateSnapshotOpts, got %v", got)
 	}
 }
 

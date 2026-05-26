@@ -107,6 +107,10 @@ func (h *CommandHandle) setEnd(exitCode int, errStr string) {
 
 func (h *CommandHandle) setWaitError(err error) {
 	h.mu.Lock()
+	if h.exitCode != nil {
+		h.mu.Unlock()
+		return
+	}
 	h.waitErr = err
 	h.mu.Unlock()
 	h.doneOnce.Do(func() {

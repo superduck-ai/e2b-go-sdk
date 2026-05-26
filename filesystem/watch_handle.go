@@ -2,14 +2,14 @@ package filesystem
 
 import "sync"
 
-type FilesystemEventType int
+type FilesystemEventType string
 
 const (
-	FilesystemEventChmod FilesystemEventType = iota
-	FilesystemEventCreate
-	FilesystemEventRemove
-	FilesystemEventRename
-	FilesystemEventWrite
+	FilesystemEventChmod  FilesystemEventType = "chmod"
+	FilesystemEventCreate FilesystemEventType = "create"
+	FilesystemEventRemove FilesystemEventType = "remove"
+	FilesystemEventRename FilesystemEventType = "rename"
+	FilesystemEventWrite  FilesystemEventType = "write"
 )
 
 type FilesystemEvent struct {
