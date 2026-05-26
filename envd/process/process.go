@@ -5,8 +5,8 @@ type Signal int32
 
 const (
 	SignalUnspecified Signal = 0
-	SignalSIGTERM    Signal = 15
-	SignalSIGKILL    Signal = 9
+	SignalSIGTERM     Signal = 15
+	SignalSIGKILL     Signal = 9
 )
 
 // PTY size
@@ -60,6 +60,7 @@ type ProcessEndEvent struct {
 type StartRequest struct {
 	Process *ProcessConfig    `json:"process"`
 	Pty     *PTY              `json:"pty,omitempty"`
+	Stdin   bool              `json:"stdin,omitempty"`
 	Tag     string            `json:"tag,omitempty"`
 	Envs    map[string]string `json:"envs,omitempty"`
 }

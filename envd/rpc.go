@@ -1,8 +1,12 @@
 package envd
 
 import (
+	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 // RpcError represents an error from an envd RPC call.
@@ -20,8 +24,91 @@ func HandleRpcError(code string, message string) error {
 	return &RpcError{Code: code, Message: message}
 }
 
+func HandleRequestTimeoutError() error {
+	return HandleRpcError("canceled", "request timeout exceeded before receiving first stream event: This error is likely due to exceeding 'requestTimeoutMs'. You can pass the request timeout value as an option when making the request.")
+}
+
+func HandleStreamContextError(err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return HandleRpcError("deadline_exceeded", "stream deadline exceeded: This error is likely due to exceeding 'timeoutMs' — the total time a long running request (like command execution or directory watch) can be active. It can be modified by passing 'timeoutMs' when making the request. Use '0' to disable the timeout.")
+	case errors.Is(err, context.Canceled):
+		return HandleRpcError("canceled", "stream canceled: This error is likely due to exceeding 'requestTimeoutMs'. You can pass the request timeout value as an option when making the request.")
+	default:
+		return err
+	}
+}
+
+func ParseConnectEndStreamError(payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	var endStream struct {
+		Error *struct {
+			Code    interface{} `json:"code"`
+			Message string      `json:"message"`
+		} `json:"error"`
+		Code    interface{} `json:"code"`
+		Message string      `json:"message"`
+	}
+	if err := json.Unmarshal(payload, &endStream); err != nil {
+		return err
+	}
+
+	codeValue := endStream.Code
+	message := endStream.Message
+	if endStream.Error != nil {
+		codeValue = endStream.Error.Code
+		if message == "" {
+			message = endStream.Error.Message
+		}
+	}
+
+	code := normalizeRPCCode(codeValue)
+	if code == "" && message == "" {
+		return nil
+	}
+	if code == "" {
+		code = "unknown"
+	}
+	return HandleRpcError(code, message)
+}
+
+func normalizeRPCCode(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		v = strings.TrimSpace(strings.ToLower(v))
+		v = strings.ReplaceAll(v, "-", "_")
+		v = strings.ReplaceAll(v, " ", "_")
+		return v
+	case float64:
+		switch int(v) {
+		case 1:
+			return "canceled"
+		case 3:
+			return "invalid_argument"
+		case 4:
+			return "deadline_exceeded"
+		case 5:
+			return "not_found"
+		case 14:
+			return "unavailable"
+		case 16:
+			return "unauthenticated"
+		default:
+			return fmt.Sprintf("%d", int(v))
+		}
+	default:
+		return ""
+	}
+}
+
 // AuthenticationHeader returns Basic auth header for envd.
 func AuthenticationHeader(envdVersion string, username string) map[string]string {
+	if username == "" && versionGTE(envdVersion, EnvdDefaultUser) {
+		return map[string]string{}
+	}
 	if username == "" {
 		username = "user"
 	}
@@ -29,4 +116,23 @@ func AuthenticationHeader(envdVersion string, username string) map[string]string
 	return map[string]string{
 		"Authorization": "Basic " + encoded,
 	}
+}
+
+func versionGTE(version, minVersion string) bool {
+	if version == "" {
+		return true
+	}
+
+	var major1, minor1, patch1 int
+	var major2, minor2, patch2 int
+	fmt.Sscanf(version, "%d.%d.%d", &major1, &minor1, &patch1)
+	fmt.Sscanf(minVersion, "%d.%d.%d", &major2, &minor2, &patch2)
+
+	if major1 != major2 {
+		return major1 > major2
+	}
+	if minor1 != minor2 {
+		return minor1 > minor2
+	}
+	return patch1 >= patch2
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/e2b-dev/e2b-go-sdk/envd"
 	"github.com/e2b-dev/e2b-go-sdk/envd/process"
@@ -15,7 +16,7 @@ import (
 type PtyCreateOpts struct {
 	Cols             uint32
 	Rows             uint32
-	OnData           func(data []byte)
+	OnData           func(data PtyOutput)
 	TimeoutMs        *int
 	User             string
 	Envs             map[string]string
@@ -24,20 +25,42 @@ type PtyCreateOpts struct {
 }
 
 type PtyConnectOpts struct {
-	OnData           func(data []byte)
+	OnData           func(data PtyOutput)
 	TimeoutMs        *int
 	RequestTimeoutMs *int
 }
 
 type Pty struct {
-	connectionConfig *ConnectionConfig
+	connectionConfig *connectionConfig
 	envdVersion      string
 	httpClient       *http.Client
 }
 
-func NewPty(connectionConfig *ConnectionConfig, envdVersion string) *Pty {
+func NewPty(cfg *struct {
+	ApiKey           string
+	AccessToken      string
+	Domain           string
+	ApiUrl           string
+	SandboxUrl       string
+	Debug            bool
+	RequestTimeoutMs int
+	Headers          map[string]string
+}, envdVersion string) *Pty {
+	var resolved *connectionConfig
+	if cfg != nil {
+		resolved = &connectionConfig{
+			ApiKey:           cfg.ApiKey,
+			AccessToken:      cfg.AccessToken,
+			Domain:           cfg.Domain,
+			ApiUrl:           cfg.ApiUrl,
+			SandboxUrl:       cfg.SandboxUrl,
+			Debug:            cfg.Debug,
+			RequestTimeoutMs: cfg.RequestTimeoutMs,
+			Headers:          cfg.Headers,
+		}
+	}
 	return &Pty{
-		connectionConfig: connectionConfig,
+		connectionConfig: resolved,
 		envdVersion:      envdVersion,
 		httpClient:       &http.Client{},
 	}
@@ -51,9 +74,6 @@ func (p *Pty) headers(user string) map[string]string {
 	h := make(map[string]string)
 	for k, v := range p.connectionConfig.Headers {
 		h[k] = v
-	}
-	if user == "" {
-		user = "user"
 	}
 	for k, v := range envd.AuthenticationHeader(p.envdVersion, user) {
 		h[k] = v
@@ -111,6 +131,7 @@ func (p *Pty) connectServerStream(ctx context.Context, path string, reqBody inte
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/connect+json")
+	req.Header.Set(keepalivePingHeader, fmt.Sprintf("%d", keepalivePingIntervalSec))
 	for k, v := range p.headers(user) {
 		req.Header.Set(k, v)
 	}
@@ -149,7 +170,8 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 	user := opts.User
 	envs := make(map[string]string)
 	envs["TERM"] = "xterm-256color"
-	envs["COLORTERM"] = "truecolor"
+	envs["LANG"] = "C.UTF-8"
+	envs["LC_ALL"] = "C.UTF-8"
 	for k, v := range opts.Envs {
 		envs[k] = v
 	}
@@ -167,50 +189,68 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 		},
 	}
 
-	body, err := p.connectServerStream(ctx, "/process.Process/Start", startReq, user)
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, p.requestTimeoutFromCreateOpts(opts))
+	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
+	body, err := p.connectServerStream(streamCtx, "/process.Process/Start", startReq, user)
 	if err != nil {
+		streamCancel()
+		cancelRequestTimeout()
 		return nil, err
 	}
 
-	ch := make(chan json.RawMessage, 16)
+	ch := make(chan streamEnvelope, 16)
 	go readStreamEnvelopes(body, ch)
 
-	firstMsg, ok := <-ch
-	if !ok {
+	firstMsg, ok, err := waitForFirstEvent(ch, p.requestTimeoutFromCreateOpts(opts))
+	if err != nil {
+		streamCancel()
+		cancelRequestTimeout()
 		body.Close()
-		return nil, fmt.Errorf("stream closed before receiving start event")
+		return nil, err
 	}
+	if !ok {
+		streamCancel()
+		cancelRequestTimeout()
+		body.Close()
+		return nil, fmt.Errorf("Expected start event")
+	}
+	clearRequestTimeout()
 
 	var event process.ProcessEvent
 	if err := json.Unmarshal(firstMsg, &event); err != nil {
+		streamCancel()
 		body.Close()
 		return nil, fmt.Errorf("failed to parse start event: %w", err)
 	}
 	if event.Start == nil {
+		streamCancel()
 		body.Close()
-		return nil, fmt.Errorf("first event is not a start event")
+		return nil, fmt.Errorf("Expected start event")
 	}
 
 	pid := event.Start.Pid
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	// For PTY, we route data events through onData
-	var onStdout func(string)
+	var onStdout func(Stdout)
 	if opts.OnData != nil {
 		onData := opts.OnData
-		onStdout = func(data string) {
-			onData([]byte(data))
+		onStdout = func(data Stdout) {
+			onData(PtyOutput([]byte(data)))
 		}
 	}
 
-	handle := NewCommandHandle(pid, func() {
+	handle := newCommandHandle(pid, func() {
 		cancel()
+		streamCancel()
 		body.Close()
 	}, func() (bool, error) {
 		return p.Kill(ctx, pid, nil)
 	}, onStdout, nil)
 
 	go func() {
+		defer cancelRequestTimeout()
+		defer streamCancel()
 		defer body.Close()
 		for {
 			select {
@@ -218,18 +258,26 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 				return
 			case msg, ok := <-ch:
 				if !ok {
-					handle.SetEnd(0, "")
+					if err := streamCtx.Err(); err != nil {
+						handle.setWaitError(envd.HandleStreamContextError(err))
+						return
+					}
+					handle.setWaitError(errProcessExitedWithoutResult)
+					return
+				}
+				if msg.err != nil {
+					handle.setWaitError(msg.err)
 					return
 				}
 				var ev process.ProcessEvent
-				if json.Unmarshal(msg, &ev) != nil {
+				if json.Unmarshal(msg.payload, &ev) != nil {
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.AppendStdout(string(ev.Data.Pty))
+					handle.appendStdout(string(ev.Data.Pty))
 				}
 				if ev.End != nil {
-					handle.SetEnd(int(ev.End.ExitCode), ev.End.Error)
+					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
 					return
 				}
 			}
@@ -245,49 +293,93 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 	}
 
 	req := &process.ConnectRequest{Pid: pid}
-	body, err := p.connectServerStream(ctx, "/process.Process/Connect", req, "")
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, p.requestTimeoutFromConnectOpts(opts))
+	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
+	body, err := p.connectServerStream(streamCtx, "/process.Process/Connect", req, "")
 	if err != nil {
+		streamCancel()
+		cancelRequestTimeout()
 		return nil, err
+	}
+
+	ch := make(chan streamEnvelope, 16)
+	go readStreamEnvelopes(body, ch)
+
+	firstMsg, ok, err := waitForFirstEvent(ch, p.requestTimeoutFromConnectOpts(opts))
+	if err != nil {
+		streamCancel()
+		cancelRequestTimeout()
+		body.Close()
+		return nil, err
+	}
+	if !ok {
+		streamCancel()
+		cancelRequestTimeout()
+		body.Close()
+		return nil, fmt.Errorf("Expected start event")
+	}
+	clearRequestTimeout()
+
+	var firstEvent process.ProcessEvent
+	if err := json.Unmarshal(firstMsg, &firstEvent); err != nil {
+		streamCancel()
+		body.Close()
+		return nil, fmt.Errorf("failed to parse connect start event: %w", err)
+	}
+	if firstEvent.Start == nil {
+		streamCancel()
+		body.Close()
+		return nil, fmt.Errorf("Expected start event")
 	}
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	var onStdout func(string)
+	var onStdout func(Stdout)
 	if opts.OnData != nil {
 		onData := opts.OnData
-		onStdout = func(data string) {
-			onData([]byte(data))
+		onStdout = func(data Stdout) {
+			onData(PtyOutput([]byte(data)))
 		}
 	}
 
-	handle := NewCommandHandle(pid, func() {
+	handle := newCommandHandle(pid, func() {
 		cancel()
+		streamCancel()
 		body.Close()
 	}, func() (bool, error) {
 		return p.Kill(ctx, pid, nil)
 	}, onStdout, nil)
 
 	go func() {
-		ch := make(chan json.RawMessage, 16)
-		go readStreamEnvelopes(body, ch)
+		defer cancelRequestTimeout()
+		defer streamCancel()
+		defer body.Close()
 		for {
 			select {
 			case <-cancelCtx.Done():
 				return
 			case msg, ok := <-ch:
 				if !ok {
-					handle.SetEnd(0, "")
+					if err := streamCtx.Err(); err != nil {
+						handle.setWaitError(envd.HandleStreamContextError(err))
+						return
+					}
+					handle.setWaitError(errProcessExitedWithoutResult)
+					return
+				}
+				if msg.err != nil {
+					handle.setWaitError(msg.err)
 					return
 				}
 				var ev process.ProcessEvent
-				if json.Unmarshal(msg, &ev) != nil {
+				if json.Unmarshal(msg.payload, &ev) != nil {
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.AppendStdout(string(ev.Data.Pty))
+					handle.appendStdout(string(ev.Data.Pty))
 				}
 				if ev.End != nil {
-					handle.SetEnd(int(ev.End.ExitCode), ev.End.Error)
+					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
 					return
 				}
 			}
@@ -298,14 +390,20 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 }
 
 func (p *Pty) SendInput(ctx context.Context, pid uint32, data []byte, opts *CommandRequestOpts) error {
+	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+	defer cancel()
+
 	req := &process.SendInputRequest{
 		Pid: pid,
 		Pty: data,
 	}
-	return p.connectUnary(ctx, "/process.Process/SendInput", req, nil, "")
+	return p.connectUnary(reqCtx, "/process.Process/SendInput", req, nil, "")
 }
 
 func (p *Pty) Resize(ctx context.Context, pid uint32, cols, rows uint32, opts *CommandRequestOpts) error {
+	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+	defer cancel()
+
 	req := &process.UpdateRequest{
 		Pid: pid,
 		Size: &process.PTY{
@@ -313,22 +411,58 @@ func (p *Pty) Resize(ctx context.Context, pid uint32, cols, rows uint32, opts *C
 			Rows: rows,
 		},
 	}
-	return p.connectUnary(ctx, "/process.Process/Update", req, nil, "")
+	return p.connectUnary(reqCtx, "/process.Process/Update", req, nil, "")
 }
 
 func (p *Pty) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (bool, error) {
+	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+	defer cancel()
+
 	req := &process.SendSignalRequest{
 		Pid:    pid,
 		Signal: process.SignalSIGKILL,
 	}
-	err := p.connectUnary(ctx, "/process.Process/SendSignal", req, nil, "")
+	err := p.connectUnary(reqCtx, "/process.Process/SendSignal", req, nil, "")
 	if err != nil {
 		if rpcErr, ok := err.(*envd.RpcError); ok {
-			if rpcErr.Code == "not_found" || rpcErr.Message == "process not found" {
+			if rpcErr.Code == "not_found" || strings.Contains(strings.ToLower(rpcErr.Message), "not found") {
 				return false, nil
 			}
 		}
 		return false, err
 	}
 	return true, nil
+}
+
+func (p *Pty) requestTimeout(opts *CommandRequestOpts) *int {
+	if opts != nil && opts.RequestTimeoutMs != nil {
+		return opts.RequestTimeoutMs
+	}
+	if p.connectionConfig.RequestTimeoutMs <= 0 {
+		return nil
+	}
+	timeout := p.connectionConfig.RequestTimeoutMs
+	return &timeout
+}
+
+func (p *Pty) requestTimeoutFromCreateOpts(opts *PtyCreateOpts) *int {
+	if opts != nil && opts.RequestTimeoutMs != nil {
+		return opts.RequestTimeoutMs
+	}
+	if p.connectionConfig.RequestTimeoutMs <= 0 {
+		return nil
+	}
+	timeout := p.connectionConfig.RequestTimeoutMs
+	return &timeout
+}
+
+func (p *Pty) requestTimeoutFromConnectOpts(opts *PtyConnectOpts) *int {
+	if opts != nil && opts.RequestTimeoutMs != nil {
+		return opts.RequestTimeoutMs
+	}
+	if p.connectionConfig.RequestTimeoutMs <= 0 {
+		return nil
+	}
+	timeout := p.connectionConfig.RequestTimeoutMs
+	return &timeout
 }

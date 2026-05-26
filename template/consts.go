@@ -1,8 +1,8 @@
 package template
 
 const (
-	FinalizeStepName = "finalize"
-	BaseStepName     = "base"
-	StackTraceDepth  = 3
-	ResolveSymlinks  = false
+	finalizeStepName = "finalize"
+	baseStepName     = "base"
+	stackTraceDepth  = 3
+	resolveSymlinks  = false
 )

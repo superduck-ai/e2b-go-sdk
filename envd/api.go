@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -18,8 +19,25 @@ type EnvdApiError struct {
 }
 
 func (e *EnvdApiError) Error() string {
-	return fmt.Sprintf("envd API error: %d - %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("%d: %s", e.StatusCode, e.Body)
 }
+
+type SandboxError struct {
+	Message string
+}
+
+func (e *SandboxError) Error() string { return e.Message }
+
+type TimeoutError struct{ SandboxError }
+type InvalidArgumentError struct{ SandboxError }
+type NotEnoughSpaceError struct{ SandboxError }
+type NotFoundError struct{ SandboxError }
+
+type AuthenticationError struct {
+	Message string
+}
+
+func (e *AuthenticationError) Error() string { return e.Message }
 
 // EnvdApiClient wraps HTTP client for envd API running inside the sandbox.
 type EnvdApiClient struct {
@@ -38,14 +56,9 @@ func NewEnvdApiClient(baseUrl string, accessToken string, headers map[string]str
 		allHeaders[k] = v
 	}
 
-	timeout := time.Duration(requestTimeoutMs) * time.Millisecond
-	if timeout == 0 {
-		timeout = 60 * time.Second
-	}
-
 	return &EnvdApiClient{
 		BaseUrl:    baseUrl,
-		HttpClient: &http.Client{Timeout: timeout},
+		HttpClient: &http.Client{Timeout: time.Duration(requestTimeoutMs) * time.Millisecond},
 		Headers:    allHeaders,
 	}
 }
@@ -170,5 +183,46 @@ func HandleEnvdApiError(statusCode int, body []byte) error {
 	if statusCode < 400 {
 		return nil
 	}
-	return &EnvdApiError{StatusCode: statusCode, Body: string(body)}
+
+	message := extractEnvdErrorMessage(body)
+
+	switch statusCode {
+	case http.StatusBadRequest:
+		return &InvalidArgumentError{SandboxError{Message: message}}
+	case http.StatusUnauthorized:
+		return &AuthenticationError{Message: message}
+	case http.StatusNotFound:
+		return &NotFoundError{SandboxError{Message: message}}
+	case http.StatusTooManyRequests:
+		return &SandboxError{Message: message + ": The requests are being rate limited."}
+	case http.StatusBadGateway:
+		return &TimeoutError{SandboxError{Message: formatSandboxTimeoutMessage(message)}}
+	case http.StatusInsufficientStorage:
+		return &NotEnoughSpaceError{SandboxError{Message: message}}
+	default:
+		return &EnvdApiError{StatusCode: statusCode, Body: message}
+	}
+}
+
+func extractEnvdErrorMessage(body []byte) string {
+	message := strings.TrimSpace(string(body))
+	if message == "" {
+		return ""
+	}
+
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &payload) == nil && payload.Message != "" {
+		return payload.Message
+	}
+
+	return message
+}
+
+func formatSandboxTimeoutMessage(message string) string {
+	if message == "" {
+		message = "Sandbox timed out"
+	}
+	return fmt.Sprintf("%s: This error is likely due to sandbox timeout. You can modify the sandbox timeout by passing 'timeoutMs' when starting the sandbox or calling '.setTimeout' on the sandbox with the desired timeout.", message)
 }

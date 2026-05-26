@@ -2,19 +2,19 @@ package volume
 
 // Volume content API types (auto-generated equivalent)
 
-type ListDirResponse struct {
+type listDirResponse struct {
 	Entries []VolumeEntryStat `json:"entries"`
 }
 
-type CreateDirResponse struct {
+type createDirResponse struct {
 	Entry VolumeEntryStat `json:"entry"`
 }
 
-type StatResponse struct {
+type statResponse struct {
 	Entry VolumeEntryStat `json:"entry"`
 }
 
-type UpdateMetadataRequest struct {
+type updateMetadataRequest struct {
 	UID  *int `json:"uid,omitempty"`
 	GID  *int `json:"gid,omitempty"`
 	Mode *int `json:"mode,omitempty"`

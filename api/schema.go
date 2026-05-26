@@ -6,13 +6,15 @@ import "time"
 
 type CreateSandboxRequest struct {
 	TemplateID          string            `json:"templateID"`
-	Timeout             int               `json:"timeout,omitempty"`
+	Timeout             int               `json:"timeout"`
 	Metadata            map[string]string `json:"metadata,omitempty"`
+	Mcp                 map[string]any    `json:"mcp,omitempty"`
 	EnvVars             map[string]string `json:"envVars,omitempty"`
-	Secure              bool              `json:"secure,omitempty"`
-	AllowInternetAccess *bool             `json:"allowInternetAccess,omitempty"`
+	Secure              *bool             `json:"secure,omitempty"`
+	AllowInternetAccess *bool             `json:"allow_internet_access,omitempty"`
+	AutoPause           *bool             `json:"autoPause,omitempty"`
+	AutoResume          *AutoResumeConfig `json:"autoResume,omitempty"`
 	Network             *NetworkOpts      `json:"network,omitempty"`
-	Lifecycle           *LifecycleOpts    `json:"lifecycle,omitempty"`
 	VolumeMounts        []VolumeMount     `json:"volumeMounts,omitempty"`
 }
 
@@ -20,36 +22,40 @@ type NetworkOpts struct {
 	AllowOut           []string `json:"allowOut,omitempty"`
 	DenyOut            []string `json:"denyOut,omitempty"`
 	AllowPublicTraffic bool     `json:"allowPublicTraffic,omitempty"`
-	MaskRequestHost    bool     `json:"maskRequestHost,omitempty"`
+	MaskRequestHost    string   `json:"maskRequestHost,omitempty"`
 }
 
-type LifecycleOpts struct {
-	OnTimeout  string `json:"onTimeout,omitempty"`
-	AutoResume bool   `json:"autoResume,omitempty"`
+type AutoResumeConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 type VolumeMount struct {
-	VolumeID  string `json:"volumeID"`
-	MountPath string `json:"mountPath"`
+	Name      string `json:"name,omitempty"`
+	Path      string `json:"path,omitempty"`
+	VolumeID  string `json:"volumeID,omitempty"`
+	MountPath string `json:"mountPath,omitempty"`
 }
 
 type SandboxResponse struct {
-	SandboxID          string             `json:"sandboxID"`
-	TemplateID         string             `json:"templateID"`
-	Name               string             `json:"name"`
-	Metadata           map[string]string  `json:"metadata"`
-	StartedAt          time.Time          `json:"startedAt"`
-	EndAt              time.Time          `json:"endAt"`
-	State              string             `json:"state"`
-	CpuCount           int                `json:"cpuCount"`
-	MemoryMB           int                `json:"memoryMB"`
-	EnvdVersion        string             `json:"envdVersion"`
-	SandboxDomain      string             `json:"sandboxDomain,omitempty"`
-	EnvdAccessToken    string             `json:"envdAccessToken,omitempty"`
-	TrafficAccessToken string             `json:"trafficAccessToken,omitempty"`
-	Network            *NetworkOpts       `json:"network,omitempty"`
-	Lifecycle          *LifecycleInfoOpts `json:"lifecycle,omitempty"`
-	VolumeMounts       []VolumeMount      `json:"volumeMounts,omitempty"`
+	SandboxID           string             `json:"sandboxID"`
+	TemplateID          string             `json:"templateID"`
+	Name                string             `json:"name"`
+	Alias               string             `json:"alias,omitempty"`
+	Metadata            map[string]string  `json:"metadata"`
+	StartedAt           time.Time          `json:"startedAt"`
+	EndAt               time.Time          `json:"endAt"`
+	State               string             `json:"state"`
+	CpuCount            int                `json:"cpuCount"`
+	MemoryMB            int                `json:"memoryMB"`
+	EnvdVersion         string             `json:"envdVersion"`
+	AllowInternetAccess *bool              `json:"allowInternetAccess,omitempty"`
+	Domain              string             `json:"domain,omitempty"`
+	SandboxDomain       string             `json:"sandboxDomain,omitempty"`
+	EnvdAccessToken     string             `json:"envdAccessToken,omitempty"`
+	TrafficAccessToken  string             `json:"trafficAccessToken,omitempty"`
+	Network             *NetworkOpts       `json:"network,omitempty"`
+	Lifecycle           *LifecycleInfoOpts `json:"lifecycle,omitempty"`
+	VolumeMounts        []VolumeMount      `json:"volumeMounts,omitempty"`
 }
 
 type LifecycleInfoOpts struct {
@@ -74,6 +80,10 @@ type SandboxMetrics struct {
 	Timestamp    time.Time `json:"timestamp"`
 	CpuUsedPct   float64   `json:"cpuUsedPct"`
 	CpuCount     int       `json:"cpuCount"`
+	MemUsed      int64     `json:"memUsed"`
+	MemTotal     int64     `json:"memTotal"`
+	DiskUsed     int64     `json:"diskUsed"`
+	DiskTotal    int64     `json:"diskTotal"`
 	MemUsedMiB   int64     `json:"memUsedMiB"`
 	MemTotalMiB  int64     `json:"memTotalMiB"`
 	DiskUsedMiB  int64     `json:"diskUsedMiB"`
@@ -81,7 +91,8 @@ type SandboxMetrics struct {
 }
 
 type SnapshotInfo struct {
-	SnapshotID string `json:"snapshotID"`
+	SnapshotID string   `json:"snapshotID"`
+	Names      []string `json:"names,omitempty"`
 }
 
 type SnapshotListResponse struct {
@@ -107,11 +118,24 @@ type CreateTemplateResponse struct {
 }
 
 type BuildStatusResponse struct {
-	BuildID    string `json:"buildID"`
-	TemplateID string `json:"templateID"`
-	Status     string `json:"status"`
-	Logs       string `json:"logs,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	BuildID    string             `json:"buildID"`
+	TemplateID string             `json:"templateID"`
+	Status     string             `json:"status"`
+	LogEntries []BuildLogEntry    `json:"logEntries,omitempty"`
+	Logs       []string           `json:"logs,omitempty"`
+	Reason     *BuildStatusReason `json:"reason,omitempty"`
+}
+
+type BuildLogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+}
+
+type BuildStatusReason struct {
+	Message    string          `json:"message"`
+	Step       string          `json:"step,omitempty"`
+	LogEntries []BuildLogEntry `json:"logEntries,omitempty"`
 }
 
 // Volume types
@@ -134,13 +158,13 @@ type VolumeAndTokenResponse struct {
 // Tags
 
 type AssignTagsRequest struct {
-	TemplateName string   `json:"templateName"`
-	Tags         []string `json:"tags"`
+	Target string   `json:"target"`
+	Tags   []string `json:"tags"`
 }
 
 type RemoveTagsRequest struct {
-	TemplateName string   `json:"templateName"`
-	Tags         []string `json:"tags"`
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
 }
 
 type TemplateTag struct {

@@ -4,7 +4,7 @@ import (
 	"strings"
 )
 
-func ParseDockerfile(content string, builder *TemplateBase) error {
+func parseDockerfile(content string, builder *TemplateBase) error {
 	lines := strings.Split(content, "\n")
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])

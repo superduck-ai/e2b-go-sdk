@@ -1,9 +1,5 @@
 package e2b
 
-// Logger interface compatible with standard logging
-type Logger interface {
-	Debug(args ...interface{})
-	Info(args ...interface{})
-	Warn(args ...interface{})
-	Error(args ...interface{})
-}
+import "github.com/e2b-dev/e2b-go-sdk/internal/shared"
+
+type Logger = shared.Logger

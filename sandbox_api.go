@@ -2,45 +2,57 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"net/url"
+	"reflect"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/e2b-dev/e2b-go-sdk/api"
 )
 
+const (
+	defaultSandboxTemplate    = "base"
+	defaultSandboxMcpTemplate = "mcp-gateway"
+)
+
 type SandboxState string
 
 const (
-	SandboxStateRunning SandboxState = "running"
-	SandboxStatePaused  SandboxState = "paused"
+	sandboxStateRunning SandboxState = "running"
+	sandboxStatePaused  SandboxState = "paused"
 )
 
 type SandboxInfo struct {
-	SandboxID    string
-	TemplateID   string
-	Name         string
-	Metadata     map[string]string
-	StartedAt    time.Time
-	EndAt        time.Time
-	State        SandboxState
-	CpuCount     int
-	MemoryMB     int
-	EnvdVersion  string
-	Network      *SandboxNetworkOpts
-	Lifecycle    *SandboxInfoLifecycle
-	VolumeMounts []VolumeMountInfo
+	SandboxID           string
+	TemplateID          string
+	Name                string
+	Metadata            map[string]string
+	StartedAt           time.Time
+	EndAt               time.Time
+	State               SandboxState
+	CpuCount            int
+	MemoryMB            int
+	EnvdVersion         string
+	AllowInternetAccess *bool
+	Network             *SandboxNetworkOpts
+	Lifecycle           *SandboxInfoLifecycle
+	VolumeMounts        []struct {
+		Name string
+		Path string
+	}
 }
 
 type SandboxNetworkOpts struct {
 	AllowOut           []string
 	DenyOut            []string
 	AllowPublicTraffic bool
-	MaskRequestHost    bool
+	MaskRequestHost    string
 }
 
 type SandboxLifecycle struct {
@@ -53,91 +65,152 @@ type SandboxInfoLifecycle struct {
 	AutoResume bool
 }
 
-type VolumeMountInfo struct {
-	VolumeID  string
-	MountPath string
-}
-
 type SandboxMetrics struct {
-	Timestamp    time.Time
-	CpuUsedPct   float64
-	CpuCount     int
-	MemUsedMiB   int64
-	MemTotalMiB  int64
-	DiskUsedMiB  int64
-	DiskTotalMiB int64
+	Timestamp  time.Time
+	CpuUsedPct float64
+	CpuCount   int
+	MemUsed    int64
+	MemTotal   int64
+	DiskUsed   int64
+	DiskTotal  int64
 }
 
 type SnapshotInfo struct {
 	SnapshotID string
 }
 
+func snapshotInfoFromAPI(info api.SnapshotInfo) SnapshotInfo {
+	return SnapshotInfo{
+		SnapshotID: info.SnapshotID,
+	}
+}
+
+type McpServer map[string]any
+
 type SandboxOpts struct {
 	ConnectionOpts
 	Template            string
 	Metadata            map[string]string
 	Envs                map[string]string
-	TimeoutMs           int
-	Secure              bool
+	TimeoutMs           *int
+	Secure              *bool
 	AllowInternetAccess *bool
+	Mcp                 McpServer
 	Network             *SandboxNetworkOpts
 	Lifecycle           *SandboxLifecycle
-	VolumeMounts        []VolumeMountInfo
+	VolumeMounts        map[string]any
+}
+
+type SandboxBetaCreateOpts struct {
+	SandboxOpts
+	AutoPause bool
 }
 
 type SandboxConnectOpts struct {
 	ConnectionOpts
-	TimeoutMs int
+	TimeoutMs *int
+}
+
+type SandboxApiOpts struct {
+	ApiKey           string
+	Domain           string
+	Debug            bool
+	RequestTimeoutMs *int
+	Headers          map[string]string
+	apiUrl           string
 }
 
 type SandboxListOpts struct {
-	ConnectionOpts
-	State     SandboxState
-	Metadata  map[string]string
+	SandboxApiOpts
+	Query *struct {
+		Metadata map[string]string
+		State    []SandboxState
+	}
 	Limit     int
 	NextToken string
 }
 
 type SandboxMetricsOpts struct {
-	ConnectionOpts
+	SandboxApiOpts
 	Start *time.Time
 	End   *time.Time
 }
 
 type SnapshotListOpts struct {
-	ConnectionOpts
+	SandboxApiOpts
 	SandboxID string
 	Limit     int
 	NextToken string
 }
 
-// SandboxConnectionInfo holds connection details returned when creating/connecting a sandbox.
-type SandboxConnectionInfo struct {
+// sandboxConnectionInfo holds connection details returned when creating/connecting a sandbox.
+type sandboxConnectionInfo struct {
 	SandboxID          string
-	TemplateID         string
-	Name               string
-	Metadata           map[string]string
-	StartedAt          time.Time
-	EndAt              time.Time
-	State              SandboxState
-	CpuCount           int
-	MemoryMB           int
-	EnvdVersion        string
 	SandboxDomain      string
+	EnvdVersion        string
 	EnvdAccessToken    string
 	TrafficAccessToken string
 }
 
-// SandboxApi provides static sandbox management methods.
-type SandboxApi struct{}
-
-func (a *SandboxApi) newClient(opts *ConnectionOpts) (*api.ApiClient, error) {
-	config := NewConnectionConfig(opts)
-	return api.NewApiClient(ToClientConfig(config), api.WithRequireApiKey())
+// sandboxFullInfo holds detailed sandbox info plus connection fields returned by getFullInfo.
+type sandboxFullInfo struct {
+	SandboxID           string
+	TemplateID          string
+	Name                string
+	Metadata            map[string]string
+	StartedAt           time.Time
+	EndAt               time.Time
+	State               SandboxState
+	CpuCount            int
+	MemoryMB            int
+	EnvdVersion         string
+	AllowInternetAccess *bool
+	Network             *SandboxNetworkOpts
+	Lifecycle           *SandboxInfoLifecycle
+	VolumeMounts        []struct {
+		Name string
+		Path string
+	}
+	SandboxDomain   string
+	EnvdAccessToken string
 }
 
-// ToClientConfig converts a ConnectionConfig to an api.ClientConfig.
-func ToClientConfig(c *ConnectionConfig) *api.ClientConfig {
+type sandboxApi struct{}
+
+type sandboxResponseEnvelope struct {
+	api.SandboxResponse
+	present bool
+}
+
+func (r *sandboxResponseEnvelope) UnmarshalJSON(data []byte) error {
+	type sandboxResponseAlias api.SandboxResponse
+
+	r.present = true
+	return json.Unmarshal(data, (*sandboxResponseAlias)(&r.SandboxResponse))
+}
+
+func newConnectionConfigFromSandboxApiOpts(opts *SandboxApiOpts) *ConnectionConfig {
+	if opts == nil {
+		return NewConnectionConfig(nil)
+	}
+
+	return NewConnectionConfig(&ConnectionOpts{
+		ApiKey:           opts.ApiKey,
+		Domain:           opts.Domain,
+		ApiUrl:           opts.apiUrl,
+		Debug:            opts.Debug,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Headers:          opts.Headers,
+	})
+}
+
+func (a *sandboxApi) newClient(opts *SandboxApiOpts) (*api.ApiClient, error) {
+	config := newConnectionConfigFromSandboxApiOpts(opts)
+	return api.NewApiClient(toClientConfig(config), api.WithRequireApiKey())
+}
+
+// toClientConfig converts a ConnectionConfig to an api.ClientConfig.
+func toClientConfig(c *ConnectionConfig) *api.ClientConfig {
 	return &api.ClientConfig{
 		ApiKey:           c.ApiKey,
 		AccessToken:      c.AccessToken,
@@ -149,9 +222,46 @@ func ToClientConfig(c *ConnectionConfig) *api.ClientConfig {
 	}
 }
 
-func (a *SandboxApi) KillSandbox(ctx context.Context, sandboxId string, opts *ConnectionOpts) (bool, error) {
+func Kill(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	return (&sandboxApi{}).Kill(ctx, sandboxId, opts)
+}
+
+func GetInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxInfo, error) {
+	return (&sandboxApi{}).GetInfo(ctx, sandboxId, opts)
+}
+
+func GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts) ([]SandboxMetrics, error) {
+	return (&sandboxApi{}).GetMetrics(ctx, sandboxId, opts)
+}
+
+func SetTimeout(ctx context.Context, sandboxId string, timeoutMs int, opts *SandboxApiOpts) error {
+	return (&sandboxApi{}).SetTimeout(ctx, sandboxId, timeoutMs, opts)
+}
+
+func Pause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	return (&sandboxApi{}).Pause(ctx, sandboxId, opts)
+}
+
+// BetaPause is deprecated. Use Pause instead.
+func BetaPause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	return (&sandboxApi{}).BetaPause(ctx, sandboxId, opts)
+}
+
+func CreateSnapshot(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SnapshotInfo, error) {
+	return (&sandboxApi{}).CreateSnapshot(ctx, sandboxId, opts)
+}
+
+func ListSnapshots(opts *SnapshotListOpts) *SnapshotPaginator {
+	return (&sandboxApi{}).ListSnapshots(opts)
+}
+
+func DeleteSnapshot(ctx context.Context, snapshotId string, opts *SandboxApiOpts) (bool, error) {
+	return (&sandboxApi{}).DeleteSnapshot(ctx, snapshotId, opts)
+}
+
+func (a *sandboxApi) killSandbox(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
@@ -169,17 +279,20 @@ func (a *SandboxApi) KillSandbox(ctx context.Context, sandboxId string, opts *Co
 	return true, nil
 }
 
-func (a *SandboxApi) GetInfo(ctx context.Context, sandboxId string, opts *ConnectionOpts) (*SandboxInfo, error) {
+func (a *sandboxApi) Kill(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	return a.killSandbox(ctx, sandboxId, opts)
+}
+
+func (a *sandboxApi) GetInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxInfo, error) {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	var resp api.SandboxResponse
-	_, err = client.Get(ctx, fmt.Sprintf("/sandboxes/%s", sandboxId), &resp)
+	resp, err := getSandboxResponse(ctx, client, sandboxId)
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
@@ -188,25 +301,46 @@ func (a *SandboxApi) GetInfo(ctx context.Context, sandboxId string, opts *Connec
 		return nil, err
 	}
 
-	info := sandboxResponseToInfo(&resp)
+	info := sandboxResponseToInfo(resp)
 	return &info, nil
 }
 
-func (a *SandboxApi) GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts) ([]SandboxMetrics, error) {
+func (a *sandboxApi) getFullInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*sandboxFullInfo, error) {
+	if opts == nil {
+		opts = &SandboxApiOpts{}
+	}
+	client, err := a.newClient(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := getSandboxResponse(ctx, client, sandboxId)
+	if err != nil {
+		var nfe *api.NotFoundError
+		if errors.As(err, &nfe) {
+			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+		}
+		return nil, err
+	}
+
+	return sandboxRespToFullInfo(resp), nil
+}
+
+func (a *sandboxApi) GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts) ([]SandboxMetrics, error) {
 	if opts == nil {
 		opts = &SandboxMetricsOpts{}
 	}
-	client, err := a.newClient(&opts.ConnectionOpts)
+	client, err := a.newClient(&opts.SandboxApiOpts)
 	if err != nil {
 		return nil, err
 	}
 
 	params := url.Values{}
 	if opts.Start != nil {
-		params.Set("start", strconv.FormatInt(opts.Start.Unix(), 10))
+		params.Set("start", strconv.FormatInt(roundUnixSeconds(*opts.Start), 10))
 	}
 	if opts.End != nil {
-		params.Set("end", strconv.FormatInt(opts.End.Unix(), 10))
+		params.Set("end", strconv.FormatInt(roundUnixSeconds(*opts.End), 10))
 	}
 
 	path := fmt.Sprintf("/sandboxes/%s/metrics", sandboxId)
@@ -222,22 +356,55 @@ func (a *SandboxApi) GetMetrics(ctx context.Context, sandboxId string, opts *San
 
 	metrics := make([]SandboxMetrics, len(resp))
 	for i, m := range resp {
+		memUsed := resolveMetricValue(m.MemUsed, m.MemUsedMiB)
+		memTotal := resolveMetricValue(m.MemTotal, m.MemTotalMiB)
+		diskUsed := resolveMetricValue(m.DiskUsed, m.DiskUsedMiB)
+		diskTotal := resolveMetricValue(m.DiskTotal, m.DiskTotalMiB)
 		metrics[i] = SandboxMetrics{
-			Timestamp:    m.Timestamp,
-			CpuUsedPct:   m.CpuUsedPct,
-			CpuCount:     m.CpuCount,
-			MemUsedMiB:   m.MemUsedMiB,
-			MemTotalMiB:  m.MemTotalMiB,
-			DiskUsedMiB:  m.DiskUsedMiB,
-			DiskTotalMiB: m.DiskTotalMiB,
+			Timestamp:  m.Timestamp,
+			CpuUsedPct: m.CpuUsedPct,
+			CpuCount:   m.CpuCount,
+			MemUsed:    memUsed,
+			MemTotal:   memTotal,
+			DiskUsed:   diskUsed,
+			DiskTotal:  diskTotal,
 		}
 	}
 	return metrics, nil
 }
 
-func (a *SandboxApi) SetTimeout(ctx context.Context, sandboxId string, timeoutMs int, opts *ConnectionOpts) error {
+func getSandboxResponse(ctx context.Context, client *api.ApiClient, sandboxId string) (*api.SandboxResponse, error) {
+	var resp sandboxResponseEnvelope
+	_, err := client.Get(ctx, fmt.Sprintf("/sandboxes/%s", sandboxId), &resp)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.present {
+		return nil, errors.New("Sandbox not found")
+	}
+
+	return &resp.SandboxResponse, nil
+}
+
+func ensureSandboxConnectionResponseData(resp *api.SandboxResponse) error {
+	if resp == nil || resp.SandboxID == "" {
+		return errors.New("Response data is missing")
+	}
+
+	return nil
+}
+
+func ensureSnapshotResponseData(resp *api.SnapshotInfo) error {
+	if resp == nil || resp.SnapshotID == "" {
+		return errors.New("Response data is missing")
+	}
+
+	return nil
+}
+
+func (a *sandboxApi) SetTimeout(ctx context.Context, sandboxId string, timeoutMs int, opts *SandboxApiOpts) error {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
@@ -258,9 +425,9 @@ func (a *SandboxApi) SetTimeout(ctx context.Context, sandboxId string, timeoutMs
 	return nil
 }
 
-func (a *SandboxApi) Pause(ctx context.Context, sandboxId string, opts *ConnectionOpts) (bool, error) {
+func (a *sandboxApi) Pause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
@@ -282,9 +449,14 @@ func (a *SandboxApi) Pause(ctx context.Context, sandboxId string, opts *Connecti
 	return true, nil
 }
 
-func (a *SandboxApi) CreateSnapshot(ctx context.Context, sandboxId string, opts *ConnectionOpts) (*SnapshotInfo, error) {
+// BetaPause is deprecated. Use Pause instead.
+func (a *sandboxApi) BetaPause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	return a.Pause(ctx, sandboxId, opts)
+}
+
+func (a *sandboxApi) CreateSnapshot(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SnapshotInfo, error) {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
@@ -300,20 +472,24 @@ func (a *SandboxApi) CreateSnapshot(ctx context.Context, sandboxId string, opts 
 		}
 		return nil, err
 	}
+	if err := ensureSnapshotResponseData(&resp); err != nil {
+		return nil, err
+	}
 
-	return &SnapshotInfo{SnapshotID: resp.SnapshotID}, nil
+	info := snapshotInfoFromAPI(resp)
+	return &info, nil
 }
 
-func (a *SandboxApi) ListSnapshots(ctx context.Context, opts *SnapshotListOpts) *Paginator[SnapshotInfo] {
+func (a *sandboxApi) ListSnapshots(opts *SnapshotListOpts) *SnapshotPaginator {
 	if opts == nil {
 		opts = &SnapshotListOpts{}
 	}
-	connOpts := opts.ConnectionOpts
+	connOpts := opts.SandboxApiOpts
 	sandboxID := opts.SandboxID
 	limit := opts.Limit
 	initialToken := opts.NextToken
 
-	return NewPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
+	return &SnapshotPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
 		client, err := a.newClient(&connOpts)
 		if err != nil {
 			return nil, "", err
@@ -348,15 +524,15 @@ func (a *SandboxApi) ListSnapshots(ctx context.Context, opts *SnapshotListOpts) 
 
 		result := make([]SnapshotInfo, len(items))
 		for i, s := range items {
-			result[i] = SnapshotInfo{SnapshotID: s.SnapshotID}
+			result[i] = snapshotInfoFromAPI(s)
 		}
 		return result, token, nil
-	}, initialToken)
+	}, initialToken)}
 }
 
-func (a *SandboxApi) DeleteSnapshot(ctx context.Context, snapshotId string, opts *ConnectionOpts) (bool, error) {
+func (a *sandboxApi) DeleteSnapshot(ctx context.Context, snapshotId string, opts *SandboxApiOpts) (bool, error) {
 	if opts == nil {
-		opts = &ConnectionOpts{}
+		opts = &SandboxApiOpts{}
 	}
 	client, err := a.newClient(opts)
 	if err != nil {
@@ -374,47 +550,23 @@ func (a *SandboxApi) DeleteSnapshot(ctx context.Context, snapshotId string, opts
 	return true, nil
 }
 
-func (a *SandboxApi) CreateSandbox(ctx context.Context, opts *SandboxOpts) (*SandboxConnectionInfo, error) {
+func (a *sandboxApi) createSandbox(ctx context.Context, opts *SandboxOpts) (*sandboxConnectionInfo, error) {
 	if opts == nil {
 		opts = &SandboxOpts{}
 	}
-	client, err := a.newClient(&opts.ConnectionOpts)
+	client, err := api.NewApiClient(toClientConfig(NewConnectionConfig(&opts.ConnectionOpts)), api.WithRequireApiKey())
 	if err != nil {
 		return nil, err
 	}
 
 	timeoutSec := 300 // default 5 minutes
-	if opts.TimeoutMs > 0 {
-		timeoutSec = int(math.Ceil(float64(opts.TimeoutMs) / 1000.0))
+	if opts.TimeoutMs != nil {
+		timeoutSec = int(math.Ceil(float64(*opts.TimeoutMs) / 1000.0))
 	}
 
-	reqBody := api.CreateSandboxRequest{
-		TemplateID:          opts.Template,
-		Timeout:             timeoutSec,
-		Metadata:            opts.Metadata,
-		EnvVars:             opts.Envs,
-		Secure:              opts.Secure,
-		AllowInternetAccess: opts.AllowInternetAccess,
-	}
-	if opts.Network != nil {
-		reqBody.Network = &api.NetworkOpts{
-			AllowOut:           opts.Network.AllowOut,
-			DenyOut:            opts.Network.DenyOut,
-			AllowPublicTraffic: opts.Network.AllowPublicTraffic,
-			MaskRequestHost:    opts.Network.MaskRequestHost,
-		}
-	}
-	if opts.Lifecycle != nil {
-		reqBody.Lifecycle = &api.LifecycleOpts{
-			OnTimeout:  opts.Lifecycle.OnTimeout,
-			AutoResume: opts.Lifecycle.AutoResume,
-		}
-	}
-	if len(opts.VolumeMounts) > 0 {
-		reqBody.VolumeMounts = make([]api.VolumeMount, len(opts.VolumeMounts))
-		for i, v := range opts.VolumeMounts {
-			reqBody.VolumeMounts[i] = api.VolumeMount{VolumeID: v.VolumeID, MountPath: v.MountPath}
-		}
+	reqBody, err := buildCreateSandboxRequest(opts.Template, opts, false, timeoutSec*1000)
+	if err != nil {
+		return nil, err
 	}
 
 	var resp api.SandboxResponse
@@ -422,25 +574,31 @@ func (a *SandboxApi) CreateSandbox(ctx context.Context, opts *SandboxOpts) (*San
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureSandboxConnectionResponseData(&resp); err != nil {
+		return nil, err
+	}
+	if err := ensureSupportedTemplateEnvd(ctx, client, resp.SandboxID, resp.EnvdVersion); err != nil {
+		return nil, err
+	}
 
 	return sandboxRespToConnectionInfo(&resp), nil
 }
 
-func (a *SandboxApi) ConnectSandbox(ctx context.Context, sandboxId string, opts *SandboxConnectOpts) (*SandboxConnectionInfo, error) {
+func (a *sandboxApi) connectSandbox(ctx context.Context, sandboxId string, opts *SandboxConnectOpts) (*sandboxConnectionInfo, error) {
 	if opts == nil {
 		opts = &SandboxConnectOpts{}
 	}
-	client, err := a.newClient(&opts.ConnectionOpts)
+	client, err := api.NewApiClient(toClientConfig(NewConnectionConfig(&opts.ConnectionOpts)), api.WithRequireApiKey())
 	if err != nil {
 		return nil, err
 	}
 
 	body := struct {
-		Timeout int `json:"timeout,omitempty"`
+		Timeout int `json:"timeout"`
 	}{}
-	timeoutMs := opts.TimeoutMs
-	if timeoutMs <= 0 {
-		timeoutMs = DefaultSandboxTimeoutMs
+	timeoutMs := defaultSandboxTimeoutMs
+	if opts.TimeoutMs != nil {
+		timeoutMs = *opts.TimeoutMs
 	}
 	body.Timeout = int(math.Ceil(float64(timeoutMs) / 1000.0))
 
@@ -449,36 +607,44 @@ func (a *SandboxApi) ConnectSandbox(ctx context.Context, sandboxId string, opts 
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {
-			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+			return nil, &SandboxNotFoundError{NotFoundError{SandboxError{Message: fmt.Sprintf("Paused sandbox %s not found", sandboxId)}}}
 		}
+		return nil, err
+	}
+	if err := ensureSandboxConnectionResponseData(&resp); err != nil {
 		return nil, err
 	}
 
 	return sandboxRespToConnectionInfo(&resp), nil
 }
 
-func (a *SandboxApi) ListSandboxes(ctx context.Context, opts *SandboxListOpts) *Paginator[SandboxInfo] {
+func (a *sandboxApi) ListSandboxes(opts *SandboxListOpts) *SandboxPaginator {
 	if opts == nil {
 		opts = &SandboxListOpts{}
 	}
-	connOpts := opts.ConnectionOpts
-	state := opts.State
-	metadata := opts.Metadata
+	connOpts := opts.SandboxApiOpts
+	metadata, states := resolveSandboxListQuery(opts)
 	limit := opts.Limit
 	initialToken := opts.NextToken
 
-	return NewPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
+	return &SandboxPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
 		client, err := a.newClient(&connOpts)
 		if err != nil {
 			return nil, "", err
 		}
 
 		params := url.Values{}
-		for k, v := range metadata {
-			params.Add("metadata", fmt.Sprintf("%s=%s", k, v))
+		if len(metadata) > 0 {
+			encodedMetadata := url.Values{}
+			for k, v := range metadata {
+				encodedMetadata.Set(k, v)
+			}
+			params.Set("metadata", encodedMetadata.Encode())
 		}
-		if state != "" {
-			params.Set("state", string(state))
+		for _, state := range states {
+			if state != "" {
+				params.Add("state", string(state))
+			}
 		}
 		if limit > 0 {
 			params.Set("limit", strconv.Itoa(limit))
@@ -508,24 +674,234 @@ func (a *SandboxApi) ListSandboxes(ctx context.Context, opts *SandboxListOpts) *
 			result[i] = sandboxResponseToInfo(&s)
 		}
 		return result, token, nil
-	}, initialToken)
+	}, initialToken)}
+}
+
+func resolveSandboxListQuery(opts *SandboxListOpts) (map[string]string, []SandboxState) {
+	if opts == nil || opts.Query == nil {
+		return nil, nil
+	}
+
+	var metadata map[string]string
+	if len(opts.Query.Metadata) > 0 {
+		metadata = opts.Query.Metadata
+	}
+
+	var states []SandboxState
+	if len(opts.Query.State) > 0 {
+		states = append(states, opts.Query.State...)
+	}
+
+	return metadata, states
 }
 
 // sandboxResponseToConnectionInfo converts an API response to connection info.
-func sandboxRespToConnectionInfo(r *api.SandboxResponse) *SandboxConnectionInfo {
-	return &SandboxConnectionInfo{
+func sandboxRespToConnectionInfo(r *api.SandboxResponse) *sandboxConnectionInfo {
+	if r == nil {
+		return &sandboxConnectionInfo{}
+	}
+
+	return &sandboxConnectionInfo{
 		SandboxID:          r.SandboxID,
-		TemplateID:         r.TemplateID,
-		Name:               r.Name,
-		Metadata:           r.Metadata,
-		StartedAt:          r.StartedAt,
-		EndAt:              r.EndAt,
-		State:              SandboxState(r.State),
-		CpuCount:           r.CpuCount,
-		MemoryMB:           r.MemoryMB,
+		SandboxDomain:      resolveSandboxDomain(r),
 		EnvdVersion:        r.EnvdVersion,
-		SandboxDomain:      r.SandboxDomain,
 		EnvdAccessToken:    r.EnvdAccessToken,
 		TrafficAccessToken: r.TrafficAccessToken,
+	}
+}
+
+func sandboxRespToFullInfo(r *api.SandboxResponse) *sandboxFullInfo {
+	info := sandboxResponseToInfo(r)
+
+	return &sandboxFullInfo{
+		SandboxID:           info.SandboxID,
+		TemplateID:          info.TemplateID,
+		Name:                info.Name,
+		Metadata:            info.Metadata,
+		StartedAt:           info.StartedAt,
+		EndAt:               info.EndAt,
+		State:               info.State,
+		CpuCount:            info.CpuCount,
+		MemoryMB:            info.MemoryMB,
+		EnvdVersion:         info.EnvdVersion,
+		AllowInternetAccess: info.AllowInternetAccess,
+		Network:             info.Network,
+		Lifecycle:           info.Lifecycle,
+		VolumeMounts:        info.VolumeMounts,
+		SandboxDomain:       resolveSandboxDomain(r),
+		EnvdAccessToken:     r.EnvdAccessToken,
+	}
+}
+
+func buildCreateSandboxRequest(template string, opts *SandboxOpts, autoPause bool, timeoutMs int) (api.CreateSandboxRequest, error) {
+	timeoutSec := int(math.Ceil(float64(timeoutMs) / 1000.0))
+	lifecycle := resolveSandboxLifecycle(opts.Lifecycle, autoPause)
+
+	req := api.CreateSandboxRequest{
+		TemplateID:          template,
+		Timeout:             timeoutSec,
+		Metadata:            opts.Metadata,
+		Mcp:                 map[string]any(opts.Mcp),
+		EnvVars:             opts.Envs,
+		Secure:              resolveSecure(opts.Secure),
+		AllowInternetAccess: resolveAllowInternetAccess(opts.AllowInternetAccess),
+		AutoPause:           resolveAutoPause(lifecycle),
+		AutoResume:          resolveAutoResume(lifecycle),
+	}
+	if opts.Network != nil {
+		req.Network = &api.NetworkOpts{
+			AllowOut:           opts.Network.AllowOut,
+			DenyOut:            opts.Network.DenyOut,
+			AllowPublicTraffic: opts.Network.AllowPublicTraffic,
+			MaskRequestHost:    opts.Network.MaskRequestHost,
+		}
+	}
+	if len(opts.VolumeMounts) > 0 {
+		mounts, err := resolveCreateVolumeMounts(opts.VolumeMounts)
+		if err != nil {
+			return api.CreateSandboxRequest{}, err
+		}
+		req.VolumeMounts = mounts
+	}
+	return req, nil
+}
+
+func resolveCreateVolumeMounts(volumeMounts map[string]any) ([]api.VolumeMount, error) {
+	paths := make([]string, 0, len(volumeMounts))
+	for path := range volumeMounts {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	result := make([]api.VolumeMount, 0, len(paths))
+	for _, path := range paths {
+		name, err := resolveCreateVolumeMountName(volumeMounts[path])
+		if err != nil {
+			return nil, fmt.Errorf("invalid volume mount for path %q: %w", path, err)
+		}
+		result = append(result, api.VolumeMount{
+			Name: name,
+			Path: path,
+		})
+	}
+
+	return result, nil
+}
+
+func resolveCreateVolumeMountName(value any) (string, error) {
+	if name, ok := value.(string); ok {
+		if name == "" {
+			return "", errors.New("volume name must not be empty")
+		}
+		return name, nil
+	}
+	if value == nil {
+		return "", errors.New("volume mount must not be nil")
+	}
+
+	rv := reflect.ValueOf(value)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return "", errors.New("volume mount pointer must not be nil")
+		}
+		rv = rv.Elem()
+	}
+
+	if rv.Kind() == reflect.Struct {
+		nameField := rv.FieldByName("Name")
+		if nameField.IsValid() && nameField.Kind() == reflect.String {
+			name := nameField.String()
+			if name == "" {
+				return "", errors.New("volume mount Name must not be empty")
+			}
+			return name, nil
+		}
+	}
+
+	return "", errors.New("volume mount must be a string or a value with a Name field")
+}
+
+func ensureSupportedTemplateEnvd(ctx context.Context, client *api.ApiClient, sandboxID, envdVersion string) error {
+	if sandboxVersionGTE(envdVersion, "0.1.0") {
+		return nil
+	}
+
+	if sandboxID != "" {
+		_, _ = client.Delete(ctx, fmt.Sprintf("/sandboxes/%s", sandboxID), nil)
+	}
+
+	return &TemplateError{SandboxError{Message: "You need to update the template to use the new SDK. You can do this by running `e2b template build` in the directory with the template."}}
+}
+
+func resolveAllowInternetAccess(value *bool) *bool {
+	if value != nil {
+		return value
+	}
+
+	defaultValue := true
+	return &defaultValue
+}
+
+func resolveSecure(value *bool) *bool {
+	if value != nil {
+		return value
+	}
+
+	defaultValue := true
+	return &defaultValue
+}
+
+func resolveSandboxDomain(r *api.SandboxResponse) string {
+	if r == nil {
+		return ""
+	}
+	if r.Domain != "" {
+		return r.Domain
+	}
+	return r.SandboxDomain
+}
+
+func resolveMetricValue(current int64, legacy int64) int64 {
+	if current != 0 {
+		return current
+	}
+	return legacy
+}
+
+func roundUnixSeconds(value time.Time) int64 {
+	return int64(math.Round(float64(value.UnixMilli()) / 1000.0))
+}
+
+func resolveSandboxLifecycle(lifecycle *SandboxLifecycle, autoPause bool) *SandboxLifecycle {
+	if lifecycle != nil {
+		return lifecycle
+	}
+	if autoPause {
+		return &SandboxLifecycle{
+			OnTimeout:  "pause",
+			AutoResume: false,
+		}
+	}
+	return &SandboxLifecycle{
+		OnTimeout:  "kill",
+		AutoResume: false,
+	}
+}
+
+func resolveAutoPause(lifecycle *SandboxLifecycle) *bool {
+	autoPause := false
+	if lifecycle != nil && lifecycle.OnTimeout == "pause" {
+		autoPause = true
+	}
+	return &autoPause
+}
+
+func resolveAutoResume(lifecycle *SandboxLifecycle) *api.AutoResumeConfig {
+	if lifecycle == nil || lifecycle.OnTimeout != "pause" {
+		return nil
+	}
+
+	return &api.AutoResumeConfig{
+		Enabled: lifecycle.AutoResume,
 	}
 }

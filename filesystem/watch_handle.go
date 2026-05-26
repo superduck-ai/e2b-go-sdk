@@ -1,5 +1,7 @@
 package filesystem
 
+import "sync"
+
 type FilesystemEventType int
 
 const (
@@ -16,14 +18,41 @@ type FilesystemEvent struct {
 }
 
 type WatchHandle struct {
-	stop   func()
-	onExit func(err error)
+	stop     func()
+	onExit   func(err error)
+	stopOnce sync.Once
+	exitOnce sync.Once
+	stopped  chan struct{}
 }
 
-func NewWatchHandle(stop func(), onExit func(err error)) *WatchHandle {
-	return &WatchHandle{stop: stop, onExit: onExit}
+func newWatchHandle(stop func(), onExit func(err error)) *WatchHandle {
+	return &WatchHandle{
+		stop:    stop,
+		onExit:  onExit,
+		stopped: make(chan struct{}),
+	}
 }
 
 func (w *WatchHandle) Stop() {
-	w.stop()
+	w.stopOnce.Do(func() {
+		close(w.stopped)
+		w.stop()
+	})
+}
+
+func (w *WatchHandle) exit(err error) {
+	w.exitOnce.Do(func() {
+		if w.onExit != nil {
+			w.onExit(err)
+		}
+	})
+}
+
+func (w *WatchHandle) stoppedByUser() bool {
+	select {
+	case <-w.stopped:
+		return true
+	default:
+		return false
+	}
 }

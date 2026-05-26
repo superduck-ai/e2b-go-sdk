@@ -62,11 +62,11 @@ func NewApiClient(config *ClientConfig, opts ...ApiClientOption) (*ApiClient, er
 	}
 
 	if options.RequireApiKey && config.ApiKey == "" {
-		return nil, &AuthenticationError{Message: "API key is required. Set the E2B_API_KEY environment variable or pass it in ConnectionOpts."}
+		return nil, &AuthenticationError{Message: "API key is required, please visit the Team tab at https://e2b.dev/dashboard to get your API key. You can either set the environment variable `E2B_API_KEY` or you can pass it directly to the sandbox like Sandbox.create({ apiKey: 'e2b_...' })"}
 	}
 
 	if options.RequireAccessToken && config.AccessToken == "" {
-		return nil, &AuthenticationError{Message: "Access token is required. Set the E2B_ACCESS_TOKEN environment variable or pass it in ConnectionOpts."}
+		return nil, &AuthenticationError{Message: "Access token is required, please visit the Personal tab at https://e2b.dev/dashboard to get your access token. You can set the environment variable `E2B_ACCESS_TOKEN` or pass the `accessToken` in options."}
 	}
 
 	baseUrl := config.ApiUrl
@@ -125,7 +125,7 @@ type ApiError struct {
 	Message    string
 }
 
-func (e *ApiError) Error() string { return fmt.Sprintf("[%d] %s", e.StatusCode, e.Message) }
+func (e *ApiError) Error() string { return fmt.Sprintf("%d: %s", e.StatusCode, e.Message) }
 
 // HandleApiError maps HTTP response status code to the appropriate error type.
 func HandleApiError(statusCode int, body []byte) error {
@@ -136,9 +136,17 @@ func HandleApiError(statusCode int, body []byte) error {
 
 	switch statusCode {
 	case http.StatusUnauthorized:
-		return &AuthenticationError{Message: errResp.Message}
+		message := "Unauthorized, please check your credentials."
+		if errResp.Message != "" {
+			message += " - " + errResp.Message
+		}
+		return &AuthenticationError{Message: message}
 	case http.StatusTooManyRequests:
-		return &RateLimitError{Message: errResp.Message}
+		message := "Rate limit exceeded, please try again later"
+		if errResp.Message != "" {
+			message += " - " + errResp.Message
+		}
+		return &RateLimitError{Message: message}
 	case http.StatusNotFound:
 		return &NotFoundError{Message: errResp.Message}
 	default:

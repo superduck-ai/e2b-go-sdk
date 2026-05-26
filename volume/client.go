@@ -7,32 +7,39 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
-	e2b "github.com/e2b-dev/e2b-go-sdk"
+	"github.com/e2b-dev/e2b-go-sdk/api"
 )
 
-const FileTimeoutMs = 3_600_000
+const fileTimeoutMs = 3_600_000
 
 type VolumeApiOpts struct {
 	Token            string
 	Domain           string
 	Debug            bool
 	ApiUrl           string
-	RequestTimeoutMs int
-	Logger           e2b.Logger
+	RequestTimeoutMs *int
+	Logger           api.Logger
 	Headers          map[string]string
 }
 
 type VolumeConnectionConfig struct {
+	Domain           string
+	Debug            bool
 	ApiUrl           string
 	Token            string
-	RequestTimeoutMs int
-	Logger           e2b.Logger
+	RequestTimeoutMs *int
+	Logger           api.Logger
 	Headers          map[string]string
 }
 
 func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
+	if opts == nil {
+		opts = &VolumeApiOpts{}
+	}
+
 	domain := opts.Domain
 	if domain == "" {
 		domain = os.Getenv("E2B_DOMAIN")
@@ -40,39 +47,69 @@ func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
 			domain = "e2b.app"
 		}
 	}
+	debug := opts.Debug
+	if !debug {
+		if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
+			debug = v
+		}
+	}
 	apiUrl := opts.ApiUrl
 	if apiUrl == "" {
 		apiUrl = os.Getenv("E2B_VOLUME_API_URL")
 		if apiUrl == "" {
-			apiUrl = fmt.Sprintf("https://volumes.%s", domain)
+			if debug {
+				apiUrl = "http://localhost:8080"
+			} else {
+				apiUrl = fmt.Sprintf("https://api.%s", domain)
+			}
 		}
 	}
-	timeout := opts.RequestTimeoutMs
-	if timeout == 0 {
-		timeout = FileTimeoutMs
+	headers := map[string]string{}
+	for k, v := range api.DefaultHeaders {
+		headers[k] = v
 	}
-	return &VolumeConnectionConfig{ApiUrl: apiUrl, Token: opts.Token, RequestTimeoutMs: timeout, Logger: opts.Logger, Headers: opts.Headers}
+	for k, v := range opts.Headers {
+		headers[k] = v
+	}
+
+	return &VolumeConnectionConfig{
+		Domain:           domain,
+		Debug:            debug,
+		ApiUrl:           apiUrl,
+		Token:            opts.Token,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Logger:           opts.Logger,
+		Headers:          headers,
+	}
 }
 
-func (c *VolumeConnectionConfig) GetTimeout() time.Duration {
-	return time.Duration(c.RequestTimeoutMs) * time.Millisecond
-}
-
-type VolumeApiClient struct {
+type volumeApiClient struct {
 	config     *VolumeConnectionConfig
 	httpClient *http.Client
 }
 
-func NewVolumeApiClient(config *VolumeConnectionConfig) *VolumeApiClient {
-	return &VolumeApiClient{
+type volumeApiError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *volumeApiError) Error() string {
+	return fmt.Sprintf("volume API error: %d - %s", e.StatusCode, e.Message)
+}
+
+func newVolumeApiClientWithConfig(config *VolumeConnectionConfig) *volumeApiClient {
+	return &volumeApiClient{
 		config:     config,
-		httpClient: &http.Client{Timeout: config.GetTimeout()},
+		httpClient: &http.Client{},
 	}
 }
 
-func (c *VolumeApiClient) Do(ctx context.Context, method, path string, body io.Reader, result interface{}) error {
+func (c *volumeApiClient) Do(ctx context.Context, method, path string, body io.Reader, result interface{}, requestTimeoutMs *int) error {
 	url := c.config.ApiUrl + path
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
 	if err != nil {
 		return err
 	}
@@ -88,10 +125,27 @@ func (c *VolumeApiClient) Do(ctx context.Context, method, path string, body io.R
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("volume API error: %d - %s", resp.StatusCode, string(respBody))
+		return &volumeApiError{StatusCode: resp.StatusCode, Message: string(respBody)}
 	}
 	if result != nil {
-		return json.NewDecoder(resp.Body).Decode(result)
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if len(respBody) == 0 {
+			return nil
+		}
+		return json.Unmarshal(respBody, result)
 	}
 	return nil
+}
+
+func requestContext(ctx context.Context, timeoutMs *int) (context.Context, context.CancelFunc) {
+	if timeoutMs == nil {
+		return ctx, func() {}
+	}
+	if *timeoutMs == 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
 }

@@ -39,5 +39,11 @@ type VolumeMetadataOptions struct {
 
 type VolumeWriteOptions struct {
 	VolumeMetadataOptions
-	Force bool
+	Force            bool
+	Token            string
+	Domain           string
+	Debug            bool
+	ApiUrl           string
+	RequestTimeoutMs *int
+	Headers          map[string]string
 }

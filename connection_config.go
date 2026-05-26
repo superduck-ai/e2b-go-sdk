@@ -7,14 +7,17 @@ import (
 )
 
 const (
-	RequestTimeoutMs         = 60000
-	DefaultSandboxTimeoutMs  = 300000
-	KeepalivePingIntervalSec = 50
-	KeepalivePingHeader      = "Keepalive-Ping-Interval"
-	EnvdPort                 = 49983
+	defaultRequestTimeoutMs  = 60000
+	defaultSandboxTimeoutMs  = 300000
+	keepalivePingIntervalSec = 50
+	keepalivePingHeader      = "Keepalive-Ping-Interval"
+	envdPort                 = 49983
 )
 
-const DefaultUsername = "user"
+const defaultUsername = "user"
+const sdkVersion = "dev"
+
+type Username = string
 
 type ConnectionOpts struct {
 	ApiKey           string
@@ -23,7 +26,7 @@ type ConnectionOpts struct {
 	ApiUrl           string
 	SandboxUrl       string
 	Debug            bool
-	RequestTimeoutMs int
+	RequestTimeoutMs *int
 	Logger           Logger
 	Headers          map[string]string
 }
@@ -63,16 +66,6 @@ func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
 		domain = "e2b.app"
 	}
 
-	apiUrl := opts.ApiUrl
-	if apiUrl == "" {
-		apiUrl = os.Getenv("E2B_API_URL")
-	}
-
-	sandboxUrl := opts.SandboxUrl
-	if sandboxUrl == "" {
-		sandboxUrl = os.Getenv("E2B_SANDBOX_URL")
-	}
-
 	debug := opts.Debug
 	if !debug {
 		if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
@@ -80,10 +73,32 @@ func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
 		}
 	}
 
-	requestTimeoutMs := opts.RequestTimeoutMs
-	if requestTimeoutMs == 0 {
-		requestTimeoutMs = RequestTimeoutMs
+	apiUrl := opts.ApiUrl
+	if apiUrl == "" {
+		apiUrl = os.Getenv("E2B_API_URL")
 	}
+	if apiUrl == "" && debug {
+		apiUrl = "http://localhost:3000"
+	}
+	if apiUrl == "" {
+		apiUrl = fmt.Sprintf("https://api.%s", domain)
+	}
+
+	sandboxUrl := opts.SandboxUrl
+	if sandboxUrl == "" {
+		sandboxUrl = os.Getenv("E2B_SANDBOX_URL")
+	}
+
+	requestTimeoutMs := defaultRequestTimeoutMs
+	if opts.RequestTimeoutMs != nil {
+		requestTimeoutMs = *opts.RequestTimeoutMs
+	}
+
+	headers := map[string]string{}
+	for k, v := range opts.Headers {
+		headers[k] = v
+	}
+	headers["User-Agent"] = "e2b-go-sdk/" + sdkVersion
 
 	return &ConnectionConfig{
 		Debug:            debug,
@@ -94,20 +109,30 @@ func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
 		RequestTimeoutMs: requestTimeoutMs,
 		ApiKey:           apiKey,
 		AccessToken:      accessToken,
-		Headers:          opts.Headers,
+		Headers:          headers,
 	}
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func (c *ConnectionConfig) GetSandboxUrl(sandboxId string, sandboxDomain string, envdPort int) string {
 	if c.SandboxUrl != "" {
 		return c.SandboxUrl
 	}
-	return fmt.Sprintf("https://%d-%s.%s", envdPort, sandboxId, sandboxDomain)
+	if c.Debug {
+		return fmt.Sprintf("http://localhost:%d", envdPort)
+	}
+	return fmt.Sprintf("https://%s", c.GetHost(sandboxId, envdPort, sandboxDomain))
 }
 
 func (c *ConnectionConfig) GetHost(sandboxId string, port int, sandboxDomain string) string {
-	if port == 0 {
-		return fmt.Sprintf("%s.%s", sandboxId, sandboxDomain)
+	if c.Debug {
+		return fmt.Sprintf("localhost:%d", port)
+	}
+	if sandboxDomain == "" {
+		sandboxDomain = c.Domain
 	}
 	return fmt.Sprintf("%d-%s.%s", port, sandboxId, sandboxDomain)
 }

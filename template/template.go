@@ -2,24 +2,51 @@ package template
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/e2b-dev/e2b-go-sdk/api"
 )
 
 type TemplateBase struct {
-	instructions []Instruction
-	options      *TemplateOptions
+	baseImage      string
+	baseTemplate   string
+	registryConfig *registryConfigPayload
+	startCmd       string
+	readyCmd       string
+	force          bool
+	forceNextLayer bool
+	instructions   []Instruction
+	options        *TemplateOptions
 }
 
-func NewTemplate(options *TemplateOptions) *TemplateBase {
+func Template(options *TemplateOptions) *TemplateBase {
+	return newTemplate(options)
+}
+
+func newTemplate(options *TemplateOptions) *TemplateBase {
 	return &TemplateBase{options: options}
 }
 
 // From* methods
 
 func (t *TemplateBase) FromImage(baseImage string, credentials *RegistryCredentials) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "FROM " + baseImage})
+	t.baseImage = baseImage
+	t.baseTemplate = ""
+	if credentials != nil {
+		t.registryConfig = &registryConfigPayload{
+			Type:     "registry",
+			Username: credentials.Username,
+			Password: credentials.Password,
+		}
+	} else {
+		t.registryConfig = nil
+	}
+	if t.forceNextLayer {
+		t.force = true
+	}
 	return t
 }
 
@@ -68,34 +95,84 @@ func (t *TemplateBase) FromBaseImage() *TemplateBase {
 }
 
 func (t *TemplateBase) FromTemplate(templateName string) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "FROM template:" + templateName})
+	t.baseTemplate = templateName
+	t.baseImage = ""
+	t.registryConfig = nil
+	if t.forceNextLayer {
+		t.force = true
+	}
 	return t
 }
 
 func (t *TemplateBase) FromDockerfile(content string) *TemplateBase {
-	ParseDockerfile(content, t)
+	if fileContent, err := t.resolveDockerfileInput(content); err == nil {
+		content = fileContent
+	}
+	parseDockerfile(content, t)
 	return t
 }
 
 func (t *TemplateBase) FromAWSRegistry(image string, credentials *AWSRegistryCredentials) *TemplateBase {
-	return t.FromImage(image, nil)
+	t.baseImage = image
+	t.baseTemplate = ""
+	if credentials != nil {
+		t.registryConfig = &registryConfigPayload{
+			Type:               "aws",
+			AwsAccessKeyID:     credentials.AccessKeyID,
+			AwsSecretAccessKey: credentials.SecretAccessKey,
+			AwsSessionToken:    credentials.SessionToken,
+			AwsRegion:          credentials.Region,
+		}
+	} else {
+		t.registryConfig = nil
+	}
+	if t.forceNextLayer {
+		t.force = true
+	}
+	return t
 }
 
 func (t *TemplateBase) FromGCPRegistry(image string, credentials *GCPRegistryCredentials) *TemplateBase {
-	return t.FromImage(image, nil)
+	t.baseImage = image
+	t.baseTemplate = ""
+	if credentials != nil {
+		t.registryConfig = &registryConfigPayload{
+			Type:               "gcp",
+			ServiceAccountJSON: credentials.ServiceAccountJSON,
+		}
+	} else {
+		t.registryConfig = nil
+	}
+	if t.forceNextLayer {
+		t.force = true
+	}
+	return t
 }
 
 // Builder methods
 
-type CopyOpts struct {
+func (t *TemplateBase) Copy(src, dest string, opts *struct {
 	User            string
 	Mode            string
 	ForceUpload     bool
 	ResolveSymlinks bool
-}
-
-func (t *TemplateBase) Copy(src, dest string, opts *CopyOpts) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionCopy, Args: src + " " + dest})
+}) *TemplateBase {
+	args := []string{src, dest, "", ""}
+	forceUpload := false
+	resolveSymlinks := false
+	if opts != nil {
+		args[2] = opts.User
+		args[3] = opts.Mode
+		forceUpload = opts.ForceUpload
+		resolveSymlinks = opts.ResolveSymlinks
+	}
+	t.instructions = append(t.instructions, Instruction{
+		Type:            InstructionCopy,
+		Args:            args,
+		Force:           forceUpload || t.forceNextLayer,
+		ForceUpload:     forceUpload,
+		ResolveSymlinks: resolveSymlinks,
+	})
 	return t
 }
 
@@ -106,115 +183,461 @@ func (t *TemplateBase) CopyItems(items []CopyItem) *TemplateBase {
 	return t
 }
 
-type RemoveOpts struct {
+func (t *TemplateBase) Remove(path string, opts *struct {
 	Force bool
-}
-
-func (t *TemplateBase) Remove(path string, opts *RemoveOpts) *TemplateBase {
+}) *TemplateBase {
 	force := ""
 	if opts != nil && opts.Force {
 		force = "-f "
 	}
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "rm -r " + force + path})
+	t.instructions = append(t.instructions, Instruction{
+		Type:  InstructionRun,
+		Args:  []string{"rm -r " + force + path},
+		Force: t.forceNextLayer,
+	})
 	return t
 }
 
-func (t *TemplateBase) Rename(src, dest string, opts *CopyOpts) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "mv " + src + " " + dest})
+func (t *TemplateBase) Rename(src, dest string, opts *struct {
+	User            string
+	Mode            string
+	ForceUpload     bool
+	ResolveSymlinks bool
+}) *TemplateBase {
+	args := []string{"mv " + src + " " + dest}
+	if opts != nil && opts.User != "" {
+		args = append(args, opts.User)
+	}
+	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
 	return t
 }
 
-func (t *TemplateBase) MakeDir(path string, opts *CopyOpts) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "mkdir -p " + path})
+func (t *TemplateBase) MakeDir(path string, opts *struct {
+	User            string
+	Mode            string
+	ForceUpload     bool
+	ResolveSymlinks bool
+}) *TemplateBase {
+	cmd := "mkdir -p " + path
+	if opts != nil && opts.Mode != "" {
+		cmd = "mkdir -p -m " + opts.Mode + " " + path
+	}
+	args := []string{cmd}
+	if opts != nil && opts.User != "" {
+		args = append(args, opts.User)
+	}
+	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
 	return t
 }
 
-func (t *TemplateBase) MakeSymlink(src, dest string, opts *CopyOpts) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "ln -s " + src + " " + dest})
+func (t *TemplateBase) MakeSymlink(src, dest string, opts *struct {
+	User            string
+	Mode            string
+	ForceUpload     bool
+	ResolveSymlinks bool
+}) *TemplateBase {
+	cmd := "ln -s " + src + " " + dest
+	args := []string{cmd}
+	if opts != nil && opts.User != "" {
+		args = append(args, opts.User)
+	}
+	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: t.forceNextLayer})
 	return t
 }
 
-type RunCmdOpts struct {
+func (t *TemplateBase) RunCmd(command string, opts *struct {
 	Force bool
-}
-
-func (t *TemplateBase) RunCmd(command string, opts *RunCmdOpts) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: command})
+	User  string
+}) *TemplateBase {
+	args := []string{command}
+	force := t.forceNextLayer
+	if opts != nil {
+		force = force || opts.Force
+		if opts.User != "" {
+			args = append(args, opts.User)
+		}
+	}
+	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: force})
 	return t
 }
 
 func (t *TemplateBase) SetWorkdir(workdir string) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionWorkdir, Args: workdir})
+	t.instructions = append(t.instructions, Instruction{Type: InstructionWorkdir, Args: []string{workdir}, Force: t.forceNextLayer})
 	return t
 }
 
 func (t *TemplateBase) SetUser(user string) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionUser, Args: user})
+	t.instructions = append(t.instructions, Instruction{Type: InstructionUser, Args: []string{user}, Force: t.forceNextLayer})
 	return t
 }
 
-type InstallOpts struct {
+func (t *TemplateBase) PipInstall(packages []string, opts *struct {
 	Force bool
-}
-
-func (t *TemplateBase) PipInstall(packages []string, opts *InstallOpts) *TemplateBase {
+}) *TemplateBase {
 	if len(packages) == 0 {
 		return t.RunCmd("pip install -r requirements.txt", nil)
 	}
 	return t.RunCmd("pip install "+joinPackages(packages), nil)
 }
 
-func (t *TemplateBase) NpmInstall(packages []string, opts *InstallOpts) *TemplateBase {
+func (t *TemplateBase) NpmInstall(packages []string, opts *struct {
+	Force bool
+}) *TemplateBase {
 	if len(packages) == 0 {
 		return t.RunCmd("npm install", nil)
 	}
 	return t.RunCmd("npm install "+joinPackages(packages), nil)
 }
 
-func (t *TemplateBase) BunInstall(packages []string, opts *InstallOpts) *TemplateBase {
+func (t *TemplateBase) BunInstall(packages []string, opts *struct {
+	Force bool
+}) *TemplateBase {
 	if len(packages) == 0 {
 		return t.RunCmd("bun install", nil)
 	}
 	return t.RunCmd("bun add "+joinPackages(packages), nil)
 }
 
-func (t *TemplateBase) AptInstall(packages []string, opts *InstallOpts) *TemplateBase {
+func (t *TemplateBase) AptInstall(packages []string, opts *struct {
+	Force bool
+}) *TemplateBase {
 	return t.RunCmd("apt-get update && apt-get install -y "+joinPackages(packages), nil)
 }
 
-func (t *TemplateBase) GitClone(url, path string, opts *CopyOpts) *TemplateBase {
+func (t *TemplateBase) AddMcpServer(servers ...string) *TemplateBase {
+	if len(servers) == 0 {
+		return t
+	}
+	return t.RunCmd("mcp-gateway pull "+strings.Join(servers, " "), &struct {
+		Force bool
+		User  string
+	}{User: "root"})
+}
+
+func (t *TemplateBase) GitClone(url, path string, opts *struct {
+	User            string
+	Mode            string
+	ForceUpload     bool
+	ResolveSymlinks bool
+}) *TemplateBase {
 	cmd := "git clone " + url
 	if path != "" {
 		cmd += " " + path
 	}
-	return t.RunCmd(cmd, nil)
+	runOpts := &struct {
+		Force bool
+		User  string
+	}{}
+	if opts != nil {
+		runOpts.User = opts.User
+	}
+	return t.RunCmd(cmd, runOpts)
 }
 
 func (t *TemplateBase) SetEnvs(envs map[string]string) *TemplateBase {
+	if len(envs) == 0 {
+		return t
+	}
 	for k, v := range envs {
-		t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: k + "=" + v})
+		t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: []string{k, v}, Force: t.forceNextLayer})
 	}
 	return t
 }
 
 func (t *TemplateBase) SkipCache() *TemplateBase {
-	if len(t.instructions) > 0 {
-		t.instructions[len(t.instructions)-1].Force = true
+	t.forceNextLayer = true
+	return t
+}
+
+func (t *TemplateBase) SetStartCmd(startCommand string, readyCommand interface{}) *TemplateBase {
+	t.startCmd = startCommand
+	if cmd, ok := resolveReadyCommand(readyCommand); ok {
+		t.readyCmd = cmd
 	}
 	return t
 }
 
-func (t *TemplateBase) SetStartCmd(startCommand string, readyCommand *ReadyCmd) *TemplateBase {
-	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: "CMD " + startCommand})
+func (t *TemplateBase) SetReadyCmd(readyCommand interface{}) *TemplateBase {
+	if cmd, ok := resolveReadyCommand(readyCommand); ok {
+		t.readyCmd = cmd
+	}
 	return t
 }
 
-func (t *TemplateBase) SetReadyCmd(readyCommand *ReadyCmd) *TemplateBase {
-	return t
+func (t *TemplateBase) BetaDevContainerPrebuild(devcontainerDirectory string) *TemplateBase {
+	return t.RunCmd("devcontainer build --workspace-folder "+devcontainerDirectory, &struct {
+		Force bool
+		User  string
+	}{User: "root"})
 }
 
-func (t *TemplateBase) GetInstructions() []Instruction {
+func (t *TemplateBase) BetaSetDevContainerStart(devcontainerDirectory string) *TemplateBase {
+	return t.SetStartCmd(
+		"sudo devcontainer up --workspace-folder "+devcontainerDirectory+
+			" && sudo /prepare-exec.sh "+devcontainerDirectory+
+			" | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up",
+		WaitForFile("/devcontainer.up"),
+	)
+}
+
+func (t *TemplateBase) instructionsList() []Instruction {
 	return t.instructions
+}
+
+func (t *TemplateBase) fileContextPath() string {
+	if t.options != nil && t.options.FileContextPath != "" {
+		return t.options.FileContextPath
+	}
+	return "."
+}
+
+func (t *TemplateBase) fileIgnorePatterns() []string {
+	var patterns []string
+	if t.options != nil && len(t.options.FileIgnorePatterns) > 0 {
+		patterns = append(patterns, t.options.FileIgnorePatterns...)
+	}
+	patterns = append(patterns, readDockerignore(t.fileContextPath())...)
+	return patterns
+}
+
+func ToJSON(template *TemplateBase, computeHashes ...bool) (string, error) {
+	if template == nil {
+		template = Template(nil)
+	}
+
+	serialized := template.serialize()
+	if len(computeHashes) > 0 && computeHashes[0] {
+		steps, err := template.instructionsWithHashes()
+		if err != nil {
+			return "", err
+		}
+		serialized = template.serializeWithSteps(steps)
+	}
+
+	data, err := json.MarshalIndent(serialized, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
+}
+
+func ToDockerfile(template *TemplateBase) (string, error) {
+	if template == nil {
+		return "", fmt.Errorf("No base image specified for template")
+	}
+	if template.baseTemplate != "" {
+		return "", fmt.Errorf("Cannot convert template built from another template to Dockerfile. Templates based on other templates can only be built using the E2B API.")
+	}
+	if template.baseImage == "" {
+		return "", fmt.Errorf("No base image specified for template")
+	}
+
+	var dockerfile strings.Builder
+	dockerfile.WriteString("FROM ")
+	dockerfile.WriteString(template.baseImage)
+	dockerfile.WriteByte('\n')
+
+	for _, instruction := range template.instructionsList() {
+		switch instruction.Type {
+		case InstructionRun:
+			if len(instruction.Args) == 0 {
+				continue
+			}
+			dockerfile.WriteString("RUN ")
+			dockerfile.WriteString(instruction.Args[0])
+			dockerfile.WriteByte('\n')
+		case InstructionCopy:
+			if len(instruction.Args) >= 2 {
+				dockerfile.WriteString("COPY ")
+				dockerfile.WriteString(instruction.Args[0])
+				dockerfile.WriteByte(' ')
+				dockerfile.WriteString(instruction.Args[1])
+				dockerfile.WriteByte('\n')
+			}
+		case InstructionEnv:
+			if len(instruction.Args) > 0 {
+				pairs := make([]string, 0, len(instruction.Args)/2)
+				for i := 0; i+1 < len(instruction.Args); i += 2 {
+					pairs = append(pairs, instruction.Args[i]+"="+instruction.Args[i+1])
+				}
+				if len(pairs) > 0 {
+					dockerfile.WriteString("ENV ")
+					dockerfile.WriteString(strings.Join(pairs, " "))
+					dockerfile.WriteByte('\n')
+				}
+			}
+		case InstructionWorkdir:
+			if len(instruction.Args) > 0 {
+				dockerfile.WriteString("WORKDIR ")
+				dockerfile.WriteString(instruction.Args[0])
+				dockerfile.WriteByte('\n')
+			}
+		case InstructionUser:
+			if len(instruction.Args) > 0 {
+				dockerfile.WriteString("USER ")
+				dockerfile.WriteString(instruction.Args[0])
+				dockerfile.WriteByte('\n')
+			}
+		default:
+			if len(instruction.Args) > 0 {
+				dockerfile.WriteString(string(instruction.Type))
+				dockerfile.WriteByte(' ')
+				dockerfile.WriteString(strings.Join(instruction.Args, " "))
+				dockerfile.WriteByte('\n')
+			}
+		}
+	}
+	if template.startCmd != "" {
+		dockerfile.WriteString("ENTRYPOINT ")
+		dockerfile.WriteString(template.startCmd)
+		dockerfile.WriteByte('\n')
+	}
+
+	return dockerfile.String(), nil
+}
+
+func (t *TemplateBase) serialize() triggerBuildTemplate {
+	return t.serializeWithSteps(t.instructionsList())
+}
+
+func (t *TemplateBase) serializeWithSteps(steps []Instruction) triggerBuildTemplate {
+	payloads := make([]instructionPayload, len(steps))
+	for i, inst := range steps {
+		payloads[i] = instructionPayload{
+			Type:            inst.Type,
+			Args:            inst.Args,
+			Force:           inst.Force,
+			ForceUpload:     inst.ForceUpload,
+			FilesHash:       inst.FilesHash,
+			ResolveSymlinks: inst.ResolveSymlinks,
+		}
+	}
+
+	return triggerBuildTemplate{
+		StartCmd:          t.startCmd,
+		ReadyCmd:          t.readyCmd,
+		Steps:             payloads,
+		Force:             t.force,
+		FromImage:         t.baseImage,
+		FromTemplate:      t.baseTemplate,
+		FromImageRegistry: t.registryConfig,
+	}
+}
+
+func (t *TemplateBase) instructionsWithHashes() ([]Instruction, error) {
+	steps := make([]Instruction, len(t.instructions))
+	copy(steps, t.instructions)
+
+	for i, instruction := range steps {
+		if instruction.Type != InstructionCopy {
+			continue
+		}
+		if len(instruction.Args) < 2 {
+			return nil, fmt.Errorf("Source path and destination path are required")
+		}
+
+		resolve := instruction.ResolveSymlinks
+		if !instruction.ResolveSymlinks {
+			resolve = resolveSymlinks
+		}
+
+		filesHash, err := calculateFilesHash(
+			instruction.Args[0],
+			instruction.Args[1],
+			t.fileContextPath(),
+			t.fileIgnorePatterns(),
+			resolve,
+		)
+		if err != nil {
+			return nil, err
+		}
+		steps[i].FilesHash = filesHash
+	}
+
+	return steps, nil
+}
+
+func (t *TemplateBase) uploadCopySources(ctx context.Context, client *api.ApiClient, templateID string, steps []Instruction) error {
+	for _, instruction := range steps {
+		if instruction.Type != InstructionCopy {
+			continue
+		}
+		if len(instruction.Args) < 1 || instruction.FilesHash == "" {
+			return fmt.Errorf("Source path and files hash are required")
+		}
+
+		link, err := getFileUploadLink(ctx, client, templateID, instruction.FilesHash)
+		if err != nil {
+			return err
+		}
+		if link == nil || link.URL == "" {
+			continue
+		}
+		if !instruction.ForceUpload && link.Present {
+			continue
+		}
+
+		resolve := instruction.ResolveSymlinks
+		if !instruction.ResolveSymlinks {
+			resolve = resolveSymlinks
+		}
+		archive, err := tarFileBytes(
+			instruction.Args[0],
+			t.fileContextPath(),
+			t.fileIgnorePatterns(),
+			resolve,
+		)
+		if err != nil {
+			return err
+		}
+		if err := uploadFile(ctx, link.URL, archive); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *TemplateBase) resolveDockerfileInput(content string) (string, error) {
+	candidates := []string{content}
+	if t.options != nil && t.options.FileContextPath != "" {
+		candidates = append(candidates, filepathJoinIfRelative(t.options.FileContextPath, content))
+	}
+
+	for _, candidate := range candidates {
+		data, err := os.ReadFile(candidate)
+		if err == nil {
+			return string(data), nil
+		}
+	}
+
+	return "", fmt.Errorf("dockerfile path not found")
+}
+
+func resolveReadyCommand(readyCommand interface{}) (string, bool) {
+	switch value := readyCommand.(type) {
+	case nil:
+		return "", false
+	case string:
+		return value, true
+	case *ReadyCmd:
+		if value == nil {
+			return "", false
+		}
+		return value.Command, true
+	default:
+		return "", false
+	}
+}
+
+func filepathJoinIfRelative(base, value string) string {
+	if base == "" || value == "" {
+		return value
+	}
+	if strings.HasPrefix(value, "/") {
+		return value
+	}
+	return base + string(os.PathSeparator) + value
 }
 
 // newApiClientFromBuildOptions creates an ApiClient from BuildOptions.
@@ -225,6 +648,10 @@ func newApiClientFromBuildOptions(opts *BuildOptions) (*api.ApiClient, error) {
 		Domain:      opts.Domain,
 		ApiUrl:      opts.ApiUrl,
 		Headers:     opts.Headers,
+		Logger:      opts.Logger,
+	}
+	if opts.RequestTimeoutMs != nil {
+		config.RequestTimeoutMs = *opts.RequestTimeoutMs
 	}
 	if config.Domain == "" {
 		config.Domain = "e2b.dev"
@@ -239,6 +666,11 @@ func newApiClientFromStatusOptions(opts *GetBuildStatusOptions) (*api.ApiClient,
 		AccessToken: opts.AccessToken,
 		Domain:      opts.Domain,
 		ApiUrl:      opts.ApiUrl,
+		Headers:     opts.Headers,
+		Logger:      opts.Logger,
+	}
+	if opts.RequestTimeoutMs != nil {
+		config.RequestTimeoutMs = *opts.RequestTimeoutMs
 	}
 	if config.Domain == "" {
 		config.Domain = "e2b.dev"
@@ -253,6 +685,9 @@ func Build(ctx context.Context, template *TemplateBase, name string, opts *Build
 	if opts == nil {
 		opts = &BuildOptions{}
 	}
+	if opts.Alias != "" && name == "" {
+		name = opts.Alias
+	}
 
 	client, err := newApiClientFromBuildOptions(opts)
 	if err != nil {
@@ -268,14 +703,21 @@ func Build(ctx context.Context, template *TemplateBase, name string, opts *Build
 		memoryMB = 512
 	}
 
-	buildInfo, err := RequestBuild(ctx, client, name, opts.Tags, cpuCount, memoryMB)
+	buildInfo, err := requestBuild(ctx, client, name, opts.Tags, cpuCount, memoryMB)
 	if err != nil {
 		return nil, err
 	}
 
-	instructions := template.GetInstructions()
+	steps, err := template.instructionsWithHashes()
+	if err != nil {
+		return nil, err
+	}
 
-	err = TriggerBuild(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, instructions)
+	if err := template.uploadCopySources(ctx, client, buildInfo.TemplateID, steps); err != nil {
+		return nil, err
+	}
+
+	err = triggerBuild(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, template.serializeWithSteps(steps))
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +727,14 @@ func Build(ctx context.Context, template *TemplateBase, name string, opts *Build
 		logger = DefaultBuildLogger()
 	}
 
-	_, err = WaitForBuildFinish(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, logger)
+	_, err = waitForBuildFinish(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	// Assign tags if specified
 	if len(opts.Tags) > 0 {
-		if err := AssignTags(ctx, client, name, opts.Tags); err != nil {
+		if _, err := assignTags(ctx, client, name, opts.Tags); err != nil {
 			return nil, fmt.Errorf("failed to assign tags: %w", err)
 		}
 	}
@@ -305,6 +747,9 @@ func BuildInBackground(ctx context.Context, template *TemplateBase, name string,
 	if opts == nil {
 		opts = &BuildOptions{}
 	}
+	if opts.Alias != "" && name == "" {
+		name = opts.Alias
+	}
 
 	client, err := newApiClientFromBuildOptions(opts)
 	if err != nil {
@@ -320,14 +765,21 @@ func BuildInBackground(ctx context.Context, template *TemplateBase, name string,
 		memoryMB = 512
 	}
 
-	buildInfo, err := RequestBuild(ctx, client, name, opts.Tags, cpuCount, memoryMB)
+	buildInfo, err := requestBuild(ctx, client, name, opts.Tags, cpuCount, memoryMB)
 	if err != nil {
 		return nil, err
 	}
 
-	instructions := template.GetInstructions()
+	steps, err := template.instructionsWithHashes()
+	if err != nil {
+		return nil, err
+	}
 
-	err = TriggerBuild(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, instructions)
+	if err := template.uploadCopySources(ctx, client, buildInfo.TemplateID, steps); err != nil {
+		return nil, err
+	}
+
+	err = triggerBuild(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, template.serializeWithSteps(steps))
 	if err != nil {
 		return nil, err
 	}
@@ -335,8 +787,8 @@ func BuildInBackground(ctx context.Context, template *TemplateBase, name string,
 	return buildInfo, nil
 }
 
-// GetBuildStatusByData retrieves the build status for a given template and build.
-func GetBuildStatusByData(ctx context.Context, templateID, buildID string, opts *GetBuildStatusOptions) (*TemplateBuildStatusResponse, error) {
+// GetBuildStatus retrieves the build status for a given template and build.
+func GetBuildStatus(ctx context.Context, templateID, buildID string, opts *GetBuildStatusOptions) (*TemplateBuildStatusResponse, error) {
 	if opts == nil {
 		opts = &GetBuildStatusOptions{}
 	}
@@ -346,7 +798,7 @@ func GetBuildStatusByData(ctx context.Context, templateID, buildID string, opts 
 		return nil, err
 	}
 
-	return GetBuildStatusFromAPI(ctx, client, templateID, buildID, opts.LogsOffset)
+	return getBuildStatusFromAPI(ctx, client, templateID, buildID, opts.LogsOffset)
 }
 
 // Exists checks whether a template with the given name exists.
@@ -360,11 +812,25 @@ func Exists(ctx context.Context, name string, opts *BuildOptions) (bool, error) 
 		return false, err
 	}
 
-	return CheckAliasExists(ctx, client, name)
+	return checkAliasExists(ctx, client, name)
 }
 
-// AssignTemplateTags assigns tags to a template.
-func AssignTemplateTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) error {
+// AssignTags assigns tags to a template.
+func AssignTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) (*TemplateTagInfo, error) {
+	if opts == nil {
+		opts = &BuildOptions{}
+	}
+
+	client, err := newApiClientFromBuildOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return assignTags(ctx, client, targetName, tags)
+}
+
+// RemoveTags removes tags from a template.
+func RemoveTags(ctx context.Context, name string, tags []string, opts *BuildOptions) error {
 	if opts == nil {
 		opts = &BuildOptions{}
 	}
@@ -374,21 +840,7 @@ func AssignTemplateTags(ctx context.Context, targetName string, tags []string, o
 		return err
 	}
 
-	return AssignTags(ctx, client, targetName, tags)
-}
-
-// RemoveTemplateTags removes tags from a template.
-func RemoveTemplateTags(ctx context.Context, name string, tags []string, opts *BuildOptions) error {
-	if opts == nil {
-		opts = &BuildOptions{}
-	}
-
-	client, err := newApiClientFromBuildOptions(opts)
-	if err != nil {
-		return err
-	}
-
-	return RemoveTags(ctx, client, name, tags)
+	return removeTags(ctx, client, name, tags)
 }
 
 // GetTags retrieves all tags for a template.
@@ -402,7 +854,7 @@ func GetTags(ctx context.Context, templateID string, opts *BuildOptions) ([]Temp
 		return nil, err
 	}
 
-	return GetTemplateTags(ctx, client, templateID)
+	return getTemplateTags(ctx, client, templateID)
 }
 
 func joinPackages(packages []string) string {

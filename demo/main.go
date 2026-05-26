@@ -137,11 +137,10 @@ func main() {
 }
 
 func handleListSandboxes(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	paginator := e2b.ListSandboxes(nil)
+	paginator := e2b.List(nil)
 	var items []map[string]interface{}
 	for paginator.HasNext {
-		page, err := paginator.NextItems(ctx)
+		page, err := paginator.NextItems()
 		if err != nil {
 			jsonError(w, 500, err.Error())
 			return
@@ -225,8 +224,8 @@ func handleEnv(w http.ResponseWriter, r *http.Request) {
 
 func handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		TemplateID          string            `json:"templateId"`
-		AllowInternetAccess *bool             `json:"allowInternetAccess,omitempty"`
+		TemplateID          string `json:"templateId"`
+		AllowInternetAccess *bool  `json:"allowInternetAccess,omitempty"`
 		Network             *struct {
 			AllowOut           []string `json:"allowOut"`
 			DenyOut            []string `json:"denyOut"`
@@ -261,11 +260,9 @@ func handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		opts.Network = net
 	}
 	if len(body.VolumeMounts) > 0 {
+		opts.VolumeMounts = make(map[string]any, len(body.VolumeMounts))
 		for mountPath, volumeName := range body.VolumeMounts {
-			opts.VolumeMounts = append(opts.VolumeMounts, e2b.VolumeMountInfo{
-				VolumeID:  volumeName,
-				MountPath: mountPath,
-			})
+			opts.VolumeMounts[mountPath] = volumeName
 		}
 	}
 	if len(body.Metadata) > 0 {
@@ -273,7 +270,7 @@ func handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	sb, err := e2b.CreateSandbox(ctx, body.TemplateID, opts)
+	sb, err := e2b.Create(ctx, body.TemplateID, opts)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.error",
@@ -315,7 +312,7 @@ func handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	})
 
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.command.completed",
@@ -391,7 +388,7 @@ func handleListFiles(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -422,7 +419,7 @@ func handleFileInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -446,7 +443,7 @@ func handleReadFile(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -472,7 +469,7 @@ func handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -525,7 +522,7 @@ func handleGetHost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 502, err.Error())
 		return
@@ -536,7 +533,7 @@ func handleGetHost(w http.ResponseWriter, r *http.Request) {
 func handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.error",
@@ -546,7 +543,7 @@ func handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 502, err.Error())
 		return
 	}
-	snap, err := sb.CreateSandboxSnapshot(ctx, nil)
+	snap, err := sb.CreateSnapshot(ctx, nil)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.error",
@@ -565,17 +562,15 @@ func handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListSnapshots(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	sandboxId := r.URL.Query().Get("sandboxId")
-	var api e2b.SandboxApi
 	opts := &e2b.SnapshotListOpts{}
 	if sandboxId != "" {
 		opts.SandboxID = sandboxId
 	}
-	paginator := api.ListSnapshots(ctx, opts)
+	paginator := e2b.ListSnapshots(opts)
 	var snapshots []map[string]interface{}
 	for paginator.HasNext {
-		page, err := paginator.NextItems(ctx)
+		page, err := paginator.NextItems()
 		if err != nil {
 			if strings.Contains(err.Error(), "404") {
 				jsonResponse(w, 200, map[string]interface{}{"snapshots": []interface{}{}, "listUnavailableReason": "list_snapshots_404"})
@@ -596,8 +591,7 @@ func handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
-	var api e2b.SandboxApi
-	deleted, err := api.DeleteSnapshot(ctx, id, nil)
+	deleted, err := e2b.DeleteSnapshot(ctx, id, nil)
 	if err != nil {
 		jsonError(w, 500, err.Error())
 		return
@@ -608,8 +602,7 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 func handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
-	var api e2b.SandboxApi
-	paused, err := api.Pause(ctx, id, nil)
+	paused, err := e2b.Pause(ctx, id, nil)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "already paused") {
 			jsonResponse(w, 200, map[string]interface{}{"ok": true, "alreadyPaused": true})
@@ -635,7 +628,7 @@ func handlePauseSandbox(w http.ResponseWriter, r *http.Request) {
 func handleResumeSandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
-	sb, err := e2b.ConnectSandbox(ctx, id, nil)
+	sb, err := e2b.Connect(ctx, id, nil)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.error",
@@ -692,7 +685,7 @@ func handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 func handleGetVolume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
-	info, err := volume.GetVolumeInfo(ctx, id, nil)
+	info, err := volume.GetInfo(ctx, id, nil)
 	if err != nil {
 		status := 500
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
@@ -973,19 +966,19 @@ func handleTemplates(w http.ResponseWriter, r *http.Request) {
 		}
 		if buildId.Valid {
 			t["latestBuild"] = map[string]interface{}{
-				"buildId":              buildId.String,
-				"status":              status.String,
-				"statusGroup":         statusGroup.String,
-				"dockerfile":          dockerfile.String,
-				"startCmd":            startCmd.String,
-				"vcpu":                vcpu.Int64,
-				"ramMB":               ramMB.Int64,
-				"freeDiskSizeMB":      freeDisk.Int64,
-				"totalDiskSizeMB":     totalDisk.Int64,
-				"kernelVersion":       kernelVersion.String,
-				"firecrackerVersion":  firecrackerVersion.String,
-				"envdVersion":         envdVersion.String,
-				"finishedAt":          nullTimeVal(buildFinishedAt),
+				"buildId":            buildId.String,
+				"status":             status.String,
+				"statusGroup":        statusGroup.String,
+				"dockerfile":         dockerfile.String,
+				"startCmd":           startCmd.String,
+				"vcpu":               vcpu.Int64,
+				"ramMB":              ramMB.Int64,
+				"freeDiskSizeMB":     freeDisk.Int64,
+				"totalDiskSizeMB":    totalDisk.Int64,
+				"kernelVersion":      kernelVersion.String,
+				"firecrackerVersion": firecrackerVersion.String,
+				"envdVersion":        envdVersion.String,
+				"finishedAt":         nullTimeVal(buildFinishedAt),
 			}
 		} else {
 			t["latestBuild"] = nil
@@ -1029,8 +1022,7 @@ func handleKillSandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ctx := r.Context()
 	t0 := time.Now()
-	var api e2b.SandboxApi
-	_, err := api.KillSandbox(ctx, id, nil)
+	_, err := e2b.Kill(ctx, id, nil)
 	if err != nil {
 		emit(LifecycleEvent{
 			Type:      "sandbox.error",

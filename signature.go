@@ -1,14 +1,13 @@
 package e2b
 
 import (
-	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"time"
 )
 
-type SignatureOpts struct {
+type signatureOpts struct {
 	Path                string
 	Operation           string // "read" or "write"
 	User                string
@@ -16,34 +15,36 @@ type SignatureOpts struct {
 	EnvdAccessToken     string
 }
 
-type SignatureResult struct {
+type signatureResult struct {
 	Signature  string
 	Expiration *int64
 }
 
-func GetSignature(opts SignatureOpts) (*SignatureResult, error) {
+func GetSignature(path string, operation string, user string, expirationInSeconds int, envdAccessToken string) (string, *int64, error) {
+	opts := signatureOpts{
+		Path:                path,
+		Operation:           operation,
+		User:                user,
+		ExpirationInSeconds: expirationInSeconds,
+		EnvdAccessToken:     envdAccessToken,
+	}
+
 	if opts.EnvdAccessToken == "" {
-		return &SignatureResult{
-			Signature:  "",
-			Expiration: nil,
-		}, nil
+		return "", nil, fmt.Errorf("access token is not set and signature cannot be generated")
 	}
 
-	expirationSeconds := opts.ExpirationInSeconds
-	if expirationSeconds == 0 {
-		expirationSeconds = 900
+	resolvedUser := opts.User
+	raw := fmt.Sprintf("%s:%s:%s:%s", opts.Path, opts.Operation, resolvedUser, opts.EnvdAccessToken)
+
+	var expiration *int64
+	if opts.ExpirationInSeconds > 0 {
+		exp := time.Now().Unix() + int64(opts.ExpirationInSeconds)
+		expiration = &exp
+		raw = fmt.Sprintf("%s:%d", raw, exp)
 	}
 
-	expiration := time.Now().Unix() + int64(expirationSeconds)
+	sum := sha256.Sum256([]byte(raw))
+	signature := "v1_" + base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString(sum[:])
 
-	message := fmt.Sprintf("%s:%s:%s:%d", opts.Operation, opts.Path, opts.User, expiration)
-
-	mac := hmac.New(sha256.New, []byte(opts.EnvdAccessToken))
-	mac.Write([]byte(message))
-	signature := "v1_" + hex.EncodeToString(mac.Sum(nil))
-
-	return &SignatureResult{
-		Signature:  signature,
-		Expiration: &expiration,
-	}, nil
+	return signature, expiration, nil
 }

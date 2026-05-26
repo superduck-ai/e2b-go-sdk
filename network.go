@@ -1,3 +1,3 @@
 package e2b
 
-const AllTraffic = "0.0.0.0/0"
+const ALL_TRAFFIC = "0.0.0.0/0"

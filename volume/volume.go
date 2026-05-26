@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,28 +13,33 @@ import (
 	"strconv"
 
 	"github.com/e2b-dev/e2b-go-sdk/api"
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
-type VolumeOpts struct {
+type ConnectionOpts struct {
 	ApiKey           string
 	AccessToken      string
 	Domain           string
 	ApiUrl           string
+	SandboxUrl       string
 	Debug            bool
-	RequestTimeoutMs int
+	RequestTimeoutMs *int
+	Logger           api.Logger
 	Headers          map[string]string
 }
 
 type Volume struct {
 	VolumeID string
 	Name     string
-	token    string
-	client   *VolumeApiClient
+	Token    string
+	Domain   string
+	Debug    bool
+	client   *volumeApiClient
 }
 
-func buildApiClientConfig(opts *VolumeOpts) *api.ClientConfig {
+func buildApiClientConfig(opts *ConnectionOpts) *api.ClientConfig {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 
 	apiKey := opts.ApiKey
@@ -58,10 +64,13 @@ func buildApiClientConfig(opts *VolumeOpts) *api.ClientConfig {
 	if apiUrl == "" {
 		apiUrl = os.Getenv("E2B_API_URL")
 	}
+	if apiUrl == "" && opts.Debug {
+		apiUrl = "http://localhost:3000"
+	}
 
-	timeout := opts.RequestTimeoutMs
-	if timeout == 0 {
-		timeout = 60000
+	timeout := 60000
+	if opts.RequestTimeoutMs != nil {
+		timeout = *opts.RequestTimeoutMs
 	}
 
 	return &api.ClientConfig{
@@ -70,35 +79,34 @@ func buildApiClientConfig(opts *VolumeOpts) *api.ClientConfig {
 		Domain:           domain,
 		ApiUrl:           apiUrl,
 		RequestTimeoutMs: timeout,
+		Logger:           opts.Logger,
 		Headers:          opts.Headers,
 	}
 }
 
-func newVolumeApiClient(volumeID string, token string, opts *VolumeOpts) *VolumeApiClient {
+func newVolumeApiClient(volumeID string, token string, opts *ConnectionOpts) *volumeApiClient {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 	apiOpts := &VolumeApiOpts{
-		Token:            token,
-		Domain:           opts.Domain,
-		ApiUrl:           "",
-		RequestTimeoutMs: opts.RequestTimeoutMs,
-		Headers:          opts.Headers,
+		Token:  token,
+		Domain: opts.Domain,
+		Debug:  opts.Debug,
 	}
 	config := NewVolumeConnectionConfig(apiOpts)
-	return NewVolumeApiClient(config)
+	return newVolumeApiClientWithConfig(config)
 }
 
 // Create creates a new volume with the given name.
-func Create(ctx context.Context, name string, opts *VolumeOpts) (*Volume, error) {
+func Create(ctx context.Context, name string, opts *ConnectionOpts) (*Volume, error) {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 
 	clientConfig := buildApiClientConfig(opts)
 	apiClient, err := api.NewApiClient(clientConfig, api.WithRequireApiKey())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API client: %w", err)
+		return nil, err
 	}
 
 	type createRequest struct {
@@ -113,21 +121,26 @@ func Create(ctx context.Context, name string, opts *VolumeOpts) (*Volume, error)
 	var resp createResponse
 	_, err = apiClient.Post(ctx, "/volumes", &createRequest{Name: name}, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create volume: %w", err)
+		return nil, wrapControlPlaneVolumeError(err, "")
 	}
 
 	v := &Volume{
 		VolumeID: resp.VolumeID,
 		Name:     resp.Name,
-		token:    resp.Token,
+		Token:    resp.Token,
 	}
-	v.client = newVolumeApiClient(v.VolumeID, v.token, opts)
+	if v.VolumeID == "" && v.Name == "" && v.Token == "" {
+		return nil, fmt.Errorf("Response data is missing")
+	}
+	v.client = newVolumeApiClient(v.VolumeID, v.Token, opts)
+	v.Domain = v.client.config.Domain
+	v.Debug = v.client.config.Debug
 	return v, nil
 }
 
 // Connect connects to an existing volume by its ID.
-func Connect(ctx context.Context, volumeId string, opts *VolumeOpts) (*Volume, error) {
-	info, err := GetVolumeInfo(ctx, volumeId, opts)
+func Connect(ctx context.Context, volumeId string, opts *ConnectionOpts) (*Volume, error) {
+	info, err := GetInfo(ctx, volumeId, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -135,22 +148,27 @@ func Connect(ctx context.Context, volumeId string, opts *VolumeOpts) (*Volume, e
 	v := &Volume{
 		VolumeID: info.VolumeID,
 		Name:     info.Name,
-		token:    info.Token,
+		Token:    info.Token,
 	}
-	v.client = newVolumeApiClient(v.VolumeID, v.token, opts)
+	if v.VolumeID == "" && v.Name == "" && v.Token == "" {
+		return nil, fmt.Errorf("Response data is missing")
+	}
+	v.client = newVolumeApiClient(v.VolumeID, v.Token, opts)
+	v.Domain = v.client.config.Domain
+	v.Debug = v.client.config.Debug
 	return v, nil
 }
 
-// GetVolumeInfo retrieves information about a volume including its access token.
-func GetVolumeInfo(ctx context.Context, volumeId string, opts *VolumeOpts) (*VolumeAndToken, error) {
+// GetInfo retrieves information about a volume including its access token.
+func GetInfo(ctx context.Context, volumeId string, opts *ConnectionOpts) (*VolumeAndToken, error) {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 
 	clientConfig := buildApiClientConfig(opts)
 	apiClient, err := api.NewApiClient(clientConfig, api.WithRequireApiKey())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API client: %w", err)
+		return nil, err
 	}
 
 	type infoResponse struct {
@@ -162,7 +180,7 @@ func GetVolumeInfo(ctx context.Context, volumeId string, opts *VolumeOpts) (*Vol
 	var resp infoResponse
 	_, err = apiClient.Get(ctx, "/volumes/"+url.PathEscape(volumeId), &resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get volume info: %w", err)
+		return nil, wrapControlPlaneVolumeError(err, fmt.Sprintf("Volume %s not found", volumeId))
 	}
 
 	return &VolumeAndToken{
@@ -171,19 +189,19 @@ func GetVolumeInfo(ctx context.Context, volumeId string, opts *VolumeOpts) (*Vol
 			Name:     resp.Name,
 		},
 		Token: resp.Token,
-	}, nil
+	}, ensureVolumeAndTokenData(resp)
 }
 
 // List returns all volumes.
-func List(ctx context.Context, opts *VolumeOpts) ([]VolumeInfo, error) {
+func List(ctx context.Context, opts *ConnectionOpts) ([]VolumeInfo, error) {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 
 	clientConfig := buildApiClientConfig(opts)
 	apiClient, err := api.NewApiClient(clientConfig, api.WithRequireApiKey())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API client: %w", err)
+		return nil, err
 	}
 
 	type listItem struct {
@@ -194,7 +212,7 @@ func List(ctx context.Context, opts *VolumeOpts) ([]VolumeInfo, error) {
 	var resp []listItem
 	_, err = apiClient.Get(ctx, "/volumes", &resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list volumes: %w", err)
+		return nil, wrapControlPlaneVolumeError(err, "")
 	}
 
 	result := make([]VolumeInfo, len(resp))
@@ -208,15 +226,15 @@ func List(ctx context.Context, opts *VolumeOpts) ([]VolumeInfo, error) {
 }
 
 // Destroy deletes a volume by its ID. Returns false if the volume was not found (404).
-func Destroy(ctx context.Context, volumeId string, opts *VolumeOpts) (bool, error) {
+func Destroy(ctx context.Context, volumeId string, opts *ConnectionOpts) (bool, error) {
 	if opts == nil {
-		opts = &VolumeOpts{}
+		opts = &ConnectionOpts{}
 	}
 
 	clientConfig := buildApiClientConfig(opts)
 	apiClient, err := api.NewApiClient(clientConfig, api.WithRequireApiKey())
 	if err != nil {
-		return false, fmt.Errorf("failed to create API client: %w", err)
+		return false, err
 	}
 
 	_, err = apiClient.Delete(ctx, "/volumes/"+url.PathEscape(volumeId), nil)
@@ -224,7 +242,7 @@ func Destroy(ctx context.Context, volumeId string, opts *VolumeOpts) (bool, erro
 		if _, ok := err.(*api.NotFoundError); ok {
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to destroy volume: %w", err)
+		return false, wrapControlPlaneVolumeError(err, "")
 	}
 	return true, nil
 }
@@ -239,28 +257,62 @@ func (v *Volume) volumeContentPath(endpoint string, path string, query url.Value
 	return fmt.Sprintf("/volumecontent/%s/%s?%s", url.PathEscape(v.VolumeID), endpoint, query.Encode())
 }
 
-// ListDir lists the contents of a directory at the given path.
-func (v *Volume) ListDir(ctx context.Context, path string, opts *VolumeApiOpts) ([]VolumeEntryStat, error) {
+// List lists the contents of a directory at the given path.
+func (v *Volume) List(ctx context.Context, path string, opts *struct {
+	Token            string
+	Domain           string
+	Debug            bool
+	ApiUrl           string
+	RequestTimeoutMs *int
+	Logger           api.Logger
+	Headers          map[string]string
+	Depth            *int
+}) ([]VolumeEntryStat, error) {
 	query := url.Values{}
 	// Default depth 1
-	query.Set("depth", "1")
+	depth := 1
+	if opts != nil && opts.Depth != nil {
+		depth = *opts.Depth
+	}
+	query.Set("depth", strconv.Itoa(depth))
+
+	var clientOpts *VolumeApiOpts
+	if opts != nil {
+		clientOpts = &VolumeApiOpts{
+			Token:            opts.Token,
+			Domain:           opts.Domain,
+			Debug:            opts.Debug,
+			ApiUrl:           opts.ApiUrl,
+			RequestTimeoutMs: opts.RequestTimeoutMs,
+			Logger:           opts.Logger,
+			Headers:          opts.Headers,
+		}
+	}
 
 	var result []VolumeEntryStat
-	err := v.client.Do(ctx, http.MethodGet, v.volumeContentPath("dir", path, query), nil, &result)
+	client := v.resolveClient(clientOpts)
+	err := client.Do(ctx, http.MethodGet, v.volumeContentPath("dir", path, query), nil, &result, client.config.RequestTimeoutMs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list directory: %w", err)
+		return nil, wrapContentVolumeError(err, fmt.Sprintf("Path %s not found", path))
+	}
+	if result == nil {
+		return []VolumeEntryStat{}, nil
 	}
 	return result, nil
 }
 
 // MakeDir creates a directory at the given path.
-func (v *Volume) MakeDir(ctx context.Context, path string, opts *VolumeApiOpts) (*VolumeEntryStat, error) {
-	query := url.Values{}
+func (v *Volume) MakeDir(ctx context.Context, path string, opts *VolumeWriteOptions) (*VolumeEntryStat, error) {
+	query := queryFromVolumeWriteOpts(opts)
 
 	var result VolumeEntryStat
-	err := v.client.Do(ctx, http.MethodPost, v.volumeContentPath("dir", path, query), nil, &result)
+	client := v.resolveClient(volumeWriteOptsToApiOpts(opts))
+	err := client.Do(ctx, http.MethodPost, v.volumeContentPath("dir", path, query), nil, &result, client.config.RequestTimeoutMs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make directory: %w", err)
+		return nil, wrapContentVolumeError(err, fmt.Sprintf("Path %s not found", path))
+	}
+	if isZeroVolumeEntryStat(result) {
+		return nil, fmt.Errorf("Response data is missing")
 	}
 	return &result, nil
 }
@@ -270,9 +322,13 @@ func (v *Volume) GetInfo(ctx context.Context, path string, opts *VolumeApiOpts) 
 	query := url.Values{}
 
 	var result VolumeEntryStat
-	err := v.client.Do(ctx, http.MethodGet, v.volumeContentPath("path", path, query), nil, &result)
+	client := v.resolveClient(opts)
+	err := client.Do(ctx, http.MethodGet, v.volumeContentPath("path", path, query), nil, &result, client.config.RequestTimeoutMs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get info: %w", err)
+		return nil, wrapContentVolumeError(err, fmt.Sprintf("Path %s not found", path))
+	}
+	if isZeroVolumeEntryStat(result) {
+		return nil, fmt.Errorf("Response data is missing")
 	}
 	return &result, nil
 }
@@ -281,8 +337,8 @@ func (v *Volume) GetInfo(ctx context.Context, path string, opts *VolumeApiOpts) 
 func (v *Volume) Exists(ctx context.Context, path string, opts *VolumeApiOpts) (bool, error) {
 	_, err := v.GetInfo(ctx, path, opts)
 	if err != nil {
-		// Check if the underlying error is a 404
-		if isNotFound(err) {
+		var notFoundErr *shared.NotFoundError
+		if errors.As(err, &notFoundErr) {
 			return false, nil
 		}
 		return false, err
@@ -313,9 +369,13 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, metadata *Volu
 	}
 
 	var result VolumeEntryStat
-	err = v.client.Do(ctx, http.MethodPatch, v.volumeContentPath("path", path, query), bytes.NewReader(bodyBytes), &result)
+	client := v.resolveClient(opts)
+	err = client.Do(ctx, http.MethodPatch, v.volumeContentPath("path", path, query), bytes.NewReader(bodyBytes), &result, client.config.RequestTimeoutMs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update metadata: %w", err)
+		return nil, wrapContentVolumeError(err, fmt.Sprintf("Path %s not found", path))
+	}
+	if isZeroVolumeEntryStat(result) {
+		return nil, fmt.Errorf("Response data is missing")
 	}
 	return &result, nil
 }
@@ -323,19 +383,22 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, metadata *Volu
 // ReadFile reads the raw bytes of a file at the given path.
 func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts) ([]byte, error) {
 	query := url.Values{}
+	client := v.resolveClient(opts)
 	reqPath := v.volumeContentPath("file", path, query)
+	reqUrl := client.config.ApiUrl + reqPath
+	reqCtx, cancel := requestContext(ctx, fileRequestTimeout(opts))
+	defer cancel()
 
-	reqUrl := v.client.config.ApiUrl + reqPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, reqUrl, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+v.client.config.Token)
-	for k, val := range v.client.config.Headers {
+	req.Header.Set("Authorization", "Bearer "+client.config.Token)
+	for k, val := range client.config.Headers {
 		req.Header.Set(k, val)
 	}
 
-	resp, err := v.client.httpClient.Do(req)
+	resp, err := client.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -343,10 +406,10 @@ func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("file not found: %s", path)
-		}
-		return nil, fmt.Errorf("volume API error: %d - %s", resp.StatusCode, string(respBody))
+		return nil, wrapContentVolumeError(&volumeApiError{
+			StatusCode: resp.StatusCode,
+			Message:    string(respBody),
+		}, fmt.Sprintf("Path %s not found", path))
 	}
 
 	return io.ReadAll(resp.Body)
@@ -379,19 +442,23 @@ func (v *Volume) WriteFile(ctx context.Context, path string, data io.Reader, opt
 		}
 	}
 
+	client := v.resolveClient(volumeWriteOptsToApiOpts(opts))
 	reqPath := v.volumeContentPath("file", path, query)
-	reqUrl := v.client.config.ApiUrl + reqPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqUrl, data)
+	reqUrl := client.config.ApiUrl + reqPath
+	reqCtx, cancel := requestContext(ctx, fileRequestTimeout(volumeWriteOptsToApiOpts(opts)))
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, reqUrl, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+v.client.config.Token)
+	req.Header.Set("Authorization", "Bearer "+client.config.Token)
 	req.Header.Set("Content-Type", "application/octet-stream")
-	for k, val := range v.client.config.Headers {
+	for k, val := range client.config.Headers {
 		req.Header.Set(k, val)
 	}
 
-	resp, err := v.client.httpClient.Do(req)
+	resp, err := client.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -399,12 +466,21 @@ func (v *Volume) WriteFile(ctx context.Context, path string, data io.Reader, opt
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("volume API error: %d - %s", resp.StatusCode, string(respBody))
+		return nil, wrapContentVolumeError(&volumeApiError{
+			StatusCode: resp.StatusCode,
+			Message:    string(respBody),
+		}, fmt.Sprintf("Path %s not found", path))
 	}
 
 	var result VolumeEntryStat
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err == io.EOF {
+			return nil, fmt.Errorf("Response data is missing")
+		}
 		return nil, fmt.Errorf("failed to decode write response: %w", err)
+	}
+	if isZeroVolumeEntryStat(result) {
+		return nil, fmt.Errorf("Response data is missing")
 	}
 	return &result, nil
 }
@@ -412,36 +488,145 @@ func (v *Volume) WriteFile(ctx context.Context, path string, data io.Reader, opt
 // Remove deletes the entry at the given path.
 func (v *Volume) Remove(ctx context.Context, path string, opts *VolumeApiOpts) error {
 	query := url.Values{}
-	err := v.client.Do(ctx, http.MethodDelete, v.volumeContentPath("path", path, query), nil, nil)
+	client := v.resolveClient(opts)
+	err := client.Do(ctx, http.MethodDelete, v.volumeContentPath("path", path, query), nil, nil, client.config.RequestTimeoutMs)
 	if err != nil {
-		return fmt.Errorf("failed to remove: %w", err)
+		return wrapContentVolumeError(err, fmt.Sprintf("Path %s not found", path))
 	}
 	return nil
 }
 
-// isNotFound checks if an error message indicates a 404 response.
-func isNotFound(err error) bool {
+func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
+	if v.client == nil {
+		return newVolumeApiClientWithConfig(NewVolumeConnectionConfig(opts))
+	}
+
+	if opts == nil {
+		return v.client
+	}
+
+	merged := &VolumeApiOpts{
+		Token:  v.client.config.Token,
+		Domain: v.client.config.Domain,
+		Debug:  v.client.config.Debug,
+		ApiUrl: v.client.config.ApiUrl,
+	}
+
+	if opts.Token != "" {
+		merged.Token = opts.Token
+	}
+	if opts.Domain != "" {
+		merged.Domain = opts.Domain
+	}
+	if opts.Debug {
+		merged.Debug = true
+	}
+	if opts.ApiUrl != "" {
+		merged.ApiUrl = opts.ApiUrl
+	}
+	if opts.RequestTimeoutMs != nil {
+		merged.RequestTimeoutMs = opts.RequestTimeoutMs
+	}
+	if opts.Headers != nil {
+		merged.Headers = opts.Headers
+	}
+
+	return newVolumeApiClientWithConfig(NewVolumeConnectionConfig(merged))
+}
+
+func wrapControlPlaneVolumeError(err error, notFoundMessage string) error {
 	if err == nil {
-		return false
+		return nil
 	}
-	// The VolumeApiClient returns errors like "volume API error: 404 - ..."
-	msg := err.Error()
-	return len(msg) >= 20 && contains404(msg)
+
+	var notFoundErr *api.NotFoundError
+	if errors.As(err, &notFoundErr) && notFoundMessage != "" {
+		return &shared.NotFoundError{SandboxError: shared.SandboxError{Message: notFoundMessage}}
+	}
+
+	var apiErr *api.ApiError
+	if errors.As(err, &apiErr) {
+		return &shared.VolumeError{Message: apiErr.Message}
+	}
+
+	return err
 }
 
-func contains404(s string) bool {
-	return len(s) > 0 && (stringContains(s, "404") || stringContains(s, "not found"))
-}
+func wrapContentVolumeError(err error, notFoundMessage string) error {
+	if err == nil {
+		return nil
+	}
 
-func stringContains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+	var apiErr *volumeApiError
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusNotFound {
+			return &shared.NotFoundError{SandboxError: shared.SandboxError{Message: notFoundMessage}}
 		}
+		return &shared.VolumeError{Message: apiErr.Message}
 	}
-	return false
+
+	return err
+}
+
+func queryFromVolumeWriteOpts(opts *VolumeWriteOptions) url.Values {
+	query := url.Values{}
+	if opts == nil {
+		return query
+	}
+	if opts.UID != nil {
+		query.Set("uid", strconv.Itoa(*opts.UID))
+	}
+	if opts.GID != nil {
+		query.Set("gid", strconv.Itoa(*opts.GID))
+	}
+	if opts.Mode != nil {
+		query.Set("mode", strconv.Itoa(*opts.Mode))
+	}
+	if opts.Force {
+		query.Set("force", "true")
+	}
+	return query
+}
+
+func fileRequestTimeout(opts *VolumeApiOpts) *int {
+	if opts != nil && opts.RequestTimeoutMs != nil {
+		return opts.RequestTimeoutMs
+	}
+	timeout := fileTimeoutMs
+	return &timeout
+}
+
+func volumeWriteOptsToApiOpts(opts *VolumeWriteOptions) *VolumeApiOpts {
+	if opts == nil {
+		return nil
+	}
+	return &VolumeApiOpts{
+		Token:            opts.Token,
+		Domain:           opts.Domain,
+		Debug:            opts.Debug,
+		ApiUrl:           opts.ApiUrl,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Headers:          opts.Headers,
+	}
+}
+
+func ensureVolumeAndTokenData(resp struct {
+	VolumeID string `json:"volumeID"`
+	Name     string `json:"name"`
+	Token    string `json:"token"`
+}) error {
+	if resp.VolumeID == "" && resp.Name == "" && resp.Token == "" {
+		return fmt.Errorf("Response data is missing")
+	}
+	return nil
+}
+
+func isZeroVolumeEntryStat(entry VolumeEntryStat) bool {
+	return entry.Atime.IsZero() &&
+		entry.Mtime.IsZero() &&
+		entry.Ctime.IsZero() &&
+		entry.Type == "" &&
+		entry.Name == "" &&
+		entry.Path == "" &&
+		entry.Size == 0
 }

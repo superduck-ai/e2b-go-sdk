@@ -1,30 +1,42 @@
 package e2b
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
-// Paginator provides a generic way to iterate over paginated API results.
-type Paginator[T any] struct {
+type paginator[T any] struct {
 	HasNext   bool
 	NextToken string
 	fetchFn   func(ctx context.Context, nextToken string) ([]T, string, error)
 }
 
-// NewPaginator creates a new paginator with the given fetch function.
-func NewPaginator[T any](fetchFn func(ctx context.Context, nextToken string) ([]T, string, error)) *Paginator[T] {
-	return &Paginator[T]{HasNext: true, fetchFn: fetchFn}
+// SandboxPaginator iterates over paginated sandbox results.
+type SandboxPaginator struct {
+	*paginator[SandboxInfo]
 }
 
-// NewPaginatorWithInitialToken creates a paginator with an initial next token.
-func NewPaginatorWithInitialToken[T any](fetchFn func(ctx context.Context, nextToken string) ([]T, string, error), initialToken string) *Paginator[T] {
-	return &Paginator[T]{HasNext: true, NextToken: initialToken, fetchFn: fetchFn}
+// SnapshotPaginator iterates over paginated snapshot results.
+type SnapshotPaginator struct {
+	*paginator[SnapshotInfo]
 }
 
-// NextItems fetches the next page of items. Returns nil when no more pages are available.
-func (p *Paginator[T]) NextItems(ctx context.Context) ([]T, error) {
+// newPaginator creates a new paginator with the given fetch function.
+func newPaginator[T any](fetchFn func(ctx context.Context, nextToken string) ([]T, string, error)) *paginator[T] {
+	return &paginator[T]{HasNext: true, fetchFn: fetchFn}
+}
+
+// newPaginatorWithInitialToken creates a paginator with an initial next token.
+func newPaginatorWithInitialToken[T any](fetchFn func(ctx context.Context, nextToken string) ([]T, string, error), initialToken string) *paginator[T] {
+	return &paginator[T]{HasNext: true, NextToken: initialToken, fetchFn: fetchFn}
+}
+
+// NextItems fetches the next page of items.
+func (p *paginator[T]) NextItems() ([]T, error) {
 	if !p.HasNext {
-		return nil, nil
+		return nil, fmt.Errorf("No more items to fetch")
 	}
-	items, nextToken, err := p.fetchFn(ctx, p.NextToken)
+	items, nextToken, err := p.fetchFn(context.Background(), p.NextToken)
 	if err != nil {
 		return nil, err
 	}
