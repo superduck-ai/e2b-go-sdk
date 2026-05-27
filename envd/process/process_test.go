@@ -42,3 +42,23 @@ func TestProcessEventUnmarshalKeepsLegacyDirectShape(t *testing.T) {
 		t.Fatalf("unexpected start event: %#v", event.Start)
 	}
 }
+
+func TestProcessInputMarshalKeepsEmptyStdin(t *testing.T) {
+	data, err := json.Marshal(ProcessInput{Stdin: []byte{}})
+	if err != nil {
+		t.Fatalf("failed to marshal process input: %v", err)
+	}
+	if string(data) != `{"stdin":""}` {
+		t.Fatalf("expected empty stdin to remain selected, got %s", data)
+	}
+}
+
+func TestProcessInputMarshalOmitsNilAlternatives(t *testing.T) {
+	data, err := json.Marshal(ProcessInput{Stdin: []byte("hi")})
+	if err != nil {
+		t.Fatalf("failed to marshal process input: %v", err)
+	}
+	if string(data) != `{"stdin":"aGk="}` {
+		t.Fatalf("expected only stdin to be encoded, got %s", data)
+	}
+}

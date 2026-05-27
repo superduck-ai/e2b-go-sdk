@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetSignatureDoesNotExposeHelperTypes(t *testing.T) {
@@ -27,5 +28,18 @@ func TestGetSignatureDoesNotExposeHelperTypes(t *testing.T) {
 	}
 	if fnType.NumOut() != 3 {
 		t.Fatalf("expected GetSignature to return 3 values, got %d", fnType.NumOut())
+	}
+}
+
+func TestGetSignatureUsesNegativeExpirationLikeJsAndPython(t *testing.T) {
+	_, expiration, err := GetSignature("hello.txt", "read", "", -10, "token")
+	if err != nil {
+		t.Fatalf("GetSignature returned error: %v", err)
+	}
+	if expiration == nil {
+		t.Fatal("expected negative expiration to produce signature_expiration")
+	}
+	if *expiration >= time.Now().Unix() {
+		t.Fatalf("expected expiration to be in the past, got %d", *expiration)
 	}
 }

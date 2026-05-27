@@ -64,6 +64,15 @@ func TestNewConnectionConfigAllowsExplicitZeroRequestTimeout(t *testing.T) {
 }
 
 func TestNewConnectionConfigDefaultsApiUrlLikeJsConstructor(t *testing.T) {
+	t.Setenv("E2B_API_URL", "")
+	t.Setenv("E2B_DOMAIN", "")
+	t.Setenv("E2B_DEBUG", "")
+
+	defaultConfig := NewConnectionConfig(nil)
+	if defaultConfig.ApiUrl != "https://api.e2b.app" {
+		t.Fatalf("expected default API URL to match JS constructor, got %q", defaultConfig.ApiUrl)
+	}
+
 	config := NewConnectionConfig(&ConnectionOpts{
 		Domain: "example.test",
 	})
@@ -79,6 +88,38 @@ func TestNewConnectionConfigDefaultsApiUrlLikeJsConstructor(t *testing.T) {
 
 	if debugConfig.ApiUrl != "http://localhost:3000" {
 		t.Fatalf("expected debug API URL to match JS constructor, got %q", debugConfig.ApiUrl)
+	}
+}
+
+func TestNewConnectionConfigUsesApiUrlFromArgs(t *testing.T) {
+	config := NewConnectionConfig(&ConnectionOpts{
+		ApiUrl: "http://localhost:8080",
+	})
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected API URL from args, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewConnectionConfigUsesApiUrlFromEnv(t *testing.T) {
+	t.Setenv("E2B_API_URL", "http://localhost:8080")
+
+	config := NewConnectionConfig(nil)
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected API URL from env, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewConnectionConfigApiUrlArgsHavePriorityOverEnv(t *testing.T) {
+	t.Setenv("E2B_API_URL", "http://localhost:1111")
+
+	config := NewConnectionConfig(&ConnectionOpts{
+		ApiUrl: "http://localhost:8080",
+	})
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected API URL arg to win over env, got %q", config.ApiUrl)
 	}
 }
 

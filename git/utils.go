@@ -207,17 +207,62 @@ func parseGitBranches(output string) *GitBranches {
 }
 
 func isAuthFailure(errMsg string) bool {
-	return strings.Contains(errMsg, "Authentication failed") ||
-		strings.Contains(errMsg, "could not read Username") ||
-		strings.Contains(errMsg, "terminal prompts disabled")
+	message := strings.ToLower(errMsg)
+	authSnippets := []string{
+		"authentication failed",
+		"terminal prompts disabled",
+		"could not read username",
+		"invalid username or password",
+		"access denied",
+		"permission denied (publickey)",
+		"not authorized",
+	}
+	for _, snippet := range authSnippets {
+		if strings.Contains(message, snippet) {
+			return true
+		}
+	}
+	return false
 }
 
 func isMissingUpstream(errMsg string) bool {
-	return strings.Contains(errMsg, "has no upstream branch")
+	message := strings.ToLower(errMsg)
+	upstreamSnippets := []string{
+		"has no upstream branch",
+		"no upstream branch",
+		"no upstream configured",
+		"no tracking information for the current branch",
+		"no tracking information",
+		"set the remote as upstream",
+		"set the upstream branch",
+		"please specify which branch you want to merge with",
+	}
+	for _, snippet := range upstreamSnippets {
+		if strings.Contains(message, snippet) {
+			return true
+		}
+	}
+	return false
 }
 
 func getScopeFlag(scope GitConfigScope) string {
 	return "--" + string(scope)
+}
+
+func validateConfigScope(scope GitConfigScope) error {
+	switch scope {
+	case GitConfigGlobal, GitConfigLocal, GitConfigSystem:
+		return nil
+	default:
+		return fmt.Errorf("Git config scope must be one of: global, local, system.")
+	}
+}
+
+func buildUpstreamErrorMessage(action string) string {
+	if action == "push" {
+		return "Git push failed because no upstream branch is configured. Set upstream once with { setUpstream: true } (and optional remote/branch), or pass remote and branch explicitly."
+	}
+	return "Git pull failed because no upstream branch is configured. Pass remote and branch explicitly, or set upstream once (push with { setUpstream: true } or run: git branch --set-upstream-to=origin/<branch> <branch>)."
 }
 
 func getRepoPathForScope(scope GitConfigScope, repoPath string) (string, error) {

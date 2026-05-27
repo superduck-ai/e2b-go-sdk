@@ -71,11 +71,11 @@ func AliasExists(ctx context.Context, alias string, opts *BuildOptions) (bool, e
 
 type BuildStatusReason = roottmpl.BuildStatusReason
 
-func AssignTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) (*TemplateTagInfo, error) {
+func AssignTags(ctx context.Context, targetName string, tags any, opts *BuildOptions) (*TemplateTagInfo, error) {
 	return roottmpl.AssignTags(ctx, targetName, tags, opts)
 }
 
-func RemoveTags(ctx context.Context, name string, tags []string, opts *BuildOptions) error {
+func RemoveTags(ctx context.Context, name string, tags any, opts *BuildOptions) error {
 	return roottmpl.RemoveTags(ctx, name, tags, opts)
 }
 

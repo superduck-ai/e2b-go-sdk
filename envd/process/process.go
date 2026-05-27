@@ -142,6 +142,17 @@ type ProcessInput struct {
 	Pty   []byte `json:"pty,omitempty"`
 }
 
+func (i ProcessInput) MarshalJSON() ([]byte, error) {
+	data := map[string][]byte{}
+	if i.Stdin != nil {
+		data["stdin"] = i.Stdin
+	}
+	if i.Pty != nil {
+		data["pty"] = i.Pty
+	}
+	return json.Marshal(data)
+}
+
 type ListRequest struct{}
 
 type ListResponse struct {

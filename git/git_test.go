@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/e2b-dev/e2b-go-sdk/commands"
 	"github.com/e2b-dev/e2b-go-sdk/envd/process"
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
 func TestResolveOptionalBool(t *testing.T) {
@@ -282,6 +284,58 @@ func TestSetConfigRequiresPathForLocalScope(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsInvalidScope(t *testing.T) {
+	g := NewGit(nil)
+
+	if _, err := g.SetConfig(context.Background(), "user.name", "Alice", &GitConfigOpts{Scope: GitConfigScope("workspace")}); err == nil {
+		t.Fatal("expected SetConfig with invalid scope to fail")
+	} else if err.Error() != "Git config scope must be one of: global, local, system." {
+		t.Fatalf("unexpected SetConfig error: %v", err)
+	}
+
+	if _, err := g.GetConfig(context.Background(), "user.name", &GitConfigOpts{Scope: GitConfigScope("workspace")}); err == nil {
+		t.Fatal("expected GetConfig with invalid scope to fail")
+	} else if err.Error() != "Git config scope must be one of: global, local, system." {
+		t.Fatalf("unexpected GetConfig error: %v", err)
+	}
+}
+
+func TestWrapErrorDoesNotTreatLocalPermissionDeniedAsAuth(t *testing.T) {
+	g := NewGit(nil)
+	err := g.wrapError(&commands.CommandExitError{
+		CommandResult: commands.CommandResult{
+			ExitCode: 1,
+			Stderr:   "error: could not lock config file /etc/gitconfig: Permission denied",
+		},
+		Message: "exit status 1",
+	})
+
+	var authErr *shared.AuthenticationError
+	if errors.As(err, &authErr) {
+		t.Fatalf("local permission error should not be classified as auth: %T %v", err, err)
+	}
+	var exitErr *commands.CommandExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected original CommandExitError, got %T %v", err, err)
+	}
+}
+
+func TestWrapErrorTreatsSshPublicKeyPermissionDeniedAsAuth(t *testing.T) {
+	g := NewGit(nil)
+	err := g.wrapError(&commands.CommandExitError{
+		CommandResult: commands.CommandResult{
+			ExitCode: 1,
+			Stderr:   "git@github.com: Permission denied (publickey).",
+		},
+		Message: "exit status 1",
+	})
+
+	var authErr *shared.AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("expected SSH public key error to be classified as auth, got %T %v", err, err)
+	}
+}
+
 func TestGetConfigRejectsEmptyKey(t *testing.T) {
 	g := NewGit(nil)
 
@@ -477,8 +531,80 @@ func TestPullWithCredentialsRequiresExplicitRemoteWhenMultipleRemotes(t *testing
 	if err.Error() != "Remote is required when using username/password and the repository has multiple remotes." {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(commandsSeen) != 1 || commandsSeen[0] != "git -C '/tmp/repo' remote" {
+	expectedCommands := []string{
+		"git -C '/tmp/repo' rev-parse --abbrev-ref --symbolic-full-name @{u}",
+		"git -C '/tmp/repo' remote",
+	}
+	if len(commandsSeen) != len(expectedCommands) {
 		t.Fatalf("unexpected commands: %#v", commandsSeen)
+	}
+	for i := range expectedCommands {
+		if commandsSeen[i] != expectedCommands[i] {
+			t.Fatalf("unexpected commands: %#v", commandsSeen)
+		}
+	}
+}
+
+func TestPullRunsPullWhenUpstreamPreflightFailsForOtherReason(t *testing.T) {
+	var commandsSeen []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := decodeStartRequest(t, r)
+		if got.Process == nil || len(got.Process.Args) != 3 {
+			t.Fatalf("unexpected process config: %#v", got.Process)
+		}
+		command := got.Process.Args[2]
+		commandsSeen = append(commandsSeen, command)
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{Start: &process.ProcessStartEvent{Pid: 123}}))
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{Data: &process.ProcessDataEvent{Stderr: []byte("fatal: not a git repository (or any of the parent directories): .git\n")}}))
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{End: &process.ProcessEndEvent{ExitCode: 1, Error: "exit status 1"}}))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	_, err := g.Pull(context.Background(), "/tmp/not-repo", nil)
+	if err == nil {
+		t.Fatal("expected Pull from non-repository path to fail")
+	}
+	var upstreamErr *shared.GitUpstreamError
+	if errors.As(err, &upstreamErr) {
+		t.Fatalf("non-repository pull should preserve the git failure, got upstream error: %v", err)
+	}
+	var exitErr *commands.CommandExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected CommandExitError, got %T %v", err, err)
+	}
+	expectedCommands := []string{
+		"git -C '/tmp/not-repo' rev-parse --abbrev-ref --symbolic-full-name @{u}",
+		"git -C '/tmp/not-repo' pull",
+	}
+	if len(commandsSeen) != len(expectedCommands) {
+		t.Fatalf("unexpected commands: %#v", commandsSeen)
+	}
+	for i := range expectedCommands {
+		if commandsSeen[i] != expectedCommands[i] {
+			t.Fatalf("unexpected commands: %#v", commandsSeen)
+		}
 	}
 }
 

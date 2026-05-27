@@ -3,16 +3,20 @@ package template
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/e2b-dev/e2b-go-sdk/api"
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
 func TestAssignTagsUsesJsTargetPayloadAndReturnsTagInfo(t *testing.T) {
@@ -61,6 +65,39 @@ func TestAssignTagsUsesJsTargetPayloadAndReturnsTagInfo(t *testing.T) {
 	}
 }
 
+func TestAssignTagsAcceptsSingleTagLikeJsAndPython(t *testing.T) {
+	var body map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"buildID": "bld-123",
+			"tags":    []string{"prod"},
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	info, err := AssignTags(context.Background(), "tmpl:latest", "prod", &BuildOptions{
+		ApiKey:           "test-api-key",
+		ApiUrl:           server.URL,
+		RequestTimeoutMs: intPtr(1000),
+	})
+	if err != nil {
+		t.Fatalf("expected AssignTags to succeed, got %v", err)
+	}
+	if info == nil || !reflect.DeepEqual(info.Tags, []string{"prod"}) {
+		t.Fatalf("unexpected tag info: %#v", info)
+	}
+	tags, ok := body["tags"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != "prod" {
+		t.Fatalf("expected single tag to be normalized to array, got %#v", body)
+	}
+}
+
 func TestRemoveTagsUsesJsNamePayload(t *testing.T) {
 	var body map[string]any
 
@@ -92,6 +129,43 @@ func TestRemoveTagsUsesJsNamePayload(t *testing.T) {
 	}
 	if _, ok := body["templateName"]; ok {
 		t.Fatalf("did not expect legacy templateName field, got %#v", body)
+	}
+}
+
+func TestRemoveTagsAcceptsSingleTagLikeJsAndPython(t *testing.T) {
+	var body map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	if err := RemoveTags(context.Background(), "tmpl", "old", &BuildOptions{
+		ApiKey:           "test-api-key",
+		ApiUrl:           server.URL,
+		RequestTimeoutMs: intPtr(1000),
+	}); err != nil {
+		t.Fatalf("expected RemoveTags to succeed, got %v", err)
+	}
+	tags, ok := body["tags"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != "old" {
+		t.Fatalf("expected single tag to be normalized to array, got %#v", body)
+	}
+}
+
+func TestTemplateTagsRejectUnsupportedTagsShape(t *testing.T) {
+	_, err := AssignTags(context.Background(), "tmpl:latest", 123, nil)
+	var templateErr *shared.TemplateError
+	if !errors.As(err, &templateErr) {
+		t.Fatalf("expected TemplateError, got %T %v", err, err)
+	}
+
+	err = RemoveTags(context.Background(), "tmpl", 123, nil)
+	if !errors.As(err, &templateErr) {
+		t.Fatalf("expected TemplateError, got %T %v", err, err)
 	}
 }
 
@@ -178,6 +252,106 @@ func TestBuildInfoIncludesDeprecatedAliasField(t *testing.T) {
 	}
 }
 
+func TestNormalizeBuildNameMatchesJsAndPython(t *testing.T) {
+	cases := []struct {
+		name string
+		opts *BuildOptions
+		want string
+	}{
+		{name: "my-template:v1.0", want: "my-template:v1.0"},
+		{name: "my-template", want: "my-template"},
+		{opts: &BuildOptions{BasicBuildOptions: BasicBuildOptions{Alias: "legacy-template"}}, want: "legacy-template"},
+		{name: "from-name", opts: &BuildOptions{BasicBuildOptions: BasicBuildOptions{Alias: "from-alias"}}, want: "from-name"},
+	}
+
+	for _, tc := range cases {
+		got, err := normalizeBuildName(tc.name, tc.opts)
+		if err != nil {
+			t.Fatalf("normalizeBuildName(%q, %#v) returned error: %v", tc.name, tc.opts, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizeBuildName(%q, %#v) = %q, want %q", tc.name, tc.opts, got, tc.want)
+		}
+	}
+}
+
+func TestBuildInBackgroundNormalizesLegacyAliasWithoutDroppingOptions(t *testing.T) {
+	var createBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3/templates":
+			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
+				t.Fatalf("failed to decode create body: %v", err)
+			}
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"templateID": "tmpl-legacy",
+				"buildID":    "bld-legacy",
+			}); err != nil {
+				t.Fatalf("failed to encode build request response: %v", err)
+			}
+		case "/v2/templates/tmpl-legacy/builds/bld-legacy":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	info, err := BuildInBackground(context.Background(), Template(nil).FromBaseImage(), "", &BuildOptions{
+		BasicBuildOptions: BasicBuildOptions{
+			Alias:    "legacy-template",
+			Tags:     []string{"stable"},
+			CpuCount: 4,
+			MemoryMB: 1024,
+		},
+		ApiKey:           "test-api-key",
+		ApiUrl:           server.URL,
+		RequestTimeoutMs: intPtr(1000),
+	})
+	if err != nil {
+		t.Fatalf("BuildInBackground with legacy alias returned error: %v", err)
+	}
+	if info == nil || info.Name != "legacy-template" || info.Alias != "legacy-template" {
+		t.Fatalf("unexpected build info: %#v", info)
+	}
+	if createBody["name"] != "legacy-template" {
+		t.Fatalf("expected legacy alias to be normalized to name, got %#v", createBody)
+	}
+	if _, ok := createBody["alias"]; ok {
+		t.Fatalf("did not expect alias to be sent in build request, got %#v", createBody)
+	}
+	if got := int(createBody["cpuCount"].(float64)); got != 4 {
+		t.Fatalf("expected cpuCount to be preserved, got %#v", createBody)
+	}
+	if got := int(createBody["memoryMB"].(float64)); got != 1024 {
+		t.Fatalf("expected memoryMB to be preserved, got %#v", createBody)
+	}
+	tags, ok := createBody["tags"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != "stable" {
+		t.Fatalf("expected tags to be preserved, got %#v", createBody)
+	}
+}
+
+func TestBuildRejectsMissingNameBeforeApiConfig(t *testing.T) {
+	_, err := BuildInBackground(context.Background(), Template(nil), "", nil)
+	var templateErr *shared.TemplateError
+	if !errors.As(err, &templateErr) {
+		t.Fatalf("expected TemplateError, got %T %v", err, err)
+	}
+	if templateErr.Message != "Name must be provided" {
+		t.Fatalf("unexpected TemplateError message: %q", templateErr.Message)
+	}
+
+	for _, opts := range []*BuildOptions{{}, {BasicBuildOptions: BasicBuildOptions{Alias: ""}}} {
+		_, err := normalizeBuildName("", opts)
+		var templateErr *shared.TemplateError
+		if !errors.As(err, &templateErr) {
+			t.Fatalf("expected TemplateError for opts %#v, got %T %v", opts, err, err)
+		}
+	}
+}
+
 func TestInstructionTypeAndArgsMatchJsShape(t *testing.T) {
 	if InstructionCopy != "COPY" || InstructionEnv != "ENV" || InstructionRun != "RUN" ||
 		InstructionWorkdir != "WORKDIR" || InstructionUser != "USER" {
@@ -234,6 +408,54 @@ func TestTemplateSerializationMatchesJsStyleHelpers(t *testing.T) {
 	}
 }
 
+func TestToDockerfileGroupsEnvInstructionsLikeJsAndPython(t *testing.T) {
+	template := Template(nil).
+		FromUbuntuImage("24.04").
+		SetEnvs(map[string]string{"NODE_ENV": "production", "PORT": "8080"}).
+		SetEnvs(map[string]string{"DEBUG": "false"})
+
+	dockerfile, err := ToDockerfile(template)
+	if err != nil {
+		t.Fatalf("ToDockerfile returned error: %v", err)
+	}
+
+	expected := "FROM ubuntu:24.04\nENV NODE_ENV=production PORT=8080\nENV DEBUG=false\n"
+	if dockerfile != expected {
+		t.Fatalf("unexpected dockerfile output:\n%s", dockerfile)
+	}
+}
+
+func TestUploadFileSetsContentLengthAndAvoidsChunkedEncoding(t *testing.T) {
+	var headers http.Header
+	var bodyLength int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header.Clone()
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read upload body: %v", err)
+		}
+		bodyLength = len(data)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := uploadFile(context.Background(), server.URL, []byte("archive bytes")); err != nil {
+		t.Fatalf("uploadFile returned error: %v", err)
+	}
+
+	contentLength := headers.Get("Content-Length")
+	if contentLength == "" {
+		t.Fatalf("expected Content-Length header, got %#v", headers)
+	}
+	if contentLength != strconv.Itoa(bodyLength) {
+		t.Fatalf("expected Content-Length %d, got %q", bodyLength, contentLength)
+	}
+	if transferEncoding := headers.Get("Transfer-Encoding"); strings.Contains(strings.ToLower(transferEncoding), "chunked") {
+		t.Fatalf("did not expect chunked transfer encoding, got %q", transferEncoding)
+	}
+}
+
 func TestSetReadyCmdAcceptsStringLikeJs(t *testing.T) {
 	template := Template(nil).SetReadyCmd("curl http://localhost:8000/health")
 
@@ -276,8 +498,121 @@ func TestFromDockerfileAcceptsFilePathLikeJs(t *testing.T) {
 	if serialized.FromImage != "python:3.12" {
 		t.Fatalf("expected Dockerfile path to set base image, got %#v", serialized)
 	}
-	if len(serialized.Steps) != 1 || serialized.Steps[0].Type != InstructionWorkdir {
+	if len(serialized.Steps) != 4 ||
+		serialized.Steps[0].Type != InstructionUser ||
+		serialized.Steps[0].Args[0] != "root" ||
+		serialized.Steps[1].Type != InstructionWorkdir ||
+		serialized.Steps[1].Args[0] != "/" ||
+		serialized.Steps[2].Type != InstructionWorkdir ||
+		serialized.Steps[2].Args[0] != "/app" ||
+		serialized.Steps[3].Type != InstructionUser ||
+		serialized.Steps[3].Args[0] != "user" {
 		t.Fatalf("expected Dockerfile path to parse steps, got %#v", serialized.Steps)
+	}
+}
+
+func TestFromDockerfileMatchesJsAndPythonInstructionOrder(t *testing.T) {
+	dockerfile := `FROM node:24
+WORKDIR /app
+COPY package.json .
+RUN npm install
+ENTRYPOINT ["sleep", "20"]`
+
+	template := Template(nil).FromDockerfile(dockerfile)
+	instructions := template.instructionsList()
+
+	if template.baseImage != "node:24" {
+		t.Fatalf("expected base image node:24, got %q", template.baseImage)
+	}
+	if len(instructions) != 6 {
+		t.Fatalf("expected 6 instructions, got %#v", instructions)
+	}
+
+	expected := []Instruction{
+		{Type: InstructionUser, Args: []string{"root"}},
+		{Type: InstructionWorkdir, Args: []string{"/"}},
+		{Type: InstructionWorkdir, Args: []string{"/app"}},
+		{Type: InstructionCopy, Args: []string{"package.json", ".", "", ""}},
+		{Type: InstructionRun, Args: []string{"npm install"}},
+		{Type: InstructionUser, Args: []string{"user"}},
+	}
+	for i, want := range expected {
+		if instructions[i].Type != want.Type || !reflect.DeepEqual(instructions[i].Args, want.Args) {
+			t.Fatalf("instruction %d mismatch: got %#v want %#v", i, instructions[i], want)
+		}
+	}
+	if template.startCmd != "sleep 20" {
+		t.Fatalf("expected JSON ENTRYPOINT to become shell command, got %q", template.startCmd)
+	}
+	if template.readyCmd != "sleep 20" {
+		t.Fatalf("expected Dockerfile start command to get 20s ready timeout, got %q", template.readyCmd)
+	}
+}
+
+func TestFromDockerfileQuotesJsonEntrypointArgsWithSpaces(t *testing.T) {
+	template := Template(nil).FromDockerfile(`FROM python:3.12
+ENTRYPOINT ["python", "-c", "print(\"hi there\")"]`)
+
+	expected := `python -c 'print("hi there")'`
+	if template.startCmd != expected {
+		t.Fatalf("expected JSON ENTRYPOINT args to be shell-quoted, got %q", template.startCmd)
+	}
+}
+
+func TestFromDockerfileAppliesE2BDefaultsLikeJsAndPython(t *testing.T) {
+	template := Template(nil).FromDockerfile("FROM node:24")
+	instructions := template.instructionsList()
+
+	if len(instructions) < 2 {
+		t.Fatalf("expected default user/workdir instructions, got %#v", instructions)
+	}
+	defaultUser := instructions[len(instructions)-2]
+	defaultWorkdir := instructions[len(instructions)-1]
+	if defaultUser.Type != InstructionUser || defaultUser.Args[0] != "user" {
+		t.Fatalf("expected default USER user, got %#v", defaultUser)
+	}
+	if defaultWorkdir.Type != InstructionWorkdir || defaultWorkdir.Args[0] != "/home/user" {
+		t.Fatalf("expected default WORKDIR /home/user, got %#v", defaultWorkdir)
+	}
+}
+
+func TestFromDockerfileKeepsCustomUserAndWorkdirLikeJsAndPython(t *testing.T) {
+	template := Template(nil).FromDockerfile("FROM node:24\nUSER mish\nWORKDIR /home/mish")
+	instructions := template.instructionsList()
+
+	if len(instructions) < 2 {
+		t.Fatalf("expected custom user/workdir instructions, got %#v", instructions)
+	}
+	customUser := instructions[len(instructions)-2]
+	customWorkdir := instructions[len(instructions)-1]
+	if customUser.Type != InstructionUser || customUser.Args[0] != "mish" {
+		t.Fatalf("expected custom USER mish, got %#v", customUser)
+	}
+	if customWorkdir.Type != InstructionWorkdir || customWorkdir.Args[0] != "/home/mish" {
+		t.Fatalf("expected custom WORKDIR /home/mish, got %#v", customWorkdir)
+	}
+}
+
+func TestFromDockerfileParsesCopyChownLikeJsAndPython(t *testing.T) {
+	dockerfile := `FROM node:24
+COPY --chown=myuser:mygroup app.js /app/
+COPY --chown=anotheruser config.json /config/`
+
+	instructions := Template(nil).FromDockerfile(dockerfile).instructionsList()
+	if len(instructions) < 4 {
+		t.Fatalf("expected COPY instructions after Docker defaults, got %#v", instructions)
+	}
+
+	copyInstruction1 := instructions[2]
+	if copyInstruction1.Type != InstructionCopy ||
+		!reflect.DeepEqual(copyInstruction1.Args, []string{"app.js", "/app/", "myuser:mygroup", ""}) {
+		t.Fatalf("unexpected first COPY instruction: %#v", copyInstruction1)
+	}
+
+	copyInstruction2 := instructions[3]
+	if copyInstruction2.Type != InstructionCopy ||
+		!reflect.DeepEqual(copyInstruction2.Args, []string{"config.json", "/config/", "anotheruser", ""}) {
+		t.Fatalf("unexpected second COPY instruction: %#v", copyInstruction2)
 	}
 }
 

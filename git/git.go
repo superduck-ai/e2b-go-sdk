@@ -165,7 +165,7 @@ func (g *Git) buildStartOpts(opts *GitRequestOpts) *commands.CommandStartOpts {
 func (g *Git) wrapError(err error) error {
 	var exitErr *commands.CommandExitError
 	if errors.As(err, &exitErr) {
-		errMsg := exitErr.Stderr
+		errMsg := exitErr.Stderr + "\n" + exitErr.Stdout
 		if isAuthFailure(errMsg) {
 			return &shared.GitAuthError{
 				AuthenticationError: shared.AuthenticationError{
@@ -176,9 +176,21 @@ func (g *Git) wrapError(err error) error {
 		if isMissingUpstream(errMsg) {
 			return &shared.GitUpstreamError{
 				SandboxError: shared.SandboxError{
-					Message: "git upstream not set: " + err.Error(),
+					Message: buildUpstreamErrorMessage("pull"),
 				},
 			}
+		}
+	}
+	return err
+}
+
+func wrapGitUpstreamActionError(err error, action string) error {
+	var upstreamErr *shared.GitUpstreamError
+	if errors.As(err, &upstreamErr) {
+		return &shared.GitUpstreamError{
+			SandboxError: shared.SandboxError{
+				Message: buildUpstreamErrorMessage(action),
+			},
 		}
 	}
 	return err
@@ -397,7 +409,7 @@ func (g *Git) Reset(ctx context.Context, path string, opts *GitResetOpts) (*comm
 		switch opts.Mode {
 		case GitResetSoft, GitResetMixed, GitResetHard, GitResetMerge, GitResetKeep:
 		default:
-			return nil, fmt.Errorf("reset mode must be one of soft, mixed, hard, merge, keep")
+			return nil, fmt.Errorf("Reset mode must be one of soft, mixed, hard, merge, keep.")
 		}
 		args = append(args, "--"+string(opts.Mode))
 	}
@@ -418,7 +430,7 @@ func (g *Git) Restore(ctx context.Context, path string, opts *GitRestoreOpts) (*
 		opts = &GitRestoreOpts{}
 	}
 	if len(opts.Files) == 0 {
-		return nil, fmt.Errorf("at least one path is required")
+		return nil, fmt.Errorf("At least one path is required.")
 	}
 
 	resolvedStaged := opts.Staged
@@ -436,7 +448,7 @@ func (g *Git) Restore(ctx context.Context, path string, opts *GitRestoreOpts) (*
 	}
 
 	if !resolveOptionalBool(resolvedStaged, false) && !resolveOptionalBool(resolvedWorktree, false) {
-		return nil, fmt.Errorf("at least one of staged or worktree must be true")
+		return nil, fmt.Errorf("At least one of staged or worktree must be true.")
 	}
 
 	args := []string{"restore"}
@@ -481,7 +493,11 @@ func (g *Git) Push(ctx context.Context, path string, opts *GitPushOpts) (*comman
 		if opts.Branch != "" {
 			args = append(args, shellEscape(opts.Branch))
 		}
-		return g.runGit(ctx, args, path, reqOpts)
+		result, err := g.runGit(ctx, args, path, reqOpts)
+		if err != nil {
+			return nil, wrapGitUpstreamActionError(err, "push")
+		}
+		return result, nil
 	}
 
 	if opts.Username != "" && opts.Password != "" {
@@ -508,6 +524,16 @@ func (g *Git) Pull(ctx context.Context, path string, opts *GitPullOpts) (*comman
 	if opts.Password != "" && opts.Username == "" {
 		return nil, fmt.Errorf("Username is required when using a password or token for git pull.")
 	}
+	if opts.Remote == "" && opts.Branch == "" {
+		hasUpstream, upstreamCheckErr := g.hasUpstream(ctx, path, &opts.GitRequestOpts)
+		if upstreamCheckErr == nil && !hasUpstream {
+			return nil, &shared.GitUpstreamError{
+				SandboxError: shared.SandboxError{
+					Message: buildUpstreamErrorMessage("pull"),
+				},
+			}
+		}
+	}
 
 	operation := func(reqOpts *GitRequestOpts) (*commands.CommandResult, error) {
 		args := []string{"pull"}
@@ -520,7 +546,11 @@ func (g *Git) Pull(ctx context.Context, path string, opts *GitPullOpts) (*comman
 		if opts.Branch != "" {
 			args = append(args, shellEscape(opts.Branch))
 		}
-		return g.runGit(ctx, args, path, reqOpts)
+		result, err := g.runGit(ctx, args, path, reqOpts)
+		if err != nil {
+			return nil, wrapGitUpstreamActionError(err, "pull")
+		}
+		return result, nil
 	}
 
 	if opts.Username != "" && opts.Password != "" {
@@ -545,6 +575,9 @@ func (g *Git) SetConfig(ctx context.Context, key, value string, opts *GitConfigO
 	if scope == "" {
 		scope = GitConfigGlobal
 	}
+	if err := validateConfigScope(scope); err != nil {
+		return nil, err
+	}
 	repoPath, err := getRepoPathForScope(scope, opts.Path)
 	if err != nil {
 		return nil, err
@@ -565,6 +598,9 @@ func (g *Git) GetConfig(ctx context.Context, key string, opts *GitConfigOpts) (s
 	scope := opts.Scope
 	if scope == "" {
 		scope = GitConfigGlobal
+	}
+	if err := validateConfigScope(scope); err != nil {
+		return "", err
 	}
 	repoPath, err := getRepoPathForScope(scope, opts.Path)
 	if err != nil {
@@ -684,8 +720,15 @@ func (g *Git) resolveRemoteName(ctx context.Context, path, remote string, opts *
 	return "", fmt.Errorf("Remote is required when using username/password and the repository has multiple remotes.")
 }
 
-func (g *Git) hasUpstream(ctx context.Context, path string, opts *GitRequestOpts) bool {
-	args := []string{"rev-parse", "--abbrev-ref", "@{u}"}
+func (g *Git) hasUpstream(ctx context.Context, path string, opts *GitRequestOpts) (bool, error) {
+	args := []string{"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"}
 	_, err := g.runGit(ctx, args, path, opts)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	var upstreamErr *shared.GitUpstreamError
+	if errors.As(err, &upstreamErr) {
+		return false, nil
+	}
+	return false, err
 }

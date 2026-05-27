@@ -587,7 +587,13 @@ func (f *Filesystem) Remove(ctx context.Context, path string, opts *FilesystemRe
 	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.RemoveRequest{Path: path}
-	return f.connectUnary(reqCtx, "/filesystem.Filesystem/Remove", req, nil, user)
+	if err := f.connectUnary(reqCtx, "/filesystem.Filesystem/Remove", req, nil, user); err != nil {
+		if isFilesystemNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *Filesystem) Exists(ctx context.Context, path string, opts *FilesystemRequestOpts) (bool, error) {
@@ -909,16 +915,63 @@ func wrapFilesystemError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if !isFilesystemNotFoundError(err) {
-		return err
-	}
-	return &shared.FileNotFoundError{
-		NotFoundError: shared.NotFoundError{
-			SandboxError: shared.SandboxError{
-				Message: filesystemErrorMessage(err),
+	if isFilesystemNotFoundError(err) {
+		return &shared.FileNotFoundError{
+			NotFoundError: shared.NotFoundError{
+				SandboxError: shared.SandboxError{
+					Message: filesystemErrorMessage(err),
+				},
 			},
-		},
+		}
 	}
+	return wrapEnvdFilesystemError(err)
+}
+
+func wrapEnvdFilesystemError(err error) error {
+	var rpcErr *envd.RpcError
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case "already_exists":
+			return err
+		case "invalid_argument":
+			return &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		case "unauthenticated":
+			return &shared.AuthenticationError{Message: rpcErr.Message}
+		case "unavailable", "canceled", "deadline_exceeded":
+			return &shared.TimeoutError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		case "resource_exhausted":
+			return &shared.RateLimitError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		default:
+			return &shared.SandboxError{Message: fmt.Sprintf("%s: %s", rpcErr.Code, rpcErr.Message)}
+		}
+	}
+
+	var invalidErr *envd.InvalidArgumentError
+	if errors.As(err, &invalidErr) {
+		return &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: invalidErr.Message}}
+	}
+
+	var timeoutErr *envd.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		return &shared.TimeoutError{SandboxError: shared.SandboxError{Message: timeoutErr.Message}}
+	}
+
+	var spaceErr *envd.NotEnoughSpaceError
+	if errors.As(err, &spaceErr) {
+		return &shared.NotEnoughSpaceError{SandboxError: shared.SandboxError{Message: spaceErr.Message}}
+	}
+
+	var authErr *envd.AuthenticationError
+	if errors.As(err, &authErr) {
+		return &shared.AuthenticationError{Message: authErr.Message}
+	}
+
+	var sandboxErr *envd.SandboxError
+	if errors.As(err, &sandboxErr) {
+		return &shared.SandboxError{Message: sandboxErr.Message}
+	}
+
+	return err
 }
 
 func isFilesystemNotFoundError(err error) bool {

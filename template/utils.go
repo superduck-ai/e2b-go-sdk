@@ -18,11 +18,11 @@ import (
 
 func validateRelativePath(src string) error {
 	if filepath.IsAbs(src) {
-		return fmt.Errorf("path must be relative, got: %s", src)
+		return fmt.Errorf("Invalid source path %q: absolute paths are not allowed. Use a relative path within the context directory.", src)
 	}
 	clean := filepath.Clean(src)
-	if strings.HasPrefix(clean, "..") {
-		return fmt.Errorf("path traversal detected: %s", src)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("Invalid source path %q: path escapes the context directory. The path must stay within the context directory.", src)
 	}
 	return nil
 }
@@ -49,6 +49,9 @@ func calculateFilesHash(src, dest, contextPath string, ignorePatterns []string, 
 	files, err := getAllFilesInPath(src, contextPath, ignorePatterns, true, resolveSymlinks)
 	if err != nil {
 		return "", err
+	}
+	if len(files) == 0 {
+		return "", fmt.Errorf("No files found in %s", filepath.Join(contextPath, src))
 	}
 
 	h := sha256.New()
@@ -163,37 +166,34 @@ func getAllFilesInPath(src, contextPath string, ignorePatterns []string, include
 	if base == "" {
 		base = "."
 	}
-
-	matches, err := expandMatches(filepath.Join(base, filepath.FromSlash(src)))
-	if err != nil {
-		return nil, err
-	}
+	base = filepath.Clean(base)
+	sourcePattern := normalizePath(filepath.Clean(filepath.FromSlash(src)))
 
 	files := map[string]struct{}{}
-	for _, match := range matches {
-		info, err := fileInfoForPath(match, resolveSymlinks)
+	addPath := func(fullPath string) error {
+		info, err := fileInfoForPath(fullPath, resolveSymlinks)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		rel, err := filepath.Rel(base, match)
+		rel, err := filepath.Rel(base, fullPath)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		rel = normalizePath(rel)
 		if shouldIgnore(rel, ignorePatterns) {
-			continue
+			return nil
 		}
 
 		if info.IsDir() {
 			if includeDirectories {
 				files[rel] = struct{}{}
 			}
-			err = filepath.WalkDir(match, func(walkPath string, d fs.DirEntry, walkErr error) error {
+			return filepath.WalkDir(fullPath, func(walkPath string, d fs.DirEntry, walkErr error) error {
 				if walkErr != nil {
 					return walkErr
 				}
-				if walkPath == match {
+				if walkPath == fullPath {
 					return nil
 				}
 
@@ -217,17 +217,55 @@ func getAllFilesInPath(src, contextPath string, ignorePatterns []string, include
 				files[childRel] = struct{}{}
 				return nil
 			})
-			if err != nil {
-				return nil, err
-			}
-			continue
 		}
 
 		files[rel] = struct{}{}
+		return nil
 	}
 
-	if len(files) == 0 {
-		return nil, fmt.Errorf("No files found in %s", filepath.Join(base, src))
+	if !hasGlobMeta(sourcePattern) {
+		fullPath := filepath.Join(base, filepath.FromSlash(sourcePattern))
+		if err := addPath(fullPath); err != nil {
+			return nil, err
+		}
+		result := make([]string, 0, len(files))
+		for file := range files {
+			result = append(result, file)
+		}
+		sort.Strings(result)
+		return result, nil
+	}
+
+	if err := filepath.WalkDir(base, func(walkPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(base, walkPath)
+		if err != nil {
+			return err
+		}
+		rel = normalizePath(rel)
+		if rel != "." && shouldIgnore(rel, ignorePatterns) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if rel == "." && sourcePattern != "." {
+			return nil
+		}
+		if !globMatch(sourcePattern, rel) {
+			return nil
+		}
+		if err := addPath(walkPath); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	result := make([]string, 0, len(files))
@@ -238,18 +276,8 @@ func getAllFilesInPath(src, contextPath string, ignorePatterns []string, include
 	return result, nil
 }
 
-func expandMatches(pattern string) ([]string, error) {
-	if strings.ContainsAny(pattern, "*?[") {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return nil, err
-		}
-		return matches, nil
-	}
-	if _, err := os.Lstat(pattern); err != nil {
-		return nil, err
-	}
-	return []string{pattern}, nil
+func hasGlobMeta(value string) bool {
+	return strings.ContainsAny(value, "*?[")
 }
 
 func fileInfoForPath(fullPath string, resolveSymlinks bool) (os.FileInfo, error) {
@@ -264,10 +292,10 @@ func shouldIgnore(relPath string, ignorePatterns []string) bool {
 	baseName := path.Base(normalized)
 	for _, pattern := range ignorePatterns {
 		pattern = normalizePath(pattern)
-		if matched, _ := path.Match(pattern, normalized); matched {
+		if globMatch(pattern, normalized) {
 			return true
 		}
-		if matched, _ := path.Match(pattern, baseName); matched {
+		if !strings.Contains(pattern, "/") && globMatch(pattern, baseName) {
 			return true
 		}
 		prefix := strings.TrimSuffix(pattern, "/")
@@ -280,4 +308,42 @@ func shouldIgnore(relPath string, ignorePatterns []string) bool {
 
 func normalizePath(value string) string {
 	return filepath.ToSlash(value)
+}
+
+func globMatch(pattern, value string) bool {
+	pattern = strings.TrimPrefix(normalizePath(pattern), "./")
+	value = strings.TrimPrefix(normalizePath(value), "./")
+	return globPartsMatch(splitGlobPath(pattern), splitGlobPath(value))
+}
+
+func splitGlobPath(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "/")
+}
+
+func globPartsMatch(patternParts, valueParts []string) bool {
+	if len(patternParts) == 0 {
+		return len(valueParts) == 0
+	}
+	if patternParts[0] == "**" {
+		if globPartsMatch(patternParts[1:], valueParts) {
+			return true
+		}
+		for i := range valueParts {
+			if globPartsMatch(patternParts[1:], valueParts[i+1:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(valueParts) == 0 {
+		return false
+	}
+	matched, err := path.Match(patternParts[0], valueParts[0])
+	if err != nil || !matched {
+		return false
+	}
+	return globPartsMatch(patternParts[1:], valueParts[1:])
 }

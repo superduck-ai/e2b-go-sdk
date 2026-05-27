@@ -129,6 +129,10 @@ func (e *ApiError) Error() string { return fmt.Sprintf("%d: %s", e.StatusCode, e
 
 // HandleApiError maps HTTP response status code to the appropriate error type.
 func HandleApiError(statusCode int, body []byte) error {
+	if statusCode < 400 {
+		return nil
+	}
+
 	var errResp ErrorResponse
 	if err := json.Unmarshal(body, &errResp); err != nil {
 		errResp.Message = string(body)
@@ -148,7 +152,7 @@ func HandleApiError(statusCode int, body []byte) error {
 		}
 		return &RateLimitError{Message: message}
 	case http.StatusNotFound:
-		return &NotFoundError{Message: errResp.Message}
+		return &NotFoundError{Message: fmt.Sprintf("%d: %s", statusCode, errResp.Message)}
 	default:
 		return &ApiError{StatusCode: statusCode, Message: errResp.Message}
 	}

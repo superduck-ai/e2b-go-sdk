@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/e2b-dev/e2b-go-sdk/envd"
 	"github.com/e2b-dev/e2b-go-sdk/envd/process"
@@ -110,7 +109,7 @@ func (p *Pty) connectUnary(ctx context.Context, path string, reqBody interface{}
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &connectErr) == nil && connectErr.Code != "" {
-			return envd.HandleRpcError(connectErr.Code, connectErr.Message)
+			return wrapProcessError(envd.HandleRpcError(connectErr.Code, connectErr.Message))
 		}
 		return fmt.Errorf("connect RPC error: %d %s", resp.StatusCode, string(body))
 	}
@@ -147,7 +146,7 @@ func (p *Pty) connectServerStream(ctx context.Context, path string, reqBody inte
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &connectErr) == nil && connectErr.Code != "" {
-			return nil, envd.HandleRpcError(connectErr.Code, connectErr.Message)
+			return nil, wrapProcessError(envd.HandleRpcError(connectErr.Code, connectErr.Message))
 		}
 		return nil, fmt.Errorf("connect RPC error: %d %s", resp.StatusCode, string(body))
 	}
@@ -261,14 +260,14 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 			case msg, ok := <-ch:
 				if !ok {
 					if err := streamCtx.Err(); err != nil {
-						handle.setWaitError(envd.HandleStreamContextError(err))
+						handle.setWaitError(wrapProcessError(envd.HandleStreamContextError(err)))
 						return
 					}
 					handle.setWaitError(errProcessExitedWithoutResult)
 					return
 				}
 				if msg.err != nil {
-					handle.setWaitError(msg.err)
+					handle.setWaitError(wrapProcessError(msg.err))
 					return
 				}
 				var ev process.ProcessEvent
@@ -276,7 +275,7 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.appendStdout(string(ev.Data.Pty))
+					handle.appendStdout(bytesToValidString(ev.Data.Pty))
 				}
 				if ev.End != nil {
 					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
@@ -363,14 +362,14 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 			case msg, ok := <-ch:
 				if !ok {
 					if err := streamCtx.Err(); err != nil {
-						handle.setWaitError(envd.HandleStreamContextError(err))
+						handle.setWaitError(wrapProcessError(envd.HandleStreamContextError(err)))
 						return
 					}
 					handle.setWaitError(errProcessExitedWithoutResult)
 					return
 				}
 				if msg.err != nil {
-					handle.setWaitError(msg.err)
+					handle.setWaitError(wrapProcessError(msg.err))
 					return
 				}
 				var ev process.ProcessEvent
@@ -378,7 +377,7 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.appendStdout(string(ev.Data.Pty))
+					handle.appendStdout(bytesToValidString(ev.Data.Pty))
 				}
 				if ev.End != nil {
 					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
@@ -428,10 +427,8 @@ func (p *Pty) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (b
 	}
 	err := p.connectUnary(reqCtx, "/process.Process/SendSignal", req, nil, "")
 	if err != nil {
-		if rpcErr, ok := err.(*envd.RpcError); ok {
-			if rpcErr.Code == "not_found" || strings.Contains(strings.ToLower(rpcErr.Message), "not found") {
-				return false, nil
-			}
+		if isProcessNotFoundError(err) {
+			return false, nil
 		}
 		return false, err
 	}

@@ -37,7 +37,7 @@ func GetSignature(path string, operation string, user string, expirationInSecond
 	raw := fmt.Sprintf("%s:%s:%s:%s", opts.Path, opts.Operation, resolvedUser, opts.EnvdAccessToken)
 
 	var expiration *int64
-	if opts.ExpirationInSeconds > 0 {
+	if opts.ExpirationInSeconds != 0 {
 		exp := time.Now().Unix() + int64(opts.ExpirationInSeconds)
 		expiration = &exp
 		raw = fmt.Sprintf("%s:%d", raw, exp)

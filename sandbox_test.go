@@ -720,6 +720,63 @@ func TestSandboxApiCreateSandboxAcceptsVolumeLikeObjectsInVolumeMountMap(t *test
 	}
 }
 
+func TestSandboxApiCreateSandboxPreservesNetworkOptions(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+
+		if err := json.NewEncoder(w).Encode(api.SandboxResponse{
+			SandboxID:   "sbx-1",
+			TemplateID:  "base",
+			EnvdVersion: "1.0.0",
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "test-api-key",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			AllowOut:           []string{"1.1.1.1"},
+			DenyOut:            []string{ALL_TRAFFIC},
+			AllowPublicTraffic: false,
+			MaskRequestHost:    "custom-host.example.com:${PORT}",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network, ok := gotBody["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network object in request body, got %#v", gotBody["network"])
+	}
+	if !reflect.DeepEqual(network["allowOut"], []any{"1.1.1.1"}) {
+		t.Fatalf("unexpected allowOut payload: %#v", network["allowOut"])
+	}
+	if !reflect.DeepEqual(network["denyOut"], []any{ALL_TRAFFIC}) {
+		t.Fatalf("unexpected denyOut payload: %#v", network["denyOut"])
+	}
+	if value, ok := network["allowPublicTraffic"].(bool); !ok || value {
+		t.Fatalf("expected allowPublicTraffic=false to be preserved, got %#v", network["allowPublicTraffic"])
+	}
+	if network["maskRequestHost"] != "custom-host.example.com:${PORT}" {
+		t.Fatalf("unexpected maskRequestHost payload: %#v", network["maskRequestHost"])
+	}
+}
+
 func TestSandboxApiCreateSandboxDefaultsAllowInternetAccessToTrue(t *testing.T) {
 	var gotBody map[string]any
 

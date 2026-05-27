@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
 func testCommandsConfig(sandboxURL string, requestTimeoutMs int) *struct {
@@ -118,6 +120,66 @@ func TestCommandsListUsesDefaultRequestTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed >= 150*time.Millisecond {
 		t.Fatalf("expected default request timeout to trigger early, elapsed=%s", elapsed)
+	}
+}
+
+func TestCommandsConnectMapsNotFoundToSdkNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Connect" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		if _, err := w.Write([]byte(`{"code":"not_found","message":"process missing"}`)); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
+
+	_, err := cmds.Connect(context.Background(), 999999, nil)
+	var notFoundErr *shared.NotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected NotFoundError, got %T %v", err, err)
+	}
+	if notFoundErr.Message != "process missing" {
+		t.Fatalf("unexpected not found message: %q", notFoundErr.Message)
+	}
+}
+
+func TestRunMapsDeadlineExceededStreamErrorToSdkTimeoutError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x02, []byte(`{"error":{"code":"deadline_exceeded","message":"command timed out"}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
+
+	_, err := cmds.Run(context.Background(), "sleep 10", nil)
+	var timeoutErr *shared.TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected TimeoutError, got %T %v", err, err)
+	}
+	if timeoutErr.Message != "command timed out" {
+		t.Fatalf("unexpected timeout message: %q", timeoutErr.Message)
+	}
+}
+
+func TestWrapProcessErrorMapsContextDeadlineToSdkTimeoutError(t *testing.T) {
+	err := wrapProcessError(context.DeadlineExceeded)
+
+	var timeoutErr *shared.TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected TimeoutError, got %T %v", err, err)
 	}
 }
 
@@ -244,6 +306,20 @@ func TestRunHandlesCurrentConnectJSONEventWrapper(t *testing.T) {
 	}
 	if result.Stdout != "Hello from E2B!\n" {
 		t.Fatalf("unexpected stdout: %q", result.Stdout)
+	}
+}
+
+func TestHandleProcessEventReplacesInvalidUTF8(t *testing.T) {
+	handle := newCommandHandle(123, func() {}, func() (bool, error) { return false, nil }, nil, nil)
+	cmds := &Commands{}
+
+	cmds.handleProcessEvent([]byte(`{"data":{"stdout":"4g==","stderr":"4g=="}}`), handle)
+
+	if handle.GetStdout() != "\uFFFD" {
+		t.Fatalf("expected invalid stdout bytes to be replaced, got %q", handle.GetStdout())
+	}
+	if handle.GetStderr() != "\uFFFD" {
+		t.Fatalf("expected invalid stderr bytes to be replaced, got %q", handle.GetStderr())
 	}
 }
 

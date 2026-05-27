@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/e2b-dev/e2b-go-sdk/envd"
 	"github.com/e2b-dev/e2b-go-sdk/envd/process"
+	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
 )
 
 const (
@@ -161,7 +163,7 @@ func (c *Commands) connectUnary(ctx context.Context, path string, reqBody interf
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &connectErr) == nil && connectErr.Code != "" {
-			return envd.HandleRpcError(connectErr.Code, connectErr.Message)
+			return wrapProcessError(envd.HandleRpcError(connectErr.Code, connectErr.Message))
 		}
 		return fmt.Errorf("connect RPC error: %d %s", resp.StatusCode, string(body))
 	}
@@ -199,7 +201,7 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 			Message string `json:"message"`
 		}
 		if json.Unmarshal(body, &connectErr) == nil && connectErr.Code != "" {
-			return nil, envd.HandleRpcError(connectErr.Code, connectErr.Message)
+			return nil, wrapProcessError(envd.HandleRpcError(connectErr.Code, connectErr.Message))
 		}
 		return nil, fmt.Errorf("connect RPC error: %d %s", resp.StatusCode, string(body))
 	}
@@ -299,10 +301,8 @@ func (c *Commands) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpt
 	}
 	err := c.connectUnary(reqCtx, "/process.Process/SendSignal", req, nil, "")
 	if err != nil {
-		if rpcErr, ok := err.(*envd.RpcError); ok {
-			if rpcErr.Code == "not_found" || strings.Contains(rpcErr.Message, "not found") {
-				return false, nil
-			}
+		if isProcessNotFoundError(err) {
+			return false, nil
 		}
 		return false, err
 	}
@@ -374,14 +374,14 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 			case msg, ok := <-ch:
 				if !ok {
 					if err := streamCtx.Err(); err != nil {
-						handle.setWaitError(envd.HandleStreamContextError(err))
+						handle.setWaitError(wrapProcessError(envd.HandleStreamContextError(err)))
 						return
 					}
 					handle.setWaitError(errProcessExitedWithoutResult)
 					return
 				}
 				if msg.err != nil {
-					handle.setWaitError(msg.err)
+					handle.setWaitError(wrapProcessError(msg.err))
 					return
 				}
 				c.handleProcessEvent(msg.payload, handle)
@@ -494,14 +494,14 @@ func (c *Commands) start(ctx context.Context, cmd string, opts *CommandStartOpts
 			case msg, ok := <-ch:
 				if !ok {
 					if err := streamCtx.Err(); err != nil {
-						handle.setWaitError(envd.HandleStreamContextError(err))
+						handle.setWaitError(wrapProcessError(envd.HandleStreamContextError(err)))
 						return
 					}
 					handle.setWaitError(errProcessExitedWithoutResult)
 					return
 				}
 				if msg.err != nil {
-					handle.setWaitError(msg.err)
+					handle.setWaitError(wrapProcessError(msg.err))
 					return
 				}
 				c.handleProcessEvent(msg.payload, handle)
@@ -581,7 +581,7 @@ func waitForFirstEvent(ch <-chan streamEnvelope, timeoutMs *int) (json.RawMessag
 			return nil, false, nil
 		}
 		if msg.err != nil {
-			return nil, false, msg.err
+			return nil, false, wrapProcessError(msg.err)
 		}
 		return msg.payload, true, nil
 	}
@@ -592,11 +592,11 @@ func waitForFirstEvent(ch <-chan streamEnvelope, timeoutMs *int) (json.RawMessag
 			return nil, false, nil
 		}
 		if msg.err != nil {
-			return nil, false, msg.err
+			return nil, false, wrapProcessError(msg.err)
 		}
 		return msg.payload, true, nil
 	case <-time.After(time.Duration(*timeoutMs) * time.Millisecond):
-		return nil, false, envd.HandleRequestTimeoutError()
+		return nil, false, wrapProcessError(envd.HandleRequestTimeoutError())
 	}
 }
 
@@ -607,15 +607,79 @@ func (c *Commands) handleProcessEvent(msg json.RawMessage, handle *CommandHandle
 	}
 	if event.Data != nil {
 		if len(event.Data.Stdout) > 0 {
-			handle.appendStdout(string(event.Data.Stdout))
+			handle.appendStdout(bytesToValidString(event.Data.Stdout))
 		}
 		if len(event.Data.Stderr) > 0 {
-			handle.appendStderr(string(event.Data.Stderr))
+			handle.appendStderr(bytesToValidString(event.Data.Stderr))
 		}
 	}
 	if event.End != nil {
 		handle.setEnd(int(event.End.ExitCode), event.End.Error)
 	}
+}
+
+func bytesToValidString(data []byte) string {
+	return strings.ToValidUTF8(string(data), "\uFFFD")
+}
+
+func wrapProcessError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return wrapProcessError(envd.HandleStreamContextError(err))
+	}
+	if isProcessNotFoundError(err) {
+		return &shared.NotFoundError{
+			SandboxError: shared.SandboxError{Message: processErrorMessage(err)},
+		}
+	}
+
+	var rpcErr *envd.RpcError
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case "invalid_argument":
+			return &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		case "unauthenticated":
+			return &shared.AuthenticationError{Message: rpcErr.Message}
+		case "unavailable", "canceled", "deadline_exceeded":
+			return &shared.TimeoutError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		case "resource_exhausted":
+			return &shared.RateLimitError{SandboxError: shared.SandboxError{Message: rpcErr.Message}}
+		default:
+			return &shared.SandboxError{Message: fmt.Sprintf("%s: %s", rpcErr.Code, rpcErr.Message)}
+		}
+	}
+
+	return err
+}
+
+func isProcessNotFoundError(err error) bool {
+	var notFoundErr *shared.NotFoundError
+	if errors.As(err, &notFoundErr) {
+		return true
+	}
+
+	var rpcErr *envd.RpcError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code == "not_found" || strings.Contains(strings.ToLower(rpcErr.Message), "not found")
+	}
+
+	return false
+}
+
+func processErrorMessage(err error) string {
+	var notFoundErr *shared.NotFoundError
+	if errors.As(err, &notFoundErr) && notFoundErr.SandboxError.Message != "" {
+		return notFoundErr.SandboxError.Message
+	}
+
+	var rpcErr *envd.RpcError
+	if errors.As(err, &rpcErr) && rpcErr.Message != "" {
+		return rpcErr.Message
+	}
+
+	return err.Error()
 }
 
 // versionGTE returns true if version >= minVersion (semver comparison).

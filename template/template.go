@@ -393,10 +393,11 @@ func (t *TemplateBase) SetEnvs(envs map[string]string) *TemplateBase {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	args := make([]string, 0, len(keys)*2)
 	for _, k := range keys {
-		v := envs[k]
-		t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: []string{k, v}, Force: t.forceNextLayer})
+		args = append(args, k, envs[k])
 	}
+	t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: args, Force: t.forceNextLayer})
 	return t
 }
 
@@ -986,8 +987,10 @@ func Build(ctx context.Context, template *TemplateBase, name string, opts *Build
 	if opts == nil {
 		opts = &BuildOptions{}
 	}
-	if opts.Alias != "" && name == "" {
-		name = opts.Alias
+	var err error
+	name, err = normalizeBuildName(name, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := newApiClientFromBuildOptions(opts)
@@ -1048,8 +1051,10 @@ func BuildInBackground(ctx context.Context, template *TemplateBase, name string,
 	if opts == nil {
 		opts = &BuildOptions{}
 	}
-	if opts.Alias != "" && name == "" {
-		name = opts.Alias
+	var err error
+	name, err = normalizeBuildName(name, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := newApiClientFromBuildOptions(opts)
@@ -1088,6 +1093,16 @@ func BuildInBackground(ctx context.Context, template *TemplateBase, name string,
 	return buildInfo, nil
 }
 
+func normalizeBuildName(name string, opts *BuildOptions) (string, error) {
+	if name == "" && opts != nil {
+		name = opts.Alias
+	}
+	if name == "" {
+		return "", &shared.TemplateError{SandboxError: shared.SandboxError{Message: "Name must be provided"}}
+	}
+	return name, nil
+}
+
 // GetBuildStatus retrieves the build status for a given template and build.
 func GetBuildStatus(ctx context.Context, templateID, buildID string, opts *GetBuildStatusOptions) (*TemplateBuildStatusResponse, error) {
 	if opts == nil {
@@ -1124,9 +1139,14 @@ func AliasExists(ctx context.Context, alias string, opts *BuildOptions) (bool, e
 }
 
 // AssignTags assigns tags to a template.
-func AssignTags(ctx context.Context, targetName string, tags []string, opts *BuildOptions) (*TemplateTagInfo, error) {
+func AssignTags(ctx context.Context, targetName string, tags any, opts *BuildOptions) (*TemplateTagInfo, error) {
 	if opts == nil {
 		opts = &BuildOptions{}
+	}
+
+	normalizedTags, err := normalizeTags(tags)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := newApiClientFromBuildOptions(opts)
@@ -1134,13 +1154,18 @@ func AssignTags(ctx context.Context, targetName string, tags []string, opts *Bui
 		return nil, err
 	}
 
-	return assignTags(ctx, client, targetName, tags)
+	return assignTags(ctx, client, targetName, normalizedTags)
 }
 
 // RemoveTags removes tags from a template.
-func RemoveTags(ctx context.Context, name string, tags []string, opts *BuildOptions) error {
+func RemoveTags(ctx context.Context, name string, tags any, opts *BuildOptions) error {
 	if opts == nil {
 		opts = &BuildOptions{}
+	}
+
+	normalizedTags, err := normalizeTags(tags)
+	if err != nil {
+		return err
 	}
 
 	client, err := newApiClientFromBuildOptions(opts)
@@ -1148,7 +1173,7 @@ func RemoveTags(ctx context.Context, name string, tags []string, opts *BuildOpti
 		return err
 	}
 
-	return removeTags(ctx, client, name, tags)
+	return removeTags(ctx, client, name, normalizedTags)
 }
 
 // GetTags retrieves all tags for a template.
@@ -1163,4 +1188,15 @@ func GetTags(ctx context.Context, templateID string, opts *BuildOptions) ([]Temp
 	}
 
 	return getTemplateTags(ctx, client, templateID)
+}
+
+func normalizeTags(tags any) ([]string, error) {
+	switch value := tags.(type) {
+	case string:
+		return []string{value}, nil
+	case []string:
+		return append([]string{}, value...), nil
+	default:
+		return nil, &shared.TemplateError{SandboxError: shared.SandboxError{Message: "Tags must be a string or []string"}}
+	}
 }

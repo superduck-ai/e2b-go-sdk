@@ -24,7 +24,7 @@ type CreateSandboxRequest struct {
 type NetworkOpts struct {
 	AllowOut           []string `json:"allowOut,omitempty"`
 	DenyOut            []string `json:"denyOut,omitempty"`
-	AllowPublicTraffic bool     `json:"allowPublicTraffic,omitempty"`
+	AllowPublicTraffic bool     `json:"allowPublicTraffic"`
 	MaskRequestHost    string   `json:"maskRequestHost,omitempty"`
 }
 

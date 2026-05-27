@@ -250,6 +250,18 @@ func TestWriteFilesUsesSingleMultipartRequestOnOldEnvd(t *testing.T) {
 	}
 }
 
+func TestWriteFilesEmptyArrayMatchesJsNoop(t *testing.T) {
+	fs := NewFilesystem(testFilesystemConfig("http://127.0.0.1", 0), "1.0.0")
+
+	infos, err := fs.WriteFiles(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("WriteFiles empty array returned error: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("expected empty result for empty WriteFiles, got %#v", infos)
+	}
+}
+
 func TestWriteMultipartUsesPathQueryForSingleFileOnOldEnvd(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/files" {
@@ -299,7 +311,7 @@ func TestRenameErrorsWhenMovedEntryMissing(t *testing.T) {
 	}
 }
 
-func TestRemoveWrapsNotFoundAsFileNotFoundError(t *testing.T) {
+func TestRemoveIgnoresNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/filesystem.Filesystem/Remove" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -314,9 +326,8 @@ func TestRemoveWrapsNotFoundAsFileNotFoundError(t *testing.T) {
 	fs := NewFilesystem(testFilesystemConfig(server.URL, 0), "1.0.0")
 
 	err := fs.Remove(context.Background(), "/tmp/missing.txt", nil)
-	var notFoundErr *shared.FileNotFoundError
-	if !errors.As(err, &notFoundErr) {
-		t.Fatalf("expected FileNotFoundError, got %T %v", err, err)
+	if err != nil {
+		t.Fatalf("expected no error for missing file, got %v", err)
 	}
 }
 
