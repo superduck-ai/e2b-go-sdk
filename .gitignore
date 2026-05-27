@@ -1,3 +1,2 @@
-.env
-demo/node_modules/
-demo/demo
+.env*
+demo

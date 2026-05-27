@@ -1,6 +1,6 @@
 package e2b
 
-import rootapi "github.com/e2b-dev/e2b-go-sdk/api"
+import rootapi "github.com/superduck-ai/e2b-go-sdk/api"
 
 type ApiClient = rootapi.ApiClient
 

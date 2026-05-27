@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/api"
-	"github.com/e2b-dev/e2b-go-sdk/commands"
-	"github.com/e2b-dev/e2b-go-sdk/envd"
-	"github.com/e2b-dev/e2b-go-sdk/filesystem"
-	"github.com/e2b-dev/e2b-go-sdk/git"
+	"github.com/superduck-ai/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/commands"
+	"github.com/superduck-ai/e2b-go-sdk/envd"
+	"github.com/superduck-ai/e2b-go-sdk/filesystem"
+	"github.com/superduck-ai/e2b-go-sdk/git"
 	"github.com/google/uuid"
 )
 

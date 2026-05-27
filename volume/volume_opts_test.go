@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/api"
 )
 
 func TestVolumeGetInfoUsesPerCallApiURLOverride(t *testing.T) {

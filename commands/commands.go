@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/envd"
-	"github.com/e2b-dev/e2b-go-sdk/envd/process"
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/envd"
+	"github.com/superduck-ai/e2b-go-sdk/envd/process"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 const (

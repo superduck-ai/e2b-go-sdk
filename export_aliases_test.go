@@ -1,9 +1,9 @@
 package e2b
 
 import (
-	rootcmd "github.com/e2b-dev/e2b-go-sdk/commands"
-	rootfs "github.com/e2b-dev/e2b-go-sdk/filesystem"
-	rootgit "github.com/e2b-dev/e2b-go-sdk/git"
+	rootcmd "github.com/superduck-ai/e2b-go-sdk/commands"
+	rootfs "github.com/superduck-ai/e2b-go-sdk/filesystem"
+	rootgit "github.com/superduck-ai/e2b-go-sdk/git"
 	"testing"
 )
 

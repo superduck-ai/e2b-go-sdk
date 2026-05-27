@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/e2b-dev/e2b-go-sdk/envd"
-	"github.com/e2b-dev/e2b-go-sdk/envd/process"
+	"github.com/superduck-ai/e2b-go-sdk/envd"
+	"github.com/superduck-ai/e2b-go-sdk/envd/process"
 )
 
 type PtyCreateOpts struct {

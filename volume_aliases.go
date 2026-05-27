@@ -1,6 +1,6 @@
 package e2b
 
-import rootvol "github.com/e2b-dev/e2b-go-sdk/volume"
+import rootvol "github.com/superduck-ai/e2b-go-sdk/volume"
 
 const (
 	VolumeFileTypeUnknown   = rootvol.VolumeFileTypeUnknown

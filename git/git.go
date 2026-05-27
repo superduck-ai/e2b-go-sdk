@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/e2b-dev/e2b-go-sdk/commands"
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/commands"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 type GitRequestOpts struct {

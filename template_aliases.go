@@ -3,7 +3,7 @@ package e2b
 import (
 	"context"
 
-	roottmpl "github.com/e2b-dev/e2b-go-sdk/template"
+	roottmpl "github.com/superduck-ai/e2b-go-sdk/template"
 )
 
 type TemplateBase = roottmpl.TemplateBase

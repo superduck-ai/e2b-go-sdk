@@ -11,9 +11,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/e2b-dev/e2b-go-sdk/commands"
-	"github.com/e2b-dev/e2b-go-sdk/envd/process"
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/commands"
+	"github.com/superduck-ai/e2b-go-sdk/envd/process"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 func TestResolveOptionalBool(t *testing.T) {

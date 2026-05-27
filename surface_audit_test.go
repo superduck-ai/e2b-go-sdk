@@ -17,7 +17,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 	}{
 		{
 			name: "root",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk",
 			mustHave: []string{
 				"type ConnectionConfig struct",
 				"type ConnectionOpts struct",
@@ -173,7 +173,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "template",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/template",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/template",
 			mustHave: []string{
 				"func GetBuildStatus(",
 				"func ToJSON(",
@@ -201,7 +201,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "template-type",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/template.TemplateBase",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/template.TemplateBase",
 			mustHave: []string{
 				"type TemplateBase struct",
 				"func (t *TemplateBase) Copy(",
@@ -218,7 +218,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "volume",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/volume",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/volume",
 			mustHave: []string{
 				"type ConnectionOpts struct",
 				"func GetInfo(",
@@ -231,7 +231,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "commands",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/commands",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/commands",
 			mustHave: []string{
 				"type Commands struct",
 				"func NewCommands(",
@@ -251,7 +251,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "commands-handle",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/commands.CommandHandle",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/commands.CommandHandle",
 			mustHave: []string{
 				"type CommandHandle struct",
 				"func (h *CommandHandle) Disconnect()",
@@ -272,7 +272,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "commands-type",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/commands.Commands",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/commands.Commands",
 			mustHave: []string{
 				"type Commands struct",
 				"func (c *Commands) Connect(",
@@ -287,7 +287,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "filesystem",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/filesystem",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/filesystem",
 			mustHave: []string{
 				"type Filesystem struct",
 				"func NewFilesystem(",
@@ -306,7 +306,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "volume-type",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/volume.Volume",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/volume.Volume",
 			mustHave: []string{
 				"type Volume struct",
 				"VolumeID string",
@@ -330,7 +330,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "git",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/git",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/git",
 			mustHave: []string{
 				"type Git struct",
 				"func NewGit(",
@@ -372,7 +372,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 		},
 		{
 			name: "git-type",
-			pkg:  "github.com/e2b-dev/e2b-go-sdk/git.Git",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/git.Git",
 			mustHave: []string{
 				"type Git struct",
 				"func (g *Git) Add(",

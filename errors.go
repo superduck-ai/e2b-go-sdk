@@ -3,7 +3,7 @@ package e2b
 import (
 	"fmt"
 
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 // formatSandboxTimeoutError wraps message with sandbox timeout hint.

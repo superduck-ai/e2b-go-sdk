@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	roottmpl "github.com/e2b-dev/e2b-go-sdk/template"
+	roottmpl "github.com/superduck-ai/e2b-go-sdk/template"
 )
 
 func TestRootAliasesExposeJsStyleTemplateHelpers(t *testing.T) {

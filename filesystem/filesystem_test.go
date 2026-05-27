@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 func testFilesystemConfig(sandboxURL string, requestTimeoutMs int) *struct {

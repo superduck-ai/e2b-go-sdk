@@ -12,8 +12,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/e2b-dev/e2b-go-sdk/api"
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 type ConnectionOpts struct {

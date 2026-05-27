@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/envd"
-	envdfs "github.com/e2b-dev/e2b-go-sdk/envd/filesystem"
-	"github.com/e2b-dev/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/envd"
+	envdfs "github.com/superduck-ai/e2b-go-sdk/envd/filesystem"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 const (

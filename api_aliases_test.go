@@ -1,7 +1,7 @@
 package e2b
 
 import (
-	rootapi "github.com/e2b-dev/e2b-go-sdk/api"
+	rootapi "github.com/superduck-ai/e2b-go-sdk/api"
 	"testing"
 )
 

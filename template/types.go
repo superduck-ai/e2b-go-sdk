@@ -3,7 +3,7 @@ package template
 import (
 	"time"
 
-	"github.com/e2b-dev/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/api"
 )
 
 type TemplateOptions struct {

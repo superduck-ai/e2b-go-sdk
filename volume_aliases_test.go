@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	rootvol "github.com/e2b-dev/e2b-go-sdk/volume"
+	rootvol "github.com/superduck-ai/e2b-go-sdk/volume"
 )
 
 func TestRootAliasesExposeJsStyleVolumeTypes(t *testing.T) {
