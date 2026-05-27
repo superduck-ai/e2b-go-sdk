@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 const fileTimeoutMs = 3_600_000
@@ -23,6 +24,7 @@ type VolumeApiOpts struct {
 	RequestTimeoutMs *int
 	Logger           api.Logger
 	Headers          map[string]string
+	Proxy            string
 }
 
 type VolumeConnectionConfig struct {
@@ -33,6 +35,7 @@ type VolumeConnectionConfig struct {
 	RequestTimeoutMs *int
 	Logger           api.Logger
 	Headers          map[string]string
+	Proxy            string
 }
 
 func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
@@ -80,6 +83,7 @@ func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Logger:           opts.Logger,
 		Headers:          headers,
+		Proxy:            opts.Proxy,
 	}
 }
 
@@ -100,7 +104,7 @@ func (e *volumeApiError) Error() string {
 func newVolumeApiClientWithConfig(config *VolumeConnectionConfig) *volumeApiClient {
 	return &volumeApiClient{
 		config:     config,
-		httpClient: &http.Client{},
+		httpClient: shared.NewHTTPClient(0, config.Proxy, config.Logger),
 	}
 }
 

@@ -67,6 +67,52 @@ func TestReadStreamEnvelopesEmitsEndStreamError(t *testing.T) {
 	}
 }
 
+func TestRunLogsStreamPayloads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"data":{"stdout":"aGkK"}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	logger := &recordingCommandLogger{}
+	cfg := &struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+		Logger           *recordingCommandLogger
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+		Logger:     logger,
+	}
+	cmds := NewCommands(cfg, "1.0.0")
+
+	result, err := cmds.Run(context.Background(), "echo hi", nil)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Stdout != "hi\n" {
+		t.Fatalf("unexpected stdout: %q", result.Stdout)
+	}
+	if logger.debugCount == 0 {
+		t.Fatal("expected stream payloads to be debug logged")
+	}
+}
+
 func writeEnvelope(t *testing.T, buf *bytes.Buffer, flags byte, payload []byte) {
 	t.Helper()
 
@@ -80,6 +126,15 @@ func writeEnvelope(t *testing.T, buf *bytes.Buffer, flags byte, payload []byte) 
 		t.Fatalf("failed to write payload: %v", err)
 	}
 }
+
+type recordingCommandLogger struct {
+	debugCount int
+}
+
+func (l *recordingCommandLogger) Debug(args ...interface{}) { l.debugCount++ }
+func (l *recordingCommandLogger) Info(args ...interface{})  {}
+func (l *recordingCommandLogger) Warn(args ...interface{})  {}
+func (l *recordingCommandLogger) Error(args ...interface{}) {}
 
 func assertConnectEnvelopeRequest(t *testing.T, r *http.Request) []byte {
 	t.Helper()

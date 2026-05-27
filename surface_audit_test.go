@@ -38,6 +38,9 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 				"type FileUploadError =",
 				"type VolumeError =",
 				"type Logger =",
+				"type HTTPMiddleware =",
+				"func CreateRpcLogger(",
+				"func CreateApiLogger(",
 				"func GetSignature(",
 				"type FileType =",
 				"type WriteInfo =",
@@ -305,6 +308,17 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 			},
 		},
 		{
+			name: "filesystem-type",
+			pkg:  "github.com/superduck-ai/e2b-go-sdk/filesystem.Filesystem",
+			mustHave: []string{
+				"type Filesystem struct",
+				"func (f *Filesystem) Read(",
+				"func (f *Filesystem) ReadStream(",
+				"func (f *Filesystem) ReadText(",
+			},
+			mustMiss: []string{},
+		},
+		{
 			name: "volume-type",
 			pkg:  "github.com/superduck-ai/e2b-go-sdk/volume.Volume",
 			mustHave: []string{
@@ -319,6 +333,7 @@ func TestGoDocSurfaceMatchesAlignedExportNames(t *testing.T) {
 				"func (v *Volume) List(",
 				"func (v *Volume) MakeDir(",
 				"func (v *Volume) ReadFile(",
+				"func (v *Volume) ReadFileStream(",
 				"func (v *Volume) ReadFileText(",
 				"func (v *Volume) Remove(",
 				"func (v *Volume) UpdateMetadata(",

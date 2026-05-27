@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -92,6 +93,8 @@ type connectionConfig struct {
 	Debug            bool
 	RequestTimeoutMs int
 	Headers          map[string]string
+	Logger           shared.Logger
+	Proxy            string
 }
 
 type Filesystem struct {
@@ -105,33 +108,114 @@ type streamEnvelope struct {
 	err     error
 }
 
-func NewFilesystem(cfg *struct {
-	ApiKey           string
-	AccessToken      string
-	Domain           string
-	ApiUrl           string
-	SandboxUrl       string
-	Debug            bool
-	RequestTimeoutMs int
-	Headers          map[string]string
-}, envdVersion string) *Filesystem {
-	var resolved *connectionConfig
-	if cfg != nil {
-		resolved = &connectionConfig{
-			ApiKey:           cfg.ApiKey,
-			AccessToken:      cfg.AccessToken,
-			Domain:           cfg.Domain,
-			ApiUrl:           cfg.ApiUrl,
-			SandboxUrl:       cfg.SandboxUrl,
-			Debug:            cfg.Debug,
-			RequestTimeoutMs: cfg.RequestTimeoutMs,
-			Headers:          cfg.Headers,
-		}
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r cancelReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
+}
+
+func NewFilesystem(cfg any, envdVersion string) *Filesystem {
+	resolved := newConnectionConfig(cfg)
+	var logger shared.Logger
+	var proxy string
+	if resolved != nil {
+		logger = resolved.Logger
+		proxy = resolved.Proxy
 	}
 	return &Filesystem{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       &http.Client{},
+		httpClient:       shared.NewHTTPClient(0, proxy, logger),
+	}
+}
+
+func newConnectionConfig(cfg any) *connectionConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(cfg)
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return &connectionConfig{}
+	}
+
+	return &connectionConfig{
+		ApiKey:           stringField(value, "ApiKey"),
+		AccessToken:      stringField(value, "AccessToken"),
+		Domain:           stringField(value, "Domain"),
+		ApiUrl:           stringField(value, "ApiUrl"),
+		SandboxUrl:       stringField(value, "SandboxUrl"),
+		Debug:            boolField(value, "Debug"),
+		RequestTimeoutMs: intField(value, "RequestTimeoutMs"),
+		Headers:          stringMapField(value, "Headers"),
+		Logger:           loggerField(value, "Logger"),
+		Proxy:            stringField(value, "Proxy"),
+	}
+}
+
+func stringField(value reflect.Value, name string) string {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.String {
+		return ""
+	}
+	return field.String()
+}
+
+func boolField(value reflect.Value, name string) bool {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Bool {
+		return false
+	}
+	return field.Bool()
+}
+
+func intField(value reflect.Value, name string) int {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Int {
+		return 0
+	}
+	return int(field.Int())
+}
+
+func stringMapField(value reflect.Value, name string) map[string]string {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Map || field.IsNil() {
+		return nil
+	}
+	if headers, ok := field.Interface().(map[string]string); ok {
+		return headers
+	}
+	return nil
+}
+
+func loggerField(value reflect.Value, name string) shared.Logger {
+	field := value.FieldByName(name)
+	if !field.IsValid() || !field.CanInterface() || isNilField(field) {
+		return nil
+	}
+	if logger, ok := field.Interface().(shared.Logger); ok {
+		return logger
+	}
+	return nil
+}
+
+func isNilField(field reflect.Value) bool {
+	switch field.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return field.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -262,6 +346,14 @@ func (f *Filesystem) Read(ctx context.Context, path string, opts *FilesystemRead
 	return body, nil
 }
 
+func (f *Filesystem) ReadStream(ctx context.Context, path string, opts *FilesystemReadOpts) (io.ReadCloser, error) {
+	resp, cancel, err := f.openReadResponse(ctx, path, opts)
+	if err != nil {
+		return nil, err
+	}
+	return cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
+}
+
 func (f *Filesystem) ReadText(ctx context.Context, path string, opts *FilesystemReadOpts) (string, error) {
 	data, resp, err := f.readFile(ctx, path, opts)
 	if err != nil {
@@ -274,6 +366,21 @@ func (f *Filesystem) ReadText(ctx context.Context, path string, opts *Filesystem
 }
 
 func (f *Filesystem) readFile(ctx context.Context, path string, opts *FilesystemReadOpts) ([]byte, *http.Response, error) {
+	resp, cancel, err := f.openReadResponse(ctx, path, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, resp, nil
+}
+
+func (f *Filesystem) openReadResponse(ctx context.Context, path string, opts *FilesystemReadOpts) (*http.Response, context.CancelFunc, error) {
 	var requestTimeoutMs *int
 	user := ""
 	if opts != nil {
@@ -284,7 +391,6 @@ func (f *Filesystem) readFile(ctx context.Context, path string, opts *Filesystem
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
 
 	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
-	defer cancel()
 
 	u := fmt.Sprintf("%s/files?path=%s", f.baseUrl(), url.QueryEscape(path))
 	if user != "" {
@@ -292,6 +398,7 @@ func (f *Filesystem) readFile(ctx context.Context, path string, opts *Filesystem
 	}
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
 	if err != nil {
+		cancel()
 		return nil, nil, err
 	}
 	for k, v := range f.headers(user) {
@@ -302,17 +409,16 @@ func (f *Filesystem) readFile(ctx context.Context, path string, opts *Filesystem
 	}
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+		cancel()
 		return nil, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
 		return nil, nil, wrapFilesystemError(envd.HandleEnvdApiError(resp.StatusCode, body))
 	}
-	return body, resp, nil
+	return resp, cancel, nil
 }
 
 func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opts *FilesystemWriteOpts) (*WriteInfo, error) {
@@ -669,7 +775,7 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 	}
 
 	ch := make(chan streamEnvelope, 16)
-	go readStreamEnvelopes(body, ch)
+	go readStreamEnvelopesWithLogger(body, ch, f.connectionConfig.Logger)
 
 	firstMsg, ok, err := waitForFirstEvent(ch, requestTimeoutMs)
 	if err != nil {
@@ -755,6 +861,10 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 
 // readStreamEnvelopes reads Connect protocol envelopes from a streaming response.
 func readStreamEnvelopes(reader io.Reader, ch chan<- streamEnvelope) {
+	readStreamEnvelopesWithLogger(reader, ch, nil)
+}
+
+func readStreamEnvelopesWithLogger(reader io.Reader, ch chan<- streamEnvelope, logger shared.Logger) {
 	defer close(ch)
 	header := make([]byte, 5)
 	for {
@@ -780,6 +890,9 @@ func readStreamEnvelopes(reader io.Reader, ch chan<- streamEnvelope) {
 				ch <- streamEnvelope{err: err}
 			}
 			return
+		}
+		if logger != nil {
+			logger.Debug("Response stream:", string(payload))
 		}
 		ch <- streamEnvelope{payload: json.RawMessage(payload)}
 	}

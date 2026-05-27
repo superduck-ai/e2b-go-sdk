@@ -26,6 +26,7 @@ type ConnectionOpts struct {
 	RequestTimeoutMs *int
 	Logger           api.Logger
 	Headers          map[string]string
+	Proxy            string
 }
 
 type Volume struct {
@@ -35,6 +36,17 @@ type Volume struct {
 	Domain   string
 	Debug    bool
 	client   *volumeApiClient
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r cancelReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
 }
 
 func buildApiClientConfig(opts *ConnectionOpts) *api.ClientConfig {
@@ -81,6 +93,7 @@ func buildApiClientConfig(opts *ConnectionOpts) *api.ClientConfig {
 		RequestTimeoutMs: timeout,
 		Logger:           opts.Logger,
 		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
 	}
 }
 
@@ -89,9 +102,13 @@ func newVolumeApiClient(volumeID string, token string, opts *ConnectionOpts) *vo
 		opts = &ConnectionOpts{}
 	}
 	apiOpts := &VolumeApiOpts{
-		Token:  token,
-		Domain: opts.Domain,
-		Debug:  opts.Debug,
+		Token:            token,
+		Domain:           opts.Domain,
+		Debug:            opts.Debug,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Logger:           opts.Logger,
+		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
 	}
 	config := NewVolumeConnectionConfig(apiOpts)
 	return newVolumeApiClientWithConfig(config)
@@ -382,15 +399,25 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, metadata *Volu
 
 // ReadFile reads the raw bytes of a file at the given path.
 func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts) ([]byte, error) {
+	body, err := v.ReadFileStream(ctx, path, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(body)
+}
+
+// ReadFileStream reads the raw bytes of a file as a stream.
+func (v *Volume) ReadFileStream(ctx context.Context, path string, opts *VolumeApiOpts) (io.ReadCloser, error) {
 	query := url.Values{}
 	client := v.resolveClient(opts)
 	reqPath := v.volumeContentPath("file", path, query)
 	reqUrl := client.config.ApiUrl + reqPath
 	reqCtx, cancel := requestContext(ctx, fileRequestTimeout(opts))
-	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, reqUrl, nil)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+client.config.Token)
@@ -400,19 +427,21 @@ func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts)
 
 	resp, err := client.httpClient.Do(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
 		return nil, wrapContentVolumeError(&volumeApiError{
 			StatusCode: resp.StatusCode,
 			Message:    string(respBody),
 		}, fmt.Sprintf("Path %s not found", path))
 	}
 
-	return io.ReadAll(resp.Body)
+	return cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
 }
 
 // ReadFileText reads the contents of a file as a string.
@@ -506,10 +535,14 @@ func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
 	}
 
 	merged := &VolumeApiOpts{
-		Token:  v.client.config.Token,
-		Domain: v.client.config.Domain,
-		Debug:  v.client.config.Debug,
-		ApiUrl: v.client.config.ApiUrl,
+		Token:            v.client.config.Token,
+		Domain:           v.client.config.Domain,
+		Debug:            v.client.config.Debug,
+		ApiUrl:           v.client.config.ApiUrl,
+		RequestTimeoutMs: v.client.config.RequestTimeoutMs,
+		Logger:           v.client.config.Logger,
+		Headers:          v.client.config.Headers,
+		Proxy:            v.client.config.Proxy,
 	}
 
 	if opts.Token != "" {
@@ -529,6 +562,12 @@ func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
 	}
 	if opts.Headers != nil {
 		merged.Headers = opts.Headers
+	}
+	if opts.Logger != nil {
+		merged.Logger = opts.Logger
+	}
+	if opts.Proxy != "" {
+		merged.Proxy = opts.Proxy
 	}
 
 	return newVolumeApiClientWithConfig(NewVolumeConnectionConfig(merged))
@@ -607,6 +646,7 @@ func volumeWriteOptsToApiOpts(opts *VolumeWriteOptions) *VolumeApiOpts {
 		ApiUrl:           opts.ApiUrl,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
 	}
 }
 

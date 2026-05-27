@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/superduck-ai/e2b-go-sdk/envd/process"
 )
 
 func TestPtyKillReturnsFalseForGenericNotFoundMessage(t *testing.T) {
@@ -73,6 +75,45 @@ func TestPtyCreateSendsConnectEnvelopeRequest(t *testing.T) {
 		t.Fatalf("Create returned error: %v", err)
 	}
 	handle.Disconnect()
+}
+
+func TestPtyOnDataReceivesRawBytes(t *testing.T) {
+	raw := []byte{0xff, 0xfe, 'O', 'K'}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{Start: &process.ProcessStartEvent{Pid: 123}}))
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{Data: &process.ProcessDataEvent{Pty: raw}}))
+		writeEnvelope(t, &stream, 0x00, mustJSON(t, process.ProcessEvent{End: &process.ProcessEndEvent{ExitCode: 0}}))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	pty := NewPty(testCommandsConfig(server.URL, 0), "1.0.0")
+	var got []byte
+	handle, err := pty.Create(context.Background(), &PtyCreateOpts{
+		OnData: func(data PtyOutput) {
+			got = append([]byte(nil), data...)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	result, err := handle.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("expected raw PTY bytes %#v, got %#v", raw, got)
+	}
+	if result.Stdout == string(raw) {
+		t.Fatal("expected stdout aggregation to sanitize invalid UTF-8, not preserve raw bytes")
+	}
 }
 
 func TestPtyKillUsesDefaultRequestTimeout(t *testing.T) {
@@ -219,4 +260,13 @@ func TestPtyConnectErrorsWhenStreamClosesBeforeFirstEvent(t *testing.T) {
 	if err.Error() != "Expected start event" {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("failed to marshal JSON: %v", err)
+	}
+	return data
 }

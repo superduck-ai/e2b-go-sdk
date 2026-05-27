@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 // Logger is a simple logging interface.
@@ -27,6 +29,7 @@ type ClientConfig struct {
 	RequestTimeoutMs int
 	Headers          map[string]string
 	Logger           Logger
+	Proxy            string
 }
 
 type ApiClient struct {
@@ -88,9 +91,7 @@ func NewApiClient(config *ClientConfig, opts ...ApiClientOption) (*ApiClient, er
 		headers[k] = v
 	}
 
-	client := &http.Client{
-		Timeout: time.Duration(config.RequestTimeoutMs) * time.Millisecond,
-	}
+	client := shared.NewHTTPClient(time.Duration(config.RequestTimeoutMs)*time.Millisecond, config.Proxy, config.Logger)
 
 	return &ApiClient{
 		BaseUrl:    baseUrl,

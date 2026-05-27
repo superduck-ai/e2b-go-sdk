@@ -10,6 +10,7 @@ import (
 
 	"github.com/superduck-ai/e2b-go-sdk/envd"
 	"github.com/superduck-ai/e2b-go-sdk/envd/process"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 type PtyCreateOpts struct {
@@ -35,33 +36,18 @@ type Pty struct {
 	httpClient       *http.Client
 }
 
-func NewPty(cfg *struct {
-	ApiKey           string
-	AccessToken      string
-	Domain           string
-	ApiUrl           string
-	SandboxUrl       string
-	Debug            bool
-	RequestTimeoutMs int
-	Headers          map[string]string
-}, envdVersion string) *Pty {
-	var resolved *connectionConfig
-	if cfg != nil {
-		resolved = &connectionConfig{
-			ApiKey:           cfg.ApiKey,
-			AccessToken:      cfg.AccessToken,
-			Domain:           cfg.Domain,
-			ApiUrl:           cfg.ApiUrl,
-			SandboxUrl:       cfg.SandboxUrl,
-			Debug:            cfg.Debug,
-			RequestTimeoutMs: cfg.RequestTimeoutMs,
-			Headers:          cfg.Headers,
-		}
+func NewPty(cfg any, envdVersion string) *Pty {
+	resolved := newConnectionConfig(cfg)
+	var logger shared.Logger
+	var proxy string
+	if resolved != nil {
+		logger = resolved.Logger
+		proxy = resolved.Proxy
 	}
 	return &Pty{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       &http.Client{},
+		httpClient:       shared.NewHTTPClient(0, proxy, logger),
 	}
 }
 
@@ -200,7 +186,7 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 	}
 
 	ch := make(chan streamEnvelope, 16)
-	go readStreamEnvelopes(body, ch)
+	go readStreamEnvelopesWithLogger(body, ch, p.connectionConfig.Logger)
 
 	firstMsg, ok, err := waitForFirstEvent(ch, p.requestTimeoutFromCreateOpts(opts))
 	if err != nil {
@@ -232,22 +218,14 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 	pid := event.Start.Pid
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	// For PTY, we route data events through onData
-	var onStdout func(Stdout)
-	if opts.OnData != nil {
-		onData := opts.OnData
-		onStdout = func(data Stdout) {
-			onData(PtyOutput([]byte(data)))
-		}
-	}
-
 	handle := newCommandHandle(pid, func() {
 		cancel()
 		streamCancel()
 		body.Close()
 	}, func() (bool, error) {
 		return p.Kill(ctx, pid, nil)
-	}, onStdout, nil)
+	}, nil, nil)
+	onData := opts.OnData
 
 	go func() {
 		defer cancelRequestTimeout()
@@ -275,7 +253,7 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.appendStdout(bytesToValidString(ev.Data.Pty))
+					appendPtyOutput(handle, ev.Data.Pty, onData)
 				}
 				if ev.End != nil {
 					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
@@ -304,7 +282,7 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 	}
 
 	ch := make(chan streamEnvelope, 16)
-	go readStreamEnvelopes(body, ch)
+	go readStreamEnvelopesWithLogger(body, ch, p.connectionConfig.Logger)
 
 	firstMsg, ok, err := waitForFirstEvent(ch, p.requestTimeoutFromConnectOpts(opts))
 	if err != nil {
@@ -335,21 +313,14 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	var onStdout func(Stdout)
-	if opts.OnData != nil {
-		onData := opts.OnData
-		onStdout = func(data Stdout) {
-			onData(PtyOutput([]byte(data)))
-		}
-	}
-
 	handle := newCommandHandle(pid, func() {
 		cancel()
 		streamCancel()
 		body.Close()
 	}, func() (bool, error) {
 		return p.Kill(ctx, pid, nil)
-	}, onStdout, nil)
+	}, nil, nil)
+	onData := opts.OnData
 
 	go func() {
 		defer cancelRequestTimeout()
@@ -377,7 +348,7 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 					continue
 				}
 				if ev.Data != nil && len(ev.Data.Pty) > 0 {
-					handle.appendStdout(bytesToValidString(ev.Data.Pty))
+					appendPtyOutput(handle, ev.Data.Pty, onData)
 				}
 				if ev.End != nil {
 					handle.setEnd(int(ev.End.ExitCode), ev.End.Error)
@@ -388,6 +359,16 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 	}()
 
 	return handle, nil
+}
+
+func appendPtyOutput(handle *CommandHandle, data []byte, onData func(PtyOutput)) {
+	handle.appendStdout(bytesToValidString(data))
+	if onData == nil {
+		return
+	}
+	raw := make([]byte, len(data))
+	copy(raw, data)
+	onData(PtyOutput(raw))
 }
 
 func (p *Pty) SendInput(ctx context.Context, pid uint32, data []byte, opts *CommandRequestOpts) error {

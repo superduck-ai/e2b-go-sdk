@@ -278,6 +278,20 @@ func TestLiveFilesystem(t *testing.T) {
 		if read != content {
 			t.Fatalf("unexpected read content: %q", read)
 		}
+		stream, err := sandbox.Files.ReadStream(ctx, filePath, nil)
+		if err != nil {
+			t.Fatalf("ReadStream returned error: %v", err)
+		}
+		streamed, err := io.ReadAll(stream)
+		if closeErr := stream.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("ReadStream body returned error: %v", err)
+		}
+		if string(streamed) != content {
+			t.Fatalf("unexpected streamed content: %q", string(streamed))
+		}
 
 		newContent := "New content."
 		if _, err := sandbox.Files.Write(ctx, filePath, strings.NewReader(newContent), nil); err != nil {

@@ -76,6 +76,7 @@ type BuildOptions struct {
 	Headers          map[string]string
 	RequestTimeoutMs *int
 	Logger           api.Logger
+	Proxy            string
 }
 
 type BuildInfo struct {
@@ -97,6 +98,7 @@ type GetBuildStatusOptions struct {
 	RequestTimeoutMs *int
 	Headers          map[string]string
 	Logger           api.Logger
+	Proxy            string
 }
 
 type TemplateBuildStatus string

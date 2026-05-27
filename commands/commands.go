@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -65,6 +66,8 @@ type connectionConfig struct {
 	Debug            bool
 	RequestTimeoutMs int
 	Headers          map[string]string
+	Logger           shared.Logger
+	Proxy            string
 }
 
 type Commands struct {
@@ -78,33 +81,103 @@ type streamEnvelope struct {
 	err     error
 }
 
-func NewCommands(cfg *struct {
-	ApiKey           string
-	AccessToken      string
-	Domain           string
-	ApiUrl           string
-	SandboxUrl       string
-	Debug            bool
-	RequestTimeoutMs int
-	Headers          map[string]string
-}, envdVersion string) *Commands {
-	var resolved *connectionConfig
-	if cfg != nil {
-		resolved = &connectionConfig{
-			ApiKey:           cfg.ApiKey,
-			AccessToken:      cfg.AccessToken,
-			Domain:           cfg.Domain,
-			ApiUrl:           cfg.ApiUrl,
-			SandboxUrl:       cfg.SandboxUrl,
-			Debug:            cfg.Debug,
-			RequestTimeoutMs: cfg.RequestTimeoutMs,
-			Headers:          cfg.Headers,
-		}
+func NewCommands(cfg any, envdVersion string) *Commands {
+	resolved := newConnectionConfig(cfg)
+	var logger shared.Logger
+	var proxy string
+	if resolved != nil {
+		logger = resolved.Logger
+		proxy = resolved.Proxy
 	}
 	return &Commands{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       &http.Client{},
+		httpClient:       shared.NewHTTPClient(0, proxy, logger),
+	}
+}
+
+func newConnectionConfig(cfg any) *connectionConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(cfg)
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return &connectionConfig{}
+	}
+
+	return &connectionConfig{
+		ApiKey:           stringField(value, "ApiKey"),
+		AccessToken:      stringField(value, "AccessToken"),
+		Domain:           stringField(value, "Domain"),
+		ApiUrl:           stringField(value, "ApiUrl"),
+		SandboxUrl:       stringField(value, "SandboxUrl"),
+		Debug:            boolField(value, "Debug"),
+		RequestTimeoutMs: intField(value, "RequestTimeoutMs"),
+		Headers:          stringMapField(value, "Headers"),
+		Logger:           loggerField(value, "Logger"),
+		Proxy:            stringField(value, "Proxy"),
+	}
+}
+
+func stringField(value reflect.Value, name string) string {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.String {
+		return ""
+	}
+	return field.String()
+}
+
+func boolField(value reflect.Value, name string) bool {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Bool {
+		return false
+	}
+	return field.Bool()
+}
+
+func intField(value reflect.Value, name string) int {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Int {
+		return 0
+	}
+	return int(field.Int())
+}
+
+func stringMapField(value reflect.Value, name string) map[string]string {
+	field := value.FieldByName(name)
+	if !field.IsValid() || field.Kind() != reflect.Map || field.IsNil() {
+		return nil
+	}
+	if headers, ok := field.Interface().(map[string]string); ok {
+		return headers
+	}
+	return nil
+}
+
+func loggerField(value reflect.Value, name string) shared.Logger {
+	field := value.FieldByName(name)
+	if !field.IsValid() || !field.CanInterface() || isNilField(field) {
+		return nil
+	}
+	if logger, ok := field.Interface().(shared.Logger); ok {
+		return logger
+	}
+	return nil
+}
+
+func isNilField(field reflect.Value) bool {
+	switch field.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return field.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -210,6 +283,10 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 
 // readStreamEnvelopes reads Connect protocol envelopes (5-byte header: 1 flag + 4 length, then payload).
 func readStreamEnvelopes(reader io.Reader, ch chan<- streamEnvelope) {
+	readStreamEnvelopesWithLogger(reader, ch, nil)
+}
+
+func readStreamEnvelopesWithLogger(reader io.Reader, ch chan<- streamEnvelope, logger shared.Logger) {
 	defer close(ch)
 	header := make([]byte, 5)
 	for {
@@ -236,6 +313,9 @@ func readStreamEnvelopes(reader io.Reader, ch chan<- streamEnvelope) {
 				ch <- streamEnvelope{err: err}
 			}
 			return
+		}
+		if logger != nil {
+			logger.Debug("Response stream:", string(payload))
 		}
 		ch <- streamEnvelope{payload: json.RawMessage(payload)}
 	}
@@ -325,7 +405,7 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 	}
 
 	ch := make(chan streamEnvelope, 16)
-	go readStreamEnvelopes(body, ch)
+	go readStreamEnvelopesWithLogger(body, ch, c.connectionConfig.Logger)
 
 	firstMsg, ok, err := waitForFirstEvent(ch, c.requestTimeoutFromConnectOpts(opts))
 	if err != nil {
@@ -443,7 +523,7 @@ func (c *Commands) start(ctx context.Context, cmd string, opts *CommandStartOpts
 
 	// Read the first envelope to get the PID
 	ch := make(chan streamEnvelope, 16)
-	go readStreamEnvelopes(body, ch)
+	go readStreamEnvelopesWithLogger(body, ch, c.connectionConfig.Logger)
 
 	firstMsg, ok, err := waitForFirstEvent(ch, c.requestTimeoutFromStartOpts(opts))
 	if err != nil {

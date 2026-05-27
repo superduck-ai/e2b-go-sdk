@@ -119,6 +119,7 @@ type SandboxApiOpts struct {
 	Debug            bool
 	RequestTimeoutMs *int
 	Headers          map[string]string
+	Proxy            string
 	apiUrl           string
 }
 
@@ -208,6 +209,7 @@ func newConnectionConfigFromSandboxApiOpts(opts *SandboxApiOpts) *ConnectionConf
 		Debug:            opts.Debug,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
 	})
 }
 
@@ -226,6 +228,7 @@ func toClientConfig(c *ConnectionConfig) *api.ClientConfig {
 		RequestTimeoutMs: c.RequestTimeoutMs,
 		Headers:          c.Headers,
 		Logger:           c.Logger,
+		Proxy:            c.Proxy,
 	}
 }
 

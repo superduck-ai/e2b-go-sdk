@@ -50,4 +50,5 @@ type VolumeWriteOptions struct {
 	ApiUrl           string
 	RequestTimeoutMs *int
 	Headers          map[string]string
+	Proxy            string
 }

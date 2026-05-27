@@ -3,6 +3,7 @@ package volume
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -173,6 +174,38 @@ func TestVolumeReadFileWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
 	}
 	if notFoundErr.Message != "Path /missing.txt not found" {
 		t.Fatalf("unexpected error message: %q", notFoundErr.Message)
+	}
+}
+
+func TestVolumeReadFileStreamReturnsResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/volumecontent/vol-1/file" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/stream.txt" {
+			t.Fatalf("unexpected path query: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("volume stream")); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	v := testVolumeClient(server.URL)
+	body, err := v.ReadFileStream(context.Background(), "/stream.txt", nil)
+	if err != nil {
+		t.Fatalf("ReadFileStream returned error: %v", err)
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("failed to read stream: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if string(data) != "volume stream" {
+		t.Fatalf("unexpected stream body: %q", string(data))
 	}
 }
 

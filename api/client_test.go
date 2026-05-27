@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,3 +141,69 @@ func TestHandleApiErrorReturnsNilForSuccess(t *testing.T) {
 		}
 	}
 }
+
+func TestApiClientLogsRequestAndResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	logger := &recordingLogger{}
+	client, err := NewApiClient(&ClientConfig{
+		ApiUrl:           server.URL,
+		RequestTimeoutMs: 1000,
+		Logger:           logger,
+	})
+	if err != nil {
+		t.Fatalf("NewApiClient returned error: %v", err)
+	}
+
+	var result map[string]bool
+	if _, err := client.Get(context.Background(), "/ping", &result); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if logger.infoCount < 2 {
+		t.Fatalf("expected request and response info logs, got %d", logger.infoCount)
+	}
+}
+
+func TestApiClientUsesConfiguredProxy(t *testing.T) {
+	var proxyHit bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHit = true
+		if r.URL.Host != "api.example.test" {
+			t.Fatalf("expected proxy request for api.example.test, got %s", r.URL.String())
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer proxy.Close()
+
+	client, err := NewApiClient(&ClientConfig{
+		ApiUrl:           "http://api.example.test",
+		RequestTimeoutMs: 1000,
+		Proxy:            proxy.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewApiClient returned error: %v", err)
+	}
+
+	var result map[string]bool
+	if _, err := client.Get(context.Background(), "/ping", &result); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if !proxyHit {
+		t.Fatal("expected request to go through proxy")
+	}
+}
+
+type recordingLogger struct {
+	infoCount  int
+	errorCount int
+}
+
+func (l *recordingLogger) Debug(args ...interface{}) {}
+func (l *recordingLogger) Info(args ...interface{})  { l.infoCount++ }
+func (l *recordingLogger) Warn(args ...interface{})  {}
+func (l *recordingLogger) Error(args ...interface{}) { l.errorCount++ }

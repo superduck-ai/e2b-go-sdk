@@ -951,6 +951,7 @@ func newApiClientFromBuildOptions(opts *BuildOptions) (*api.ApiClient, error) {
 		ApiUrl:      opts.ApiUrl,
 		Headers:     opts.Headers,
 		Logger:      opts.Logger,
+		Proxy:       opts.Proxy,
 	}
 	if opts.RequestTimeoutMs != nil {
 		config.RequestTimeoutMs = *opts.RequestTimeoutMs
@@ -970,6 +971,7 @@ func newApiClientFromStatusOptions(opts *GetBuildStatusOptions) (*api.ApiClient,
 		ApiUrl:      opts.ApiUrl,
 		Headers:     opts.Headers,
 		Logger:      opts.Logger,
+		Proxy:       opts.Proxy,
 	}
 	if opts.RequestTimeoutMs != nil {
 		config.RequestTimeoutMs = *opts.RequestTimeoutMs

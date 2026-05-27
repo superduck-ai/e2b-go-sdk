@@ -29,6 +29,7 @@ type ConnectionOpts struct {
 	RequestTimeoutMs *int
 	Logger           Logger
 	Headers          map[string]string
+	Proxy            string
 }
 
 type ConnectionConfig struct {
@@ -41,6 +42,7 @@ type ConnectionConfig struct {
 	ApiKey           string
 	AccessToken      string
 	Headers          map[string]string
+	Proxy            string
 }
 
 func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
@@ -110,6 +112,7 @@ func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
 		ApiKey:           apiKey,
 		AccessToken:      accessToken,
 		Headers:          headers,
+		Proxy:            opts.Proxy,
 	}
 }
 

@@ -12,12 +12,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/superduck-ai/e2b-go-sdk/api"
 	"github.com/superduck-ai/e2b-go-sdk/commands"
 	"github.com/superduck-ai/e2b-go-sdk/envd"
 	"github.com/superduck-ai/e2b-go-sdk/filesystem"
 	"github.com/superduck-ai/e2b-go-sdk/git"
-	"github.com/google/uuid"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 const mcpPort = 50005
@@ -190,6 +191,7 @@ func (s *Sandbox) Connect(ctx context.Context, opts *SandboxConnectOpts) (*Sandb
 		RequestTimeoutMs: intPtr(connConfig.RequestTimeoutMs),
 		Logger:           connConfig.Logger,
 		Headers:          connConfig.Headers,
+		Proxy:            connConfig.Proxy,
 	}
 
 	apiSandbox := &sandboxApi{}
@@ -278,9 +280,7 @@ func (s *Sandbox) IsRunning(ctx context.Context, opts *struct{ RequestTimeoutMs 
 	}
 
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(opts.RequestTimeoutMs)
-	client := &http.Client{
-		Timeout: time.Duration(connConfig.RequestTimeoutMs) * time.Millisecond,
-	}
+	client := shared.NewHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.envdApiUrl+"/health", nil)
 	if err != nil {
 		return false, err
@@ -710,6 +710,7 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		envdHeaders,
 		connConfig.RequestTimeoutMs,
 	)
+	envdApiClient.HttpClient = shared.NewHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
 
 	cmdConnConfig := &struct {
 		ApiKey           string
@@ -720,6 +721,8 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		Debug            bool
 		RequestTimeoutMs int
 		Headers          map[string]string
+		Logger           Logger
+		Proxy            string
 	}{
 		ApiKey:           connConfig.ApiKey,
 		AccessToken:      connConfig.AccessToken,
@@ -729,6 +732,8 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		Debug:            connConfig.Debug,
 		RequestTimeoutMs: connConfig.RequestTimeoutMs,
 		Headers:          sandboxHeaders,
+		Logger:           connConfig.Logger,
+		Proxy:            connConfig.Proxy,
 	}
 
 	fsConnConfig := &struct {
@@ -740,6 +745,8 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		Debug            bool
 		RequestTimeoutMs int
 		Headers          map[string]string
+		Logger           Logger
+		Proxy            string
 	}{
 		ApiKey:           connConfig.ApiKey,
 		AccessToken:      connConfig.AccessToken,
@@ -749,6 +756,8 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		Debug:            connConfig.Debug,
 		RequestTimeoutMs: connConfig.RequestTimeoutMs,
 		Headers:          sandboxHeaders,
+		Logger:           connConfig.Logger,
+		Proxy:            connConfig.Proxy,
 	}
 
 	envdVersion := resp.EnvdVersion
@@ -844,6 +853,9 @@ func (s *Sandbox) resolveConnectionConfig(opts *ConnectionOpts) *ConnectionConfi
 	if opts.Headers != nil {
 		merged.Headers = opts.Headers
 	}
+	if opts.Proxy != "" {
+		merged.Proxy = opts.Proxy
+	}
 	return &merged
 }
 
@@ -870,6 +882,9 @@ func (s *Sandbox) resolveSandboxApiConnectionConfig(opts *SandboxApiOpts) *Conne
 	}
 	if opts.Headers != nil {
 		merged.Headers = opts.Headers
+	}
+	if opts.Proxy != "" {
+		merged.Proxy = opts.Proxy
 	}
 	return &merged
 }

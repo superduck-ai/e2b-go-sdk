@@ -81,6 +81,60 @@ func TestReadTextWrapsNotFoundAsFileNotFoundError(t *testing.T) {
 	}
 }
 
+func TestReadStreamReturnsResponseBody(t *testing.T) {
+	releaseBody := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/tmp/stream.txt" {
+			t.Fatalf("unexpected path query: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-releaseBody
+		if _, err := w.Write([]byte("streamed")); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	fs := NewFilesystem(testFilesystemConfig(server.URL, 0), "1.0.0")
+
+	body, err := fs.ReadStream(context.Background(), "/tmp/stream.txt", nil)
+	if err != nil {
+		t.Fatalf("ReadStream returned error: %v", err)
+	}
+	close(releaseBody)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("failed to read stream: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if string(data) != "streamed" {
+		t.Fatalf("unexpected streamed data: %q", string(data))
+	}
+}
+
+func TestReadStreamWrapsNotFoundAsFileNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing stream", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	fs := NewFilesystem(testFilesystemConfig(server.URL, 0), "1.0.0")
+
+	_, err := fs.ReadStream(context.Background(), "/tmp/missing.txt", nil)
+	var notFoundErr *shared.FileNotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected FileNotFoundError, got %T %v", err, err)
+	}
+}
+
 func TestGetInfoErrorsWhenEntryMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/filesystem.Filesystem/Stat" {
