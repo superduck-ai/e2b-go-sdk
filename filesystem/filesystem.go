@@ -373,7 +373,17 @@ func (f *Filesystem) readFile(ctx context.Context, path string, opts *Filesystem
 	defer cancel()
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer gz.Close()
+		reader = gz
+	}
+
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, nil, err
 	}

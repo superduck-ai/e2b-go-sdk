@@ -556,7 +556,7 @@ func (a *sandboxApi) DeleteSnapshot(ctx context.Context, snapshotId string, opts
 		return false, err
 	}
 
-	_, err = client.Delete(ctx, fmt.Sprintf("/templates/%s", snapshotId), nil)
+	_, err = client.Delete(ctx, fmt.Sprintf("/templates/%s", url.PathEscape(snapshotId)), nil)
 	if err != nil {
 		var nfe *api.NotFoundError
 		if errors.As(err, &nfe) {

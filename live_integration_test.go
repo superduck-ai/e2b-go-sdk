@@ -2127,6 +2127,13 @@ func TestLiveSnapshots(t *testing.T) {
 		t.Fatalf("expected snapshot branches to be isolated, branch1=%q branch2=%q", branch1Data, branch2Data)
 	}
 
+	// Kill branch sandboxes before deleting the snapshot they were created from.
+	for name, sbx := range map[string]*e2b.Sandbox{"branch1": branch1, "branch2": branch2} {
+		if err := sbx.Kill(ctx, nil); err != nil {
+			t.Logf("warning: kill %s returned error: %v", name, err)
+		}
+	}
+
 	deleted, err := e2b.DeleteSnapshot(ctx, snapshot.SnapshotID, nil)
 	if err != nil {
 		t.Fatalf("DeleteSnapshot returned error: %v", err)
@@ -2312,7 +2319,7 @@ func TestLiveTemplateBuildUploadAndTags(t *testing.T) {
 		t.Fatalf("expected template alias %q to exist after build", name)
 	}
 
-	tag := name + ":integration"
+	tag := name + "-integration"
 	if _, err := e2b.AssignTags(ctx, name, []string{tag}, liveBuildOptions()); err != nil {
 		t.Fatalf("AssignTags returned error: %v", err)
 	}
