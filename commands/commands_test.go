@@ -6,15 +6,50 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
+
+func boolPtr(v bool) *bool { return &v }
+
+func runForegroundResult(cmds *Commands, ctx context.Context, cmd string, opts *CommandStartOpts) (*CommandResult, error) {
+	execution, err := cmds.Run(ctx, cmd, opts)
+	if err != nil {
+		return nil, err
+	}
+	result, ok := execution.(*CommandResult)
+	if !ok {
+		return nil, fmt.Errorf("expected foreground command result, got %T", execution)
+	}
+	return result, nil
+}
+
+func runBackgroundHandle(cmds *Commands, ctx context.Context, cmd string, opts *CommandStartOpts) (*CommandHandle, error) {
+	if opts == nil {
+		opts = &CommandStartOpts{}
+	} else {
+		cloned := *opts
+		opts = &cloned
+	}
+	opts.Background = true
+	execution, err := cmds.Run(ctx, cmd, opts)
+	if err != nil {
+		return nil, err
+	}
+	handle, ok := execution.(*CommandHandle)
+	if !ok {
+		return nil, fmt.Errorf("expected background command handle, got %T", execution)
+	}
+	return handle, nil
+}
 
 func testCommandsConfig(sandboxURL string, requestTimeoutMs int) *struct {
 	ApiKey           string
@@ -101,7 +136,7 @@ func TestRunLogsStreamPayloads(t *testing.T) {
 	}
 	cmds := NewCommands(cfg, "1.0.0")
 
-	result, err := cmds.Run(context.Background(), "echo hi", nil)
+	result, err := runForegroundResult(cmds, context.Background(), "echo hi", nil)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -110,6 +145,44 @@ func TestRunLogsStreamPayloads(t *testing.T) {
 	}
 	if logger.debugCount == 0 {
 		t.Fatal("expected stream payloads to be debug logged")
+	}
+}
+
+func TestCommandsConnectUnaryRetriesTransientTransportErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.URL.Path != "/process.Process/List" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if attempts == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("expected hijacker support")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("failed to hijack connection: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"processes": []map[string]any{}}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
+	processes, err := cmds.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected retry to recover transient transport error, got %v", err)
+	}
+	if len(processes) != 0 {
+		t.Fatalf("unexpected processes: %#v", processes)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
 	}
 }
 
@@ -219,7 +292,7 @@ func TestRunMapsDeadlineExceededStreamErrorToSdkTimeoutError(t *testing.T) {
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
 
-	_, err := cmds.Run(context.Background(), "sleep 10", nil)
+	_, err := runForegroundResult(cmds, context.Background(), "sleep 10", nil)
 	var timeoutErr *shared.TimeoutError
 	if !errors.As(err, &timeoutErr) {
 		t.Fatalf("expected TimeoutError, got %T %v", err, err)
@@ -257,11 +330,65 @@ func TestRunBackgroundSendsConnectEnvelopeRequest(t *testing.T) {
 	defer server.Close()
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
-	handle, err := cmds.RunBackground(context.Background(), "echo hi", nil)
+	handle, err := runBackgroundHandle(cmds, context.Background(), "echo hi", nil)
 	if err != nil {
 		t.Fatalf("RunBackground returned error: %v", err)
 	}
 	handle.Disconnect()
+}
+
+func TestRunBackgroundWaitAccumulatesOutputAndInvokesCallbacks(t *testing.T) {
+	var stdoutChunks []string
+	var stderrChunks []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"data":{"stdout":"SGVsbG8="}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"data":{"stderr":"Ym9vbQ=="}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
+	handle, err := runBackgroundHandle(cmds, context.Background(), "echo hi", &CommandStartOpts{
+		OnStdout: func(data Stdout) {
+			stdoutChunks = append(stdoutChunks, string(data))
+		},
+		OnStderr: func(data Stderr) {
+			stderrChunks = append(stderrChunks, string(data))
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBackground returned error: %v", err)
+	}
+
+	result, err := handle.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	if result.ExitCode != 0 || result.Stdout != "Hello" || result.Stderr != "boom" {
+		t.Fatalf("unexpected background result: %#v", result)
+	}
+	if got := handle.State().Stdout; got != "Hello" {
+		t.Fatalf("expected handle stdout to accumulate background output, got %q", got)
+	}
+	if got := handle.State().Stderr; got != "boom" {
+		t.Fatalf("expected handle stderr to accumulate background output, got %q", got)
+	}
+	if !reflect.DeepEqual(stdoutChunks, []string{"Hello"}) {
+		t.Fatalf("unexpected stdout callback chunks: %#v", stdoutChunks)
+	}
+	if !reflect.DeepEqual(stderrChunks, []string{"boom"}) {
+		t.Fatalf("unexpected stderr callback chunks: %#v", stderrChunks)
+	}
 }
 
 func TestCommandsConnectSendsProcessSelectorRequest(t *testing.T) {
@@ -352,7 +479,7 @@ func TestRunHandlesCurrentConnectJSONEventWrapper(t *testing.T) {
 	defer server.Close()
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
-	result, err := cmds.Run(context.Background(), `echo "Hello from E2B!"`, nil)
+	result, err := runForegroundResult(cmds, context.Background(), `echo "Hello from E2B!"`, nil)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -370,11 +497,11 @@ func TestHandleProcessEventReplacesInvalidUTF8(t *testing.T) {
 
 	cmds.handleProcessEvent([]byte(`{"data":{"stdout":"4g==","stderr":"4g=="}}`), handle)
 
-	if handle.GetStdout() != "\uFFFD" {
-		t.Fatalf("expected invalid stdout bytes to be replaced, got %q", handle.GetStdout())
+	if got := handle.State().Stdout; got != "\uFFFD" {
+		t.Fatalf("expected invalid stdout bytes to be replaced, got %q", got)
 	}
-	if handle.GetStderr() != "\uFFFD" {
-		t.Fatalf("expected invalid stderr bytes to be replaced, got %q", handle.GetStderr())
+	if got := handle.State().Stderr; got != "\uFFFD" {
+		t.Fatalf("expected invalid stderr bytes to be replaced, got %q", got)
 	}
 }
 
@@ -523,9 +650,8 @@ func TestRunBackgroundRejectsStdinFalseOnOldEnvdBeforeRequest(t *testing.T) {
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "0.2.9")
 
-	disabled := false
-	_, err := cmds.RunBackground(context.Background(), "echo hi", &CommandStartOpts{
-		StdinOpt: &disabled,
+	_, err := runBackgroundHandle(cmds, context.Background(), "echo hi", &CommandStartOpts{
+		Stdin: boolPtr(false),
 	})
 	if err == nil {
 		t.Fatal("expected stdin=false to be rejected on old envd")
@@ -552,7 +678,7 @@ func TestRunBackgroundAllowsOmittedStdinOnOldEnvd(t *testing.T) {
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "0.2.9")
 
-	handle, err := cmds.RunBackground(context.Background(), "echo hi", &CommandStartOpts{})
+	handle, err := runBackgroundHandle(cmds, context.Background(), "echo hi", &CommandStartOpts{})
 	if err != nil {
 		t.Fatalf("expected omitted stdin to be allowed on old envd, got %v", err)
 	}
@@ -577,7 +703,7 @@ func TestRunBackgroundErrorsWhenFirstEventIsNotStart(t *testing.T) {
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
 
-	_, err := cmds.RunBackground(context.Background(), "echo hi", nil)
+	_, err := runBackgroundHandle(cmds, context.Background(), "echo hi", nil)
 	if err == nil {
 		t.Fatal("expected start error")
 	}
@@ -597,7 +723,7 @@ func TestRunBackgroundErrorsWhenStreamClosesBeforeFirstEvent(t *testing.T) {
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
 
-	_, err := cmds.RunBackground(context.Background(), "echo hi", nil)
+	_, err := runBackgroundHandle(cmds, context.Background(), "echo hi", nil)
 	if err == nil {
 		t.Fatal("expected start error")
 	}
@@ -621,21 +747,119 @@ func TestCloseStdinRejectsUnsupportedEnvdWithAlignedMessage(t *testing.T) {
 	}
 }
 
-func TestRunRejectsBackgroundModeAndDoesNotStartProcess(t *testing.T) {
+func TestCommandStartOptsMatchJsAndPythonBackgroundSurface(t *testing.T) {
+	optsType := reflect.TypeOf(CommandStartOpts{})
+	want := []string{
+		"CommandRequestOpts",
+		"Background",
+		"Cwd",
+		"User",
+		"Envs",
+		"OnStdout",
+		"OnStderr",
+		"Stdin",
+		"TimeoutMs",
+	}
+
+	got := make([]string, 0, optsType.NumField())
+	for i := 0; i < optsType.NumField(); i++ {
+		got = append(got, optsType.Field(i).Name)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected CommandStartOpts field shape: got %v want %v", got, want)
+	}
+	if field, ok := optsType.FieldByName("Background"); !ok {
+		t.Fatal("expected CommandStartOpts to expose Background like JS/Python run options")
+	} else if field.Type != reflect.TypeOf(false) {
+		t.Fatalf("expected CommandStartOpts.Background to be bool, got %v", field.Type)
+	}
+	if field, ok := optsType.FieldByName("Stdin"); !ok {
+		t.Fatal("expected CommandStartOpts to expose Stdin")
+	} else if field.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected CommandStartOpts.Stdin to be *bool, got %v", field.Type)
+	}
+	if _, ok := optsType.FieldByName("StdinOpt"); ok {
+		t.Fatal("did not expect CommandStartOpts to expose StdinOpt")
+	}
+
+	runMethod, ok := reflect.TypeOf(&Commands{}).MethodByName("Run")
+	if !ok {
+		t.Fatal("expected Commands to expose Run")
+	}
+	if got := runMethod.Type.Out(0).String(); got != "commands.commandExecution" {
+		t.Fatalf("expected Run to return commands.commandExecution, got %s", got)
+	}
+	if _, ok := reflect.TypeOf(&Commands{}).MethodByName("RunForeground"); ok {
+		t.Fatal("did not expect Commands to expose RunForeground")
+	}
+	if _, ok := reflect.TypeOf(&Commands{}).MethodByName("RunBackground"); ok {
+		t.Fatal("did not expect Commands to expose RunBackground")
+	}
+	if _, ok := reflect.TypeOf(&Commands{}).MethodByName("RunWithMode"); ok {
+		t.Fatal("did not expect Commands to expose RunWithMode")
+	}
+}
+
+func TestRunUsesForegroundSemanticsWithoutBackgroundFlag(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("did not expect process start request when Run is used with background=true")
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
 	}))
 	defer server.Close()
 
 	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
 
-	_, err := cmds.Run(context.Background(), "echo hi", &CommandStartOpts{
-		Background: true,
-	})
-	if err == nil {
-		t.Fatal("expected Run to reject background execution")
+	execution, err := cmds.Run(context.Background(), "echo hi", nil)
+	if err != nil {
+		t.Fatalf("expected Run to execute in foreground, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "use RunBackground instead") {
-		t.Fatalf("unexpected error: %v", err)
+	result, ok := execution.(*CommandResult)
+	if !ok {
+		t.Fatalf("expected foreground Run to return *CommandResult, got %T", execution)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected foreground run exit code 0, got %#v", result)
+	}
+}
+
+func TestRunUsesBackgroundFlagWhenRequested(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":456}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := NewCommands(testCommandsConfig(server.URL, 0), "1.0.0")
+
+	execution, err := cmds.Run(context.Background(), "sleep 1", &CommandStartOpts{Background: true})
+	if err != nil {
+		t.Fatalf("expected background Run to succeed, got %v", err)
+	}
+	handle, ok := execution.(*CommandHandle)
+	if !ok {
+		t.Fatalf("expected background Run to return *CommandHandle, got %T", execution)
+	}
+	result, err := handle.Wait()
+	if err != nil {
+		t.Fatalf("Wait returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected background exit code 0, got %#v", result)
 	}
 }

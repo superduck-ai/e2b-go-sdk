@@ -12,6 +12,7 @@ import (
 
 type GitRequestOpts struct {
 	RequestTimeoutMs *int
+	Signal           context.Context
 	TimeoutMs        *int
 	User             string
 	Cwd              string
@@ -22,7 +23,7 @@ type GitCloneOpts struct {
 	GitRequestOpts
 	Path                        string
 	Branch                      string
-	Depth                       int
+	Depth                       *int
 	Username                    string
 	Password                    string
 	DangerouslyStoreCredentials bool
@@ -36,7 +37,6 @@ type GitInitOpts struct {
 
 type GitCommitOpts struct {
 	GitRequestOpts
-	Author      string
 	AuthorName  string
 	AuthorEmail string
 	AllowEmpty  bool
@@ -63,6 +63,8 @@ type GitResetOpts struct {
 
 type GitRestoreOpts struct {
 	GitRequestOpts
+	Paths []string
+	// Deprecated: use Paths to match the JS/Python SDK surface.
 	Files    []string
 	Staged   *bool
 	Worktree *bool
@@ -73,7 +75,6 @@ type GitPushOpts struct {
 	GitRequestOpts
 	Remote      string
 	Branch      string
-	Force       bool
 	SetUpstream *bool
 	Username    string
 	Password    string
@@ -83,7 +84,6 @@ type GitPullOpts struct {
 	GitRequestOpts
 	Remote   string
 	Branch   string
-	Rebase   bool
 	Username string
 	Password string
 }
@@ -122,18 +122,26 @@ func NewGit(cmds *commands.Commands) *Git {
 func (g *Git) runGit(ctx context.Context, args []string, repoPath string, opts *GitRequestOpts) (*commands.CommandResult, error) {
 	cmd := buildGitCommand(args, repoPath)
 	startOpts := g.buildStartOpts(opts)
-	result, err := g.commands.Run(ctx, cmd, startOpts)
+	execution, err := g.commands.Run(ctx, cmd, startOpts)
 	if err != nil {
 		return nil, g.wrapError(err)
+	}
+	result, ok := execution.(*commands.CommandResult)
+	if !ok {
+		return nil, g.wrapError(fmt.Errorf("expected foreground command result, got %T", execution))
 	}
 	return result, nil
 }
 
 func (g *Git) runShell(ctx context.Context, cmd string, opts *GitRequestOpts) (*commands.CommandResult, error) {
 	startOpts := g.buildStartOpts(opts)
-	result, err := g.commands.Run(ctx, cmd, startOpts)
+	execution, err := g.commands.Run(ctx, cmd, startOpts)
 	if err != nil {
 		return nil, g.wrapError(err)
+	}
+	result, ok := execution.(*commands.CommandResult)
+	if !ok {
+		return nil, g.wrapError(fmt.Errorf("expected foreground command result, got %T", execution))
 	}
 	return result, nil
 }
@@ -155,6 +163,7 @@ func (g *Git) buildStartOpts(opts *GitRequestOpts) *commands.CommandStartOpts {
 		startOpts.User = opts.User
 		startOpts.Cwd = opts.Cwd
 		startOpts.TimeoutMs = opts.TimeoutMs
+		startOpts.Signal = opts.Signal
 		if opts.RequestTimeoutMs != nil {
 			startOpts.RequestTimeoutMs = opts.RequestTimeoutMs
 		}
@@ -213,8 +222,8 @@ func (g *Git) Clone(ctx context.Context, repoUrl string, opts *GitCloneOpts) (*c
 	if opts.Branch != "" {
 		args = append(args, "--branch", shellEscape(opts.Branch), "--single-branch")
 	}
-	if opts.Depth > 0 {
-		args = append(args, "--depth", fmt.Sprintf("%d", opts.Depth))
+	if opts.Depth != nil && *opts.Depth != 0 {
+		args = append(args, "--depth", fmt.Sprintf("%d", *opts.Depth))
 	}
 	repoPath := opts.Path
 	if !opts.DangerouslyStoreCredentials && opts.Username != "" && opts.Password != "" && repoPath == "" {
@@ -387,15 +396,14 @@ func (g *Git) Commit(ctx context.Context, path, message string, opts *GitCommitO
 	if opts.AllowEmpty {
 		args = append(args, "--allow-empty")
 	}
-	if opts.Author != "" {
-		args = append(args, "--author", shellEscape(opts.Author))
-	}
+	var authorArgs []string
 	if opts.AuthorName != "" {
-		args = append([]string{"-c", shellEscape("user.name=" + opts.AuthorName)}, args...)
+		authorArgs = append(authorArgs, "-c", shellEscape("user.name="+opts.AuthorName))
 	}
 	if opts.AuthorEmail != "" {
-		args = append([]string{"-c", shellEscape("user.email=" + opts.AuthorEmail)}, args...)
+		authorArgs = append(authorArgs, "-c", shellEscape("user.email="+opts.AuthorEmail))
 	}
+	args = append(authorArgs, args...)
 	return g.runGit(ctx, args, path, &opts.GitRequestOpts)
 }
 
@@ -429,7 +437,11 @@ func (g *Git) Restore(ctx context.Context, path string, opts *GitRestoreOpts) (*
 	if opts == nil {
 		opts = &GitRestoreOpts{}
 	}
-	if len(opts.Files) == 0 {
+	paths := opts.Paths
+	if len(paths) == 0 {
+		paths = opts.Files
+	}
+	if len(paths) == 0 {
 		return nil, fmt.Errorf("At least one path is required.")
 	}
 
@@ -461,11 +473,9 @@ func (g *Git) Restore(ctx context.Context, path string, opts *GitRestoreOpts) (*
 	if opts.Source != "" {
 		args = append(args, "--source", shellEscape(opts.Source))
 	}
-	if len(opts.Files) > 0 {
-		args = append(args, "--")
-		for _, f := range opts.Files {
-			args = append(args, shellEscape(f))
-		}
+	args = append(args, "--")
+	for _, f := range paths {
+		args = append(args, shellEscape(f))
 	}
 	return g.runGit(ctx, args, path, &opts.GitRequestOpts)
 }
@@ -481,9 +491,6 @@ func (g *Git) Push(ctx context.Context, path string, opts *GitPushOpts) (*comman
 
 	operation := func(reqOpts *GitRequestOpts) (*commands.CommandResult, error) {
 		args := []string{"push"}
-		if opts.Force {
-			args = append(args, "--force")
-		}
 		if setUpstream && opts.Remote != "" {
 			args = append(args, "--set-upstream")
 		}
@@ -537,9 +544,6 @@ func (g *Git) Pull(ctx context.Context, path string, opts *GitPullOpts) (*comman
 
 	operation := func(reqOpts *GitRequestOpts) (*commands.CommandResult, error) {
 		args := []string{"pull"}
-		if opts.Rebase {
-			args = append(args, "--rebase")
-		}
 		if opts.Remote != "" {
 			args = append(args, shellEscape(opts.Remote))
 		}

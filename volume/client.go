@@ -19,12 +19,23 @@ const fileTimeoutMs = 3_600_000
 type VolumeApiOpts struct {
 	Token            string
 	Domain           string
-	Debug            bool
+	Debug            *bool
 	ApiUrl           string
 	RequestTimeoutMs *int
+	Signal           context.Context
 	Logger           api.Logger
 	Headers          map[string]string
 	Proxy            string
+}
+
+type VolumeReadOpts struct {
+	VolumeApiOpts
+	Format ReadFileFormat
+}
+
+type VolumeListOpts struct {
+	VolumeApiOpts
+	Depth *int
 }
 
 type VolumeConnectionConfig struct {
@@ -33,6 +44,7 @@ type VolumeConnectionConfig struct {
 	ApiUrl           string
 	Token            string
 	RequestTimeoutMs *int
+	Signal           context.Context
 	Logger           api.Logger
 	Headers          map[string]string
 	Proxy            string
@@ -50,11 +62,11 @@ func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
 			domain = "e2b.app"
 		}
 	}
-	debug := opts.Debug
-	if !debug {
-		if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
-			debug = v
-		}
+	var debug bool
+	if opts.Debug != nil {
+		debug = *opts.Debug
+	} else if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
+		debug = v
 	}
 	apiUrl := opts.ApiUrl
 	if apiUrl == "" {
@@ -81,6 +93,7 @@ func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
 		ApiUrl:           apiUrl,
 		Token:            opts.Token,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Signal:           opts.Signal,
 		Logger:           opts.Logger,
 		Headers:          headers,
 		Proxy:            opts.Proxy,
@@ -110,7 +123,7 @@ func newVolumeApiClientWithConfig(config *VolumeConnectionConfig) *volumeApiClie
 
 func (c *volumeApiClient) Do(ctx context.Context, method, path string, body io.Reader, result interface{}, requestTimeoutMs *int) error {
 	url := c.config.ApiUrl + path
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, c.config.Signal, requestTimeoutMs)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, method, url, body)
@@ -118,7 +131,9 @@ func (c *volumeApiClient) Do(ctx context.Context, method, path string, body io.R
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.config.Token)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range c.config.Headers {
 		req.Header.Set(k, v)
 	}
@@ -152,4 +167,13 @@ func requestContext(ctx context.Context, timeoutMs *int) (context.Context, conte
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
+}
+
+func requestContextWithSignal(ctx context.Context, signal context.Context, timeoutMs *int) (context.Context, context.CancelFunc) {
+	merged, cancelSignal := shared.MergeContexts(ctx, signal)
+	reqCtx, cancelTimeout := requestContext(merged, timeoutMs)
+	return reqCtx, func() {
+		cancelTimeout()
+		cancelSignal()
+	}
 }

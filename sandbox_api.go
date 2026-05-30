@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 const (
@@ -40,7 +41,7 @@ type SandboxInfo struct {
 	MemoryMB            int
 	EnvdVersion         string
 	AllowInternetAccess *bool
-	Network             *SandboxNetworkOpts
+	Network             *SandboxNetworkInfo
 	Lifecycle           *SandboxInfoLifecycle
 	VolumeMounts        []struct {
 		Name string
@@ -48,16 +49,51 @@ type SandboxInfo struct {
 	}
 }
 
+type SandboxNetworkSelectorContext struct {
+	AllTraffic string
+	Rules      SandboxNetworkRules
+}
+
+type SandboxNetworkSelector interface{}
+
+type SandboxNetworkSelectorFunc func(ctx SandboxNetworkSelectorContext) []string
+
 type SandboxNetworkOpts struct {
+	AllowOut           SandboxNetworkSelector
+	DenyOut            SandboxNetworkSelector
+	Rules              SandboxNetworkRules
+	AllowPublicTraffic *bool
+	MaskRequestHost    string
+}
+
+type SandboxNetworkInfo struct {
 	AllowOut           []string
 	DenyOut            []string
-	AllowPublicTraffic bool
+	Rules              SandboxNetworkRules
+	AllowPublicTraffic *bool
 	MaskRequestHost    string
+}
+
+type SandboxNetworkTransform struct {
+	Headers map[string]string
+}
+
+type SandboxNetworkRule struct {
+	Transform *SandboxNetworkTransform
+}
+
+type SandboxNetworkRules map[string][]SandboxNetworkRule
+
+type SandboxNetworkUpdate struct {
+	AllowOut            SandboxNetworkSelector
+	DenyOut             SandboxNetworkSelector
+	Rules               SandboxNetworkRules
+	AllowInternetAccess *bool
 }
 
 type SandboxLifecycle struct {
 	OnTimeout  string // "kill" or "pause"
-	AutoResume bool
+	AutoResume *bool
 }
 
 type SandboxInfoLifecycle struct {
@@ -71,6 +107,7 @@ type SandboxMetrics struct {
 	CpuCount   int
 	MemUsed    int64
 	MemTotal   int64
+	MemCache   int64
 	DiskUsed   int64
 	DiskTotal  int64
 }
@@ -116,7 +153,8 @@ type SandboxConnectOpts struct {
 type SandboxApiOpts struct {
 	ApiKey           string
 	Domain           string
-	Debug            bool
+	Debug            *bool
+	Signal           context.Context
 	RequestTimeoutMs *int
 	Headers          map[string]string
 	Proxy            string
@@ -124,8 +162,14 @@ type SandboxApiOpts struct {
 }
 
 type SandboxListOpts struct {
-	SandboxApiOpts
-	Query *struct {
+	ApiKey           string
+	Domain           string
+	Debug            *bool
+	RequestTimeoutMs *int
+	Headers          map[string]string
+	Proxy            string
+	apiUrl           string
+	Query            *struct {
 		Metadata map[string]string
 		State    []SandboxState
 	}
@@ -140,10 +184,16 @@ type SandboxMetricsOpts struct {
 }
 
 type SnapshotListOpts struct {
-	SandboxApiOpts
-	SandboxID string
-	Limit     int
-	NextToken string
+	ApiKey           string
+	Domain           string
+	Debug            *bool
+	RequestTimeoutMs *int
+	Headers          map[string]string
+	Proxy            string
+	apiUrl           string
+	SandboxID        string
+	Limit            int
+	NextToken        string
 }
 
 type CreateSnapshotOpts struct {
@@ -173,7 +223,7 @@ type SandboxFullInfo struct {
 	MemoryMB            int
 	EnvdVersion         string
 	AllowInternetAccess *bool
-	Network             *SandboxNetworkOpts
+	Network             *SandboxNetworkInfo
 	Lifecycle           *SandboxInfoLifecycle
 	VolumeMounts        []struct {
 		Name string
@@ -213,6 +263,79 @@ func newConnectionConfigFromSandboxApiOpts(opts *SandboxApiOpts) *ConnectionConf
 	})
 }
 
+func sandboxApiOptsFromSandboxListOpts(opts *SandboxListOpts) SandboxApiOpts {
+	if opts == nil {
+		return SandboxApiOpts{}
+	}
+	return SandboxApiOpts{
+		ApiKey:           opts.ApiKey,
+		Domain:           opts.Domain,
+		Debug:            opts.Debug,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
+		apiUrl:           opts.apiUrl,
+	}
+}
+
+func sandboxApiOptsFromSnapshotListOpts(opts *SnapshotListOpts) SandboxApiOpts {
+	if opts == nil {
+		return SandboxApiOpts{}
+	}
+	return SandboxApiOpts{
+		ApiKey:           opts.ApiKey,
+		Domain:           opts.Domain,
+		Debug:            opts.Debug,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Headers:          opts.Headers,
+		Proxy:            opts.Proxy,
+		apiUrl:           opts.apiUrl,
+	}
+}
+
+func mergeSandboxApiOpts(base, override SandboxApiOpts) SandboxApiOpts {
+	merged := base
+	if override.ApiKey != "" {
+		merged.ApiKey = override.ApiKey
+	}
+	if override.Domain != "" {
+		merged.Domain = override.Domain
+	}
+	if override.Debug != nil {
+		merged.Debug = override.Debug
+	}
+	if override.RequestTimeoutMs != nil {
+		merged.RequestTimeoutMs = override.RequestTimeoutMs
+	}
+	if override.Signal != nil {
+		merged.Signal = override.Signal
+	}
+	if override.Headers != nil {
+		headers := make(map[string]string, len(base.Headers)+len(override.Headers))
+		for k, v := range base.Headers {
+			headers[k] = v
+		}
+		for k, v := range override.Headers {
+			headers[k] = v
+		}
+		merged.Headers = headers
+	}
+	if override.Proxy != "" {
+		merged.Proxy = override.Proxy
+	}
+	if override.apiUrl != "" {
+		merged.apiUrl = override.apiUrl
+	}
+	return merged
+}
+
+func mergeSandboxApiSignal(ctx context.Context, opts *SandboxApiOpts) (context.Context, context.CancelFunc) {
+	if opts == nil {
+		return ctx, func() {}
+	}
+	return shared.MergeContexts(ctx, opts.Signal)
+}
+
 func (a *sandboxApi) newClient(opts *SandboxApiOpts) (*api.ApiClient, error) {
 	config := newConnectionConfigFromSandboxApiOpts(opts)
 	return api.NewApiClient(toClientConfig(config), api.WithRequireApiKey())
@@ -233,23 +356,57 @@ func toClientConfig(c *ConnectionConfig) *api.ClientConfig {
 }
 
 func Kill(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
 	return (&sandboxApi{}).Kill(ctx, sandboxId, opts)
 }
 
 func GetInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxInfo, error) {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
 	return (&sandboxApi{}).GetInfo(ctx, sandboxId, opts)
 }
 
 func GetFullInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*SandboxFullInfo, error) {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
 	return (&sandboxApi{}).getFullInfo(ctx, sandboxId, opts)
 }
 
 func GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts) ([]SandboxMetrics, error) {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
 	return (&sandboxApi{}).GetMetrics(ctx, sandboxId, opts)
 }
 
 func SetTimeout(ctx context.Context, sandboxId string, timeoutMs int, opts *SandboxApiOpts) error {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
 	return (&sandboxApi{}).SetTimeout(ctx, sandboxId, timeoutMs, opts)
+}
+
+func UpdateNetwork(ctx context.Context, sandboxId string, network SandboxNetworkUpdate, opts *SandboxApiOpts) error {
+	if opts != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+	}
+	return (&sandboxApi{}).UpdateNetwork(ctx, sandboxId, network, opts)
 }
 
 func Pause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
@@ -380,6 +537,7 @@ func (a *sandboxApi) GetMetrics(ctx context.Context, sandboxId string, opts *San
 			CpuCount:   m.CpuCount,
 			MemUsed:    memUsed,
 			MemTotal:   memTotal,
+			MemCache:   m.MemCache,
 			DiskUsed:   diskUsed,
 			DiskTotal:  diskTotal,
 		}
@@ -436,6 +594,31 @@ func (a *sandboxApi) SetTimeout(ctx context.Context, sandboxId string, timeoutMs
 		}
 		return err
 	}
+	return nil
+}
+
+func (a *sandboxApi) UpdateNetwork(ctx context.Context, sandboxId string, network SandboxNetworkUpdate, opts *SandboxApiOpts) error {
+	if opts == nil {
+		opts = &SandboxApiOpts{}
+	}
+	client, err := a.newClient(opts)
+	if err != nil {
+		return err
+	}
+
+	body, err := buildNetworkUpdateBody(network)
+	if err != nil {
+		return err
+	}
+	_, err = client.Put(ctx, fmt.Sprintf("/sandboxes/%s/network", sandboxId), body, nil)
+	if err != nil {
+		var nfe *api.NotFoundError
+		if errors.As(err, &nfe) {
+			return &SandboxNotFoundError{NotFoundError: NotFoundError{SandboxError: SandboxError{Message: fmt.Sprintf("Sandbox %s not found", sandboxId)}}}
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -501,13 +684,18 @@ func (a *sandboxApi) ListSnapshots(opts *SnapshotListOpts) *SnapshotPaginator {
 	if opts == nil {
 		opts = &SnapshotListOpts{}
 	}
-	connOpts := opts.SandboxApiOpts
 	sandboxID := opts.SandboxID
 	limit := opts.Limit
 	initialToken := opts.NextToken
 
-	return &SnapshotPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
-		client, err := a.newClient(&connOpts)
+	fetchPage := func(ctx context.Context, nextToken string, override *SandboxApiOpts) ([]SnapshotInfo, string, error) {
+		effectiveOpts := sandboxApiOptsFromSnapshotListOpts(opts)
+		if override != nil {
+			effectiveOpts = mergeSandboxApiOpts(effectiveOpts, *override)
+		}
+		ctx, cancel := mergeSandboxApiSignal(ctx, &effectiveOpts)
+		defer cancel()
+		client, err := a.newClient(&effectiveOpts)
 		if err != nil {
 			return nil, "", err
 		}
@@ -544,7 +732,14 @@ func (a *sandboxApi) ListSnapshots(opts *SnapshotListOpts) *SnapshotPaginator {
 			result[i] = snapshotInfoFromAPI(s)
 		}
 		return result, token, nil
-	}, initialToken)}
+	}
+
+	return &SnapshotPaginator{
+		paginator: newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
+			return fetchPage(ctx, nextToken, nil)
+		}, initialToken),
+		fetchWithOpts: fetchPage,
+	}
 }
 
 func (a *sandboxApi) DeleteSnapshot(ctx context.Context, snapshotId string, opts *SandboxApiOpts) (bool, error) {
@@ -639,13 +834,18 @@ func (a *sandboxApi) ListSandboxes(opts *SandboxListOpts) *SandboxPaginator {
 	if opts == nil {
 		opts = &SandboxListOpts{}
 	}
-	connOpts := opts.SandboxApiOpts
 	metadata, states := resolveSandboxListQuery(opts)
 	limit := opts.Limit
 	initialToken := opts.NextToken
 
-	return &SandboxPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
-		client, err := a.newClient(&connOpts)
+	fetchPage := func(ctx context.Context, nextToken string, override *SandboxApiOpts) ([]SandboxInfo, string, error) {
+		effectiveOpts := sandboxApiOptsFromSandboxListOpts(opts)
+		if override != nil {
+			effectiveOpts = mergeSandboxApiOpts(effectiveOpts, *override)
+		}
+		ctx, cancel := mergeSandboxApiSignal(ctx, &effectiveOpts)
+		defer cancel()
+		client, err := a.newClient(&effectiveOpts)
 		if err != nil {
 			return nil, "", err
 		}
@@ -691,7 +891,14 @@ func (a *sandboxApi) ListSandboxes(opts *SandboxListOpts) *SandboxPaginator {
 			result[i] = sandboxResponseToInfo(&s)
 		}
 		return result, token, nil
-	}, initialToken)}
+	}
+
+	return &SandboxPaginator{
+		paginator: newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
+			return fetchPage(ctx, nextToken, nil)
+		}, initialToken),
+		fetchWithOpts: fetchPage,
+	}
 }
 
 func resolveSandboxListQuery(opts *SandboxListOpts) (map[string]string, []SandboxState) {
@@ -750,11 +957,100 @@ func sandboxRespToFullInfo(r *api.SandboxResponse) *SandboxFullInfo {
 	}
 }
 
-func buildCreateSandboxRequest(template string, opts *SandboxOpts, autoPause bool, timeoutMs int) (api.CreateSandboxRequest, error) {
+type createSandboxRequest struct {
+	TemplateID          string                `json:"templateID"`
+	Timeout             int                   `json:"timeout"`
+	Metadata            map[string]string     `json:"metadata,omitempty"`
+	Mcp                 map[string]any        `json:"mcp,omitempty"`
+	EnvVars             map[string]string     `json:"envVars,omitempty"`
+	Secure              *bool                 `json:"secure,omitempty"`
+	AllowInternetAccess *bool                 `json:"allow_internet_access,omitempty"`
+	AutoPause           *bool                 `json:"autoPause,omitempty"`
+	AutoResume          *api.AutoResumeConfig `json:"autoResume,omitempty"`
+	Network             *networkOptsRequest   `json:"network,omitempty"`
+	VolumeMounts        []api.VolumeMount     `json:"volumeMounts,omitempty"`
+}
+
+type networkOptsRequest struct {
+	AllowOut           []string
+	allowOutSet        bool
+	DenyOut            []string
+	denyOutSet         bool
+	AllowPublicTraffic *bool
+	MaskRequestHost    string
+	Rules              map[string][]api.NetworkRule
+	rulesSet           bool
+}
+
+func (n networkOptsRequest) MarshalJSON() ([]byte, error) {
+	body := map[string]any{}
+	if len(n.AllowOut) > 0 || n.allowOutSet {
+		body["allowOut"] = emptyStringList(n.AllowOut)
+	}
+	if len(n.DenyOut) > 0 || n.denyOutSet {
+		body["denyOut"] = emptyStringList(n.DenyOut)
+	}
+	if n.AllowPublicTraffic != nil {
+		body["allowPublicTraffic"] = n.AllowPublicTraffic
+	}
+	if n.MaskRequestHost != "" {
+		body["maskRequestHost"] = n.MaskRequestHost
+	}
+	if len(n.Rules) > 0 || n.rulesSet {
+		body["rules"] = emptyNetworkRuleMap(n.Rules)
+	}
+	return json.Marshal(body)
+}
+
+type sandboxNetworkUpdateRequest struct {
+	AllowOut            []string
+	allowOutSet         bool
+	DenyOut             []string
+	denyOutSet          bool
+	Rules               map[string][]api.NetworkRule
+	rulesSet            bool
+	AllowInternetAccess *bool
+}
+
+func (n sandboxNetworkUpdateRequest) MarshalJSON() ([]byte, error) {
+	body := map[string]any{}
+	if len(n.AllowOut) > 0 || n.allowOutSet {
+		body["allowOut"] = emptyStringList(n.AllowOut)
+	}
+	if len(n.DenyOut) > 0 || n.denyOutSet {
+		body["denyOut"] = emptyStringList(n.DenyOut)
+	}
+	if len(n.Rules) > 0 || n.rulesSet {
+		body["rules"] = emptyNetworkRuleMap(n.Rules)
+	}
+	if n.AllowInternetAccess != nil {
+		body["allow_internet_access"] = n.AllowInternetAccess
+	}
+	return json.Marshal(body)
+}
+
+func emptyStringList(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func emptyNetworkRuleMap(rules map[string][]api.NetworkRule) map[string][]api.NetworkRule {
+	if rules == nil {
+		return map[string][]api.NetworkRule{}
+	}
+	return rules
+}
+
+func buildCreateSandboxRequest(template string, opts *SandboxOpts, autoPause bool, timeoutMs int) (createSandboxRequest, error) {
 	timeoutSec := int(math.Ceil(float64(timeoutMs) / 1000.0))
 	lifecycle := resolveSandboxLifecycle(opts.Lifecycle, autoPause)
+	if err := validateSandboxLifecycle(lifecycle); err != nil {
+		return createSandboxRequest{}, err
+	}
 
-	req := api.CreateSandboxRequest{
+	req := createSandboxRequest{
 		TemplateID:          template,
 		Timeout:             timeoutSec,
 		Metadata:            opts.Metadata,
@@ -766,9 +1062,21 @@ func buildCreateSandboxRequest(template string, opts *SandboxOpts, autoPause boo
 		AutoResume:          resolveAutoResume(lifecycle),
 	}
 	if opts.Network != nil {
-		req.Network = &api.NetworkOpts{
-			AllowOut:           opts.Network.AllowOut,
-			DenyOut:            opts.Network.DenyOut,
+		allowOut, err := resolveNetworkSelector(opts.Network.AllowOut, opts.Network.Rules)
+		if err != nil {
+			return createSandboxRequest{}, err
+		}
+		denyOut, err := resolveNetworkSelector(opts.Network.DenyOut, opts.Network.Rules)
+		if err != nil {
+			return createSandboxRequest{}, err
+		}
+		req.Network = &networkOptsRequest{
+			AllowOut:           allowOut,
+			allowOutSet:        opts.Network.AllowOut != nil,
+			DenyOut:            denyOut,
+			denyOutSet:         opts.Network.DenyOut != nil,
+			Rules:              buildNetworkRulesForAPI(opts.Network.Rules),
+			rulesSet:           opts.Network.Rules != nil,
 			AllowPublicTraffic: opts.Network.AllowPublicTraffic,
 			MaskRequestHost:    opts.Network.MaskRequestHost,
 		}
@@ -776,11 +1084,155 @@ func buildCreateSandboxRequest(template string, opts *SandboxOpts, autoPause boo
 	if len(opts.VolumeMounts) > 0 {
 		mounts, err := resolveCreateVolumeMounts(opts.VolumeMounts)
 		if err != nil {
-			return api.CreateSandboxRequest{}, err
+			return createSandboxRequest{}, err
 		}
 		req.VolumeMounts = mounts
 	}
 	return req, nil
+}
+
+func buildNetworkUpdateBody(network SandboxNetworkUpdate) (sandboxNetworkUpdateRequest, error) {
+	allowOut, err := resolveNetworkSelector(network.AllowOut, network.Rules)
+	if err != nil {
+		return sandboxNetworkUpdateRequest{}, err
+	}
+	denyOut, err := resolveNetworkSelector(network.DenyOut, network.Rules)
+	if err != nil {
+		return sandboxNetworkUpdateRequest{}, err
+	}
+
+	return sandboxNetworkUpdateRequest{
+		AllowOut:            allowOut,
+		allowOutSet:         network.AllowOut != nil,
+		DenyOut:             denyOut,
+		denyOutSet:          network.DenyOut != nil,
+		Rules:               buildNetworkRulesForAPI(network.Rules),
+		rulesSet:            network.Rules != nil,
+		AllowInternetAccess: network.AllowInternetAccess,
+	}, nil
+}
+
+func buildNetworkRulesForAPI(rules SandboxNetworkRules) map[string][]api.NetworkRule {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]api.NetworkRule, len(rules))
+	for host, hostRules := range rules {
+		converted := make([]api.NetworkRule, len(hostRules))
+		for i, rule := range hostRules {
+			converted[i] = api.NetworkRule{
+				Transform: buildNetworkTransformForAPI(rule.Transform),
+			}
+		}
+		out[host] = converted
+	}
+
+	return out
+}
+
+func resolveNetworkSelector(selector SandboxNetworkSelector, rules SandboxNetworkRules) ([]string, error) {
+	if selector == nil {
+		return nil, nil
+	}
+
+	switch value := selector.(type) {
+	case []string:
+		return append([]string(nil), value...), nil
+	case SandboxNetworkSelectorFunc:
+		return append([]string(nil), value(SandboxNetworkSelectorContext{
+			AllTraffic: ALL_TRAFFIC,
+			Rules:      cloneNetworkRules(rules),
+		})...), nil
+	case func(SandboxNetworkSelectorContext) []string:
+		return append([]string(nil), value(SandboxNetworkSelectorContext{
+			AllTraffic: ALL_TRAFFIC,
+			Rules:      cloneNetworkRules(rules),
+		})...), nil
+	default:
+		return nil, &InvalidArgumentError{SandboxError: SandboxError{Message: "network selector must be []string or func(SandboxNetworkSelectorContext) []string"}}
+	}
+}
+
+func cloneNetworkRules(rules SandboxNetworkRules) SandboxNetworkRules {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	out := make(SandboxNetworkRules, len(rules))
+	for host, hostRules := range rules {
+		converted := make([]SandboxNetworkRule, len(hostRules))
+		for i, rule := range hostRules {
+			converted[i] = SandboxNetworkRule{
+				Transform: cloneNetworkTransform(rule.Transform),
+			}
+		}
+		out[host] = converted
+	}
+
+	return out
+}
+
+func cloneNetworkTransform(transform *SandboxNetworkTransform) *SandboxNetworkTransform {
+	if transform == nil {
+		return nil
+	}
+
+	return &SandboxNetworkTransform{
+		Headers: cloneNetworkHeaders(transform.Headers),
+	}
+}
+
+func buildNetworkTransformForAPI(transform *SandboxNetworkTransform) *api.NetworkTransform {
+	if transform == nil {
+		return nil
+	}
+
+	return &api.NetworkTransform{
+		Headers: cloneNetworkHeaders(transform.Headers),
+	}
+}
+
+func networkRulesFromAPI(rules map[string][]api.NetworkRule) SandboxNetworkRules {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	out := make(SandboxNetworkRules, len(rules))
+	for host, hostRules := range rules {
+		converted := make([]SandboxNetworkRule, len(hostRules))
+		for i, rule := range hostRules {
+			converted[i] = SandboxNetworkRule{
+				Transform: networkTransformFromAPI(rule.Transform),
+			}
+		}
+		out[host] = converted
+	}
+
+	return out
+}
+
+func networkTransformFromAPI(transform *api.NetworkTransform) *SandboxNetworkTransform {
+	if transform == nil {
+		return nil
+	}
+
+	return &SandboxNetworkTransform{
+		Headers: cloneNetworkHeaders(transform.Headers),
+	}
+}
+
+func cloneNetworkHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		out[k] = v
+	}
+
+	return out
 }
 
 func resolveCreateVolumeMounts(volumeMounts map[string]any) ([]api.VolumeMount, error) {
@@ -895,13 +1347,11 @@ func resolveSandboxLifecycle(lifecycle *SandboxLifecycle, autoPause bool) *Sandb
 	}
 	if autoPause {
 		return &SandboxLifecycle{
-			OnTimeout:  "pause",
-			AutoResume: false,
+			OnTimeout: "pause",
 		}
 	}
 	return &SandboxLifecycle{
-		OnTimeout:  "kill",
-		AutoResume: false,
+		OnTimeout: "kill",
 	}
 }
 
@@ -914,11 +1364,25 @@ func resolveAutoPause(lifecycle *SandboxLifecycle) *bool {
 }
 
 func resolveAutoResume(lifecycle *SandboxLifecycle) *api.AutoResumeConfig {
-	if lifecycle == nil || lifecycle.OnTimeout != "pause" {
+	if lifecycle == nil {
 		return nil
 	}
 
 	return &api.AutoResumeConfig{
-		Enabled: lifecycle.AutoResume,
+		Enabled: boolValue(lifecycle.AutoResume),
 	}
+}
+
+func validateSandboxLifecycle(lifecycle *SandboxLifecycle) error {
+	if lifecycle == nil {
+		return nil
+	}
+	if boolValue(lifecycle.AutoResume) && lifecycle.OnTimeout != "pause" {
+		return &InvalidArgumentError{
+			SandboxError: SandboxError{
+				Message: "autoResume can only be true when the resolved onTimeout is 'pause'.",
+			},
+		}
+	}
+	return nil
 }

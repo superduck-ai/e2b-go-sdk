@@ -2,6 +2,7 @@ package template
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -31,6 +32,9 @@ func parseDockerfile(content string, builder *TemplateBase) error {
 		switch instruction {
 		case "FROM":
 			fromCount++
+			if fromCount > 1 {
+				return fmt.Errorf("Multi-stage Dockerfiles are not supported")
+			}
 			baseImage := strings.Fields(args)
 			if len(baseImage) > 0 {
 				builder.FromImage(baseImage[0], nil)
@@ -47,14 +51,15 @@ func parseDockerfile(content string, builder *TemplateBase) error {
 		case "USER":
 			builder.SetUser(args)
 			userChanged = true
-		case "ENV":
-			kv := strings.SplitN(args, "=", 2)
-			if len(kv) == 2 {
-				builder.SetEnvs(map[string]string{strings.TrimSpace(kv[0]): strings.TrimSpace(kv[1])})
-			}
+		case "ENV", "ARG":
+			parseEnvInstruction(instruction, args, builder)
 		case "CMD", "ENTRYPOINT":
 			builder.SetStartCmd(parseCommandInstruction(args), WaitForTimeout(20_000))
 		}
+	}
+
+	if fromCount == 0 {
+		return fmt.Errorf("Dockerfile must contain a FROM instruction")
 	}
 
 	if fromCount > 0 {
@@ -66,6 +71,45 @@ func parseDockerfile(content string, builder *TemplateBase) error {
 		}
 	}
 	return nil
+}
+
+func parseEnvInstruction(instruction, args string, builder *TemplateBase) {
+	fields := splitDockerfileArgs(args)
+	if len(fields) == 0 {
+		return
+	}
+
+	envs := map[string]string{}
+	switch {
+	case len(fields) == 1:
+		parseEnvField(instruction, fields[0], envs)
+	case len(fields) == 2 && !strings.Contains(fields[0], "=") && !strings.Contains(fields[1], "="):
+		envs[fields[0]] = fields[1]
+	default:
+		for _, field := range fields {
+			parseEnvField(instruction, field, envs)
+		}
+	}
+
+	if len(envs) > 0 {
+		builder.SetEnvs(envs)
+	}
+}
+
+func parseEnvField(instruction, field string, envs map[string]string) {
+	field = strings.TrimSpace(field)
+	if field == "" {
+		return
+	}
+	if equalIndex := strings.Index(field, "="); equalIndex > 0 {
+		key := field[:equalIndex]
+		value := field[equalIndex+1:]
+		envs[key] = value
+		return
+	}
+	if instruction == "ARG" {
+		envs[field] = ""
+	}
 }
 
 func parseCopyInstruction(args string, builder *TemplateBase) {
@@ -90,11 +134,13 @@ func parseCopyInstruction(args string, builder *TemplateBase) {
 		return
 	}
 
-	src := nonFlagParts[0]
 	dest := nonFlagParts[len(nonFlagParts)-1]
-	builder.Copy(src, dest, &struct {
-		User string
-	}{User: user})
+	sources := nonFlagParts[:len(nonFlagParts)-1]
+	for _, src := range sources {
+		builder.Copy(src, dest, &struct {
+			User string
+		}{User: user})
+	}
 }
 
 func parseCommandInstruction(args string) string {

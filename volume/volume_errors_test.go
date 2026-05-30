@@ -18,7 +18,7 @@ func TestGetVolumeInfoWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
 	defer server.Close()
 
 	_, err := GetInfo(context.Background(), "vol-1", &ConnectionOpts{
-		ApiKey:           "test-api-key",
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
 		ApiUrl:           server.URL,
 		RequestTimeoutMs: ptr(1000),
 	})
@@ -42,7 +42,7 @@ func TestCreateWrapsGenericApiErrorsAsVolumeError(t *testing.T) {
 	defer server.Close()
 
 	_, err := Create(context.Background(), "test", &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		ApiUrl: server.URL,
 	})
 	if err == nil {
@@ -65,7 +65,7 @@ func TestListWrapsGenericApiErrorsAsVolumeError(t *testing.T) {
 	defer server.Close()
 
 	_, err := List(context.Background(), &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		ApiUrl: server.URL,
 	})
 	if err == nil {
@@ -88,7 +88,7 @@ func TestDestroyWrapsGenericApiErrorsAsVolumeError(t *testing.T) {
 	defer server.Close()
 
 	_, err := Destroy(context.Background(), "vol-1", &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		ApiUrl: server.URL,
 	})
 	if err == nil {
@@ -111,7 +111,7 @@ func TestCreateErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	_, err := Create(context.Background(), "test", &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		ApiUrl: server.URL,
 	})
 	if err == nil {
@@ -129,7 +129,7 @@ func TestGetVolumeInfoErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	_, err := GetInfo(context.Background(), "vol-1", &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		ApiUrl: server.URL,
 	})
 	if err == nil {
@@ -147,7 +147,7 @@ func TestVolumeExistsReturnsFalseForTypedNotFoundError(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	exists, err := v.Exists(context.Background(), "/missing.txt", nil)
+	exists, err := v.Exists(context.Background(), "/missing.txt", testVolumeApiOpts(server.URL))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -163,7 +163,7 @@ func TestVolumeReadFileWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	_, err := v.ReadFile(context.Background(), "/missing.txt", nil)
+	_, err := v.ReadFile(context.Background(), "/missing.txt", testVolumeReadOpts(server.URL))
 	if err == nil {
 		t.Fatal("expected read file error")
 	}
@@ -177,7 +177,92 @@ func TestVolumeReadFileWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
 	}
 }
 
-func TestVolumeReadFileStreamReturnsResponseBody(t *testing.T) {
+func TestVolumeListWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	v := testVolumeClient(server.URL)
+	_, err := v.List(context.Background(), "/missing-dir", testVolumeListOpts(server.URL))
+	if err == nil {
+		t.Fatal("expected list error")
+	}
+
+	var notFoundErr *shared.NotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected NotFoundError, got %T %v", err, err)
+	}
+	if notFoundErr.Message != "Path /missing-dir not found" {
+		t.Fatalf("unexpected error message: %q", notFoundErr.Message)
+	}
+}
+
+func TestVolumeUpdateMetadataWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	v := testVolumeClient(server.URL)
+	mode := 0o644
+	_, err := v.UpdateMetadata(context.Background(), "/missing.txt", &VolumeMetadataOptions{Mode: &mode}, testVolumeApiOpts(server.URL))
+	if err == nil {
+		t.Fatal("expected update metadata error")
+	}
+
+	var notFoundErr *shared.NotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected NotFoundError, got %T %v", err, err)
+	}
+	if notFoundErr.Message != "Path /missing.txt not found" {
+		t.Fatalf("unexpected error message: %q", notFoundErr.Message)
+	}
+}
+
+func TestVolumeMakeDirWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	v := testVolumeClient(server.URL)
+	_, err := v.MakeDir(context.Background(), "/missing-parent/child", &VolumeWriteOptions{ApiUrl: server.URL})
+	if err == nil {
+		t.Fatal("expected make dir error")
+	}
+
+	var notFoundErr *shared.NotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected NotFoundError, got %T %v", err, err)
+	}
+	if notFoundErr.Message != "Path /missing-parent/child not found" {
+		t.Fatalf("unexpected error message: %q", notFoundErr.Message)
+	}
+}
+
+func TestVolumeRemoveWrapsNotFoundAsSdkNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	v := testVolumeClient(server.URL)
+	err := v.Remove(context.Background(), "/missing.txt", testVolumeApiOpts(server.URL))
+	if err == nil {
+		t.Fatal("expected remove error")
+	}
+
+	var notFoundErr *shared.NotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected NotFoundError, got %T %v", err, err)
+	}
+	if notFoundErr.Message != "Path /missing.txt not found" {
+		t.Fatalf("unexpected error message: %q", notFoundErr.Message)
+	}
+}
+
+func TestVolumeReadFileReturnsStreamResponseBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/volumecontent/vol-1/file" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -193,10 +278,7 @@ func TestVolumeReadFileStreamReturnsResponseBody(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	body, err := v.ReadFileStream(context.Background(), "/stream.txt", nil)
-	if err != nil {
-		t.Fatalf("ReadFileStream returned error: %v", err)
-	}
+	body := readVolumeStreamValue(t, v, "/stream.txt", testVolumeApiOpts(server.URL))
 	data, err := io.ReadAll(body)
 	if err != nil {
 		t.Fatalf("failed to read stream: %v", err)
@@ -216,7 +298,7 @@ func TestVolumeRemoveWrapsGenericApiErrorsAsVolumeError(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	err := v.Remove(context.Background(), "/file.txt", nil)
+	err := v.Remove(context.Background(), "/file.txt", testVolumeApiOpts(server.URL))
 	if err == nil {
 		t.Fatal("expected remove error")
 	}
@@ -230,17 +312,35 @@ func TestVolumeRemoveWrapsGenericApiErrorsAsVolumeError(t *testing.T) {
 	}
 }
 
-func testVolumeClient(apiURL string) *Volume {
+func testVolumeClient(_ string) *Volume {
 	return &Volume{
 		VolumeID: "vol-1",
 		Name:     "test",
 		Token:    "token",
 		Domain:   "e2b.app",
-		client: newVolumeApiClientWithConfig(&VolumeConnectionConfig{
-			ApiUrl:  apiURL,
-			Token:   "token",
-			Headers: map[string]string{},
-		}),
+		Debug:    boolPtr(false),
+	}
+}
+
+func testVolumeApiOpts(apiURL string) *VolumeApiOpts {
+	return &VolumeApiOpts{
+		ApiUrl: apiURL,
+	}
+}
+
+func testVolumeReadOpts(apiURL string) *VolumeReadOpts {
+	return &VolumeReadOpts{
+		VolumeApiOpts: VolumeApiOpts{
+			ApiUrl: apiURL,
+		},
+	}
+}
+
+func testVolumeListOpts(apiURL string) *VolumeListOpts {
+	return &VolumeListOpts{
+		VolumeApiOpts: VolumeApiOpts{
+			ApiUrl: apiURL,
+		},
 	}
 }
 

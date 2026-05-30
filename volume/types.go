@@ -1,6 +1,11 @@
 package volume
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"github.com/superduck-ai/e2b-go-sdk/api"
+)
 
 type VolumeFileType string
 
@@ -43,12 +48,14 @@ type VolumeMetadataOptions struct {
 
 type VolumeWriteOptions struct {
 	VolumeMetadataOptions
-	Force            bool
+	Force            *bool
 	Token            string
 	Domain           string
-	Debug            bool
+	Debug            *bool
 	ApiUrl           string
 	RequestTimeoutMs *int
+	Signal           context.Context
+	Logger           api.Logger
 	Headers          map[string]string
 	Proxy            string
 }

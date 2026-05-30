@@ -22,10 +22,26 @@ type CreateSandboxRequest struct {
 }
 
 type NetworkOpts struct {
-	AllowOut           []string `json:"allowOut,omitempty"`
-	DenyOut            []string `json:"denyOut,omitempty"`
-	AllowPublicTraffic bool     `json:"allowPublicTraffic"`
-	MaskRequestHost    string   `json:"maskRequestHost,omitempty"`
+	AllowOut           []string                 `json:"allowOut,omitempty"`
+	DenyOut            []string                 `json:"denyOut,omitempty"`
+	AllowPublicTraffic *bool                    `json:"allowPublicTraffic,omitempty"`
+	MaskRequestHost    string                   `json:"maskRequestHost,omitempty"`
+	Rules              map[string][]NetworkRule `json:"rules,omitempty"`
+}
+
+type NetworkRule struct {
+	Transform *NetworkTransform `json:"transform,omitempty"`
+}
+
+type NetworkTransform struct {
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type SandboxNetworkUpdateConfig struct {
+	AllowOut            []string                 `json:"allowOut,omitempty"`
+	DenyOut             []string                 `json:"denyOut,omitempty"`
+	Rules               map[string][]NetworkRule `json:"rules,omitempty"`
+	AllowInternetAccess *bool                    `json:"allow_internet_access,omitempty"`
 }
 
 type AutoResumeConfig struct {
@@ -86,6 +102,7 @@ type SandboxMetrics struct {
 	CpuCount      int       `json:"cpuCount"`
 	MemUsed       int64     `json:"memUsed"`
 	MemTotal      int64     `json:"memTotal"`
+	MemCache      int64     `json:"memCache"`
 	DiskUsed      int64     `json:"diskUsed"`
 	DiskTotal     int64     `json:"diskTotal"`
 	MemUsedMiB    int64     `json:"memUsedMiB"`

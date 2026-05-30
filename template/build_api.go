@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 // requestBuildRequest is the request body for POST /v3/templates.
@@ -23,8 +24,9 @@ type requestBuildRequest struct {
 
 // requestBuildResponse is the response from POST /v3/templates.
 type requestBuildResponse struct {
-	TemplateID string `json:"templateID"`
-	BuildID    string `json:"buildID"`
+	TemplateID string   `json:"templateID"`
+	BuildID    string   `json:"buildID"`
+	Tags       []string `json:"tags"`
 }
 
 // triggerBuildRequest is the request body for POST /v2/templates/{templateID}/builds/{buildID}.
@@ -34,7 +36,7 @@ type triggerBuildTemplate struct {
 	StartCmd          string                 `json:"startCmd,omitempty"`
 	ReadyCmd          string                 `json:"readyCmd,omitempty"`
 	Steps             []instructionPayload   `json:"steps"`
-	Force             bool                   `json:"force,omitempty"`
+	Force             bool                   `json:"force"`
 	FromImage         string                 `json:"fromImage,omitempty"`
 	FromTemplate      string                 `json:"fromTemplate,omitempty"`
 	FromImageRegistry *registryConfigPayload `json:"fromImageRegistry,omitempty"`
@@ -43,7 +45,7 @@ type triggerBuildTemplate struct {
 type instructionPayload struct {
 	Type            InstructionType `json:"type"`
 	Args            []string        `json:"args"`
-	Force           bool            `json:"force,omitempty"`
+	Force           bool            `json:"force"`
 	ForceUpload     bool            `json:"forceUpload,omitempty"`
 	FilesHash       string          `json:"filesHash,omitempty"`
 	ResolveSymlinks bool            `json:"resolveSymlinks,omitempty"`
@@ -108,6 +110,9 @@ type aliasResponse struct {
 	TemplateID string `json:"templateID"`
 }
 
+const buildLogsRefreshInterval = 200 * time.Millisecond
+const buildStatusLogsLimit = 100
+
 // requestBuild creates a new template and build via POST /v3/templates.
 func requestBuild(ctx context.Context, client *api.ApiClient, name string, tags []string, cpuCount, memoryMB int) (*BuildInfo, error) {
 	reqBody := &requestBuildRequest{
@@ -123,40 +128,45 @@ func requestBuild(ctx context.Context, client *api.ApiClient, name string, tags 
 		return nil, fmt.Errorf("request build failed: %w", err)
 	}
 
+	responseTags := resp.Tags
+	if responseTags == nil {
+		responseTags = append([]string{}, tags...)
+	}
+
 	return &BuildInfo{
 		Alias:      name,
 		Name:       name,
-		Tags:       tags,
+		Tags:       responseTags,
 		TemplateID: resp.TemplateID,
 		BuildID:    resp.BuildID,
 	}, nil
 }
 
-func getFileUploadLink(ctx context.Context, client *api.ApiClient, templateID, filesHash string) (*fileUploadLinkResponse, error) {
+func getFileUploadLink(ctx context.Context, client *api.ApiClient, templateID, filesHash, callerTrace string) (*fileUploadLinkResponse, error) {
 	path := fmt.Sprintf("/templates/%s/files/%s", url.PathEscape(templateID), url.PathEscape(filesHash))
 	var resp fileUploadLinkResponse
 	_, err := client.Get(ctx, path, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("get file upload link failed: %w", err)
+		return nil, appendCallerTrace(fmt.Errorf("get file upload link failed: %w", err), callerTrace)
 	}
 	return &resp, nil
 }
 
-func uploadFile(ctx context.Context, uploadURL string, archive []byte) error {
+func uploadFile(ctx context.Context, uploadURL string, archive []byte, callerTrace string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(archive))
 	if err != nil {
-		return fmt.Errorf("failed to create upload request: %w", err)
+		return appendCallerTrace(fmt.Errorf("failed to create upload request: %w", err), callerTrace)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to upload file: %w", err)
+		return appendCallerTrace(fmt.Errorf("failed to upload file: %w", err), callerTrace)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to upload file: %s", strings.TrimSpace(string(body)))
+		return appendCallerTrace(fmt.Errorf("failed to upload file: %s", strings.TrimSpace(string(body))), callerTrace)
 	}
 
 	return nil
@@ -174,7 +184,7 @@ func triggerBuild(ctx context.Context, client *api.ApiClient, templateID, buildI
 
 // getBuildStatusFromAPI retrieves the build status via GET /templates/{templateID}/builds/{buildID}/status.
 func getBuildStatusFromAPI(ctx context.Context, client *api.ApiClient, templateID, buildID string, logsOffset int) (*TemplateBuildStatusResponse, error) {
-	path := fmt.Sprintf("/templates/%s/builds/%s/status?logsOffset=%d", templateID, buildID, logsOffset)
+	path := fmt.Sprintf("/templates/%s/builds/%s/status?logsOffset=%d&limit=%d", templateID, buildID, logsOffset, buildStatusLogsLimit)
 
 	var resp buildStatusAPIResponse
 	_, err := client.Get(ctx, path, &resp)
@@ -192,8 +202,8 @@ func getBuildStatusFromAPI(ctx context.Context, client *api.ApiClient, templateI
 	}, nil
 }
 
-// waitForBuildFinish polls build status every 2 seconds until it reaches "ready" or "error".
-func waitForBuildFinish(ctx context.Context, client *api.ApiClient, templateID, buildID string, logger BuildLogger) (*TemplateBuildStatusResponse, error) {
+// waitForBuildFinish polls build status every 200ms until it reaches "ready" or "error".
+func waitForBuildFinish(ctx context.Context, client *api.ApiClient, templateID, buildID string, logger BuildLogger, callerTraces []string) (*TemplateBuildStatusResponse, error) {
 	logsOffset := 0
 
 	for {
@@ -208,13 +218,14 @@ func waitForBuildFinish(ctx context.Context, client *api.ApiClient, templateID, 
 			return nil, err
 		}
 
+		logsOffset += len(status.LogEntries)
+
 		// Emit logs if logger is provided
 		if logger != nil {
 			for _, entry := range status.LogEntries {
 				logEntry := entry
 				logger(&logEntry)
 			}
-			logsOffset += len(status.LogEntries)
 		}
 
 		switch status.Status {
@@ -222,13 +233,26 @@ func waitForBuildFinish(ctx context.Context, client *api.ApiClient, templateID, 
 			return status, nil
 		case BuildStatusError:
 			reason := "unknown error"
+			callerTrace := ""
 			if status.Reason != nil && status.Reason.Message != "" {
 				reason = status.Reason.Message
+				index := buildStepIndex(status.Reason.Step, len(callerTraces))
+				if index >= 0 && index < len(callerTraces) {
+					callerTrace = callerTraces[index]
+				}
 			}
-			return status, fmt.Errorf("build failed: %s", reason)
+			return status, &shared.BuildError{Message: fmt.Sprintf("build failed: %s", reason), CallerTrace: callerTrace}
 		}
 
-		time.Sleep(2 * time.Second)
+		timer := time.NewTimer(buildLogsRefreshInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -300,7 +324,7 @@ func mapBuildLogEntries(entries []buildLogEntryAPIResponse) []LogEntry {
 		logs[i] = LogEntry{
 			Timestamp: entry.Timestamp,
 			Level:     entry.Level,
-			Message:   entry.Message,
+			Message:   stripAnsi(entry.Message),
 		}
 	}
 	return logs

@@ -1,6 +1,7 @@
 package template
 
 import (
+	"context"
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
@@ -65,6 +66,20 @@ type BasicBuildOptions struct {
 	OnBuildLogs BuildLogger
 }
 
+type ConnectionOpts struct {
+	ApiKey           string
+	AccessToken      string
+	Domain           string
+	ApiUrl           string
+	SandboxUrl       string
+	Debug            *bool
+	Signal           context.Context
+	RequestTimeoutMs *int
+	Headers          map[string]string
+	Logger           api.Logger
+	Proxy            string
+}
+
 type BuildOptions struct {
 	BasicBuildOptions
 	ApiKey           string
@@ -72,7 +87,8 @@ type BuildOptions struct {
 	Domain           string
 	ApiUrl           string
 	SandboxUrl       string
-	Debug            bool
+	Debug            *bool
+	Signal           context.Context
 	Headers          map[string]string
 	RequestTimeoutMs *int
 	Logger           api.Logger
@@ -93,7 +109,8 @@ type GetBuildStatusOptions struct {
 	Domain           string
 	ApiUrl           string
 	SandboxUrl       string
-	Debug            bool
+	Debug            *bool
+	Signal           context.Context
 	LogsOffset       int
 	RequestTimeoutMs *int
 	Headers          map[string]string

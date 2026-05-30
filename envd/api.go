@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 // EnvdApiError holds the status code and message from an envd API error response.
@@ -58,7 +60,7 @@ func NewEnvdApiClient(baseUrl string, accessToken string, headers map[string]str
 
 	return &EnvdApiClient{
 		BaseUrl:    baseUrl,
-		HttpClient: &http.Client{Timeout: time.Duration(requestTimeoutMs) * time.Millisecond},
+		HttpClient: shared.NewEnvdRESTHTTPClient(time.Duration(requestTimeoutMs)*time.Millisecond, "", nil),
 		Headers:    allHeaders,
 	}
 }

@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,6 +15,13 @@ const (
 	envdPort                 = 49983
 )
 
+var stableSandboxDomains = map[string]struct{}{
+	"e2b.app":         {},
+	"e2b.dev":         {},
+	"e2b.pro":         {},
+	"e2b-staging.dev": {},
+}
+
 const defaultUsername = "user"
 const sdkVersion = "dev"
 
@@ -25,7 +33,8 @@ type ConnectionOpts struct {
 	Domain           string
 	ApiUrl           string
 	SandboxUrl       string
-	Debug            bool
+	Debug            *bool
+	Signal           context.Context
 	RequestTimeoutMs *int
 	Logger           Logger
 	Headers          map[string]string
@@ -68,7 +77,7 @@ func NewConnectionConfig(opts *ConnectionOpts) *ConnectionConfig {
 		domain = "e2b.app"
 	}
 
-	debug := opts.Debug
+	debug := boolValue(opts.Debug)
 	if !debug {
 		if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
 			debug = v
@@ -120,7 +129,38 @@ func intPtr(value int) *int {
 	return &value
 }
 
+func boolRef(value bool) *bool {
+	return &value
+}
+
+func boolValue(value *bool) bool {
+	return value != nil && *value
+}
+
+func trueBoolRef(value bool) *bool {
+	if !value {
+		return nil
+	}
+	return boolRef(true)
+}
+
 func (c *ConnectionConfig) GetSandboxUrl(sandboxId string, sandboxDomain string, envdPort int) string {
+	if c.SandboxUrl != "" {
+		return c.SandboxUrl
+	}
+	if c.Debug {
+		return fmt.Sprintf("http://localhost:%d", envdPort)
+	}
+	if sandboxDomain == "" {
+		sandboxDomain = c.Domain
+	}
+	if _, ok := stableSandboxDomains[sandboxDomain]; ok {
+		return fmt.Sprintf("https://sandbox.%s", sandboxDomain)
+	}
+	return fmt.Sprintf("https://%s", c.GetHost(sandboxId, envdPort, sandboxDomain))
+}
+
+func (c *ConnectionConfig) GetSandboxDirectUrl(sandboxId string, sandboxDomain string, envdPort int) string {
 	if c.SandboxUrl != "" {
 		return c.SandboxUrl
 	}

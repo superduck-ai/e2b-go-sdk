@@ -20,6 +20,7 @@ import (
 	"time"
 
 	e2b "github.com/superduck-ai/e2b-go-sdk"
+	e2bvol "github.com/superduck-ai/e2b-go-sdk/volume"
 )
 
 const liveTestTimeout = 15 * time.Minute
@@ -32,6 +33,104 @@ var (
 	liveTemplateID    string
 	liveTemplateBuilt bool
 )
+
+func boolPtr(v bool) *bool { return &v }
+func intPtr(v int) *int    { return &v }
+
+func runForegroundCommand(cmds *e2b.Commands, ctx context.Context, cmd string, opts *e2b.CommandStartOpts) (*e2b.CommandResult, error) {
+	execution, err := cmds.Run(ctx, cmd, opts)
+	if err != nil {
+		return nil, err
+	}
+	result, ok := execution.(*e2b.CommandResult)
+	if !ok {
+		return nil, fmt.Errorf("expected foreground command result, got %T", execution)
+	}
+	return result, nil
+}
+
+func runBackgroundCommand(cmds *e2b.Commands, ctx context.Context, cmd string, opts *e2b.CommandStartOpts) (*e2b.CommandHandle, error) {
+	if opts == nil {
+		opts = &e2b.CommandStartOpts{}
+	} else {
+		cloned := *opts
+		opts = &cloned
+	}
+	opts.Background = true
+	execution, err := cmds.Run(ctx, cmd, opts)
+	if err != nil {
+		return nil, err
+	}
+	handle, ok := execution.(*e2b.CommandHandle)
+	if !ok {
+		return nil, fmt.Errorf("expected background command handle, got %T", execution)
+	}
+	return handle, nil
+}
+
+func readSandboxText(files *e2b.Filesystem, ctx context.Context, path string, opts *e2b.FilesystemReadOpts) (string, error) {
+	value, err := files.Read(ctx, path, opts)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("expected filesystem read to return string, got %T", value)
+	}
+	return text, nil
+}
+
+func readSandboxBytes(files *e2b.Filesystem, ctx context.Context, path string, opts *e2b.FilesystemReadOpts) ([]byte, error) {
+	readOpts := &e2b.FilesystemReadOpts{Format: e2b.ReadFormatBytes}
+	if opts != nil {
+		readOpts = &e2b.FilesystemReadOpts{}
+		*readOpts = *opts
+		readOpts.Format = e2b.ReadFormatBytes
+	}
+	value, err := files.Read(ctx, path, readOpts)
+	if err != nil {
+		return nil, err
+	}
+	data, ok := value.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("expected filesystem read to return []byte, got %T", value)
+	}
+	return data, nil
+}
+
+func readSandboxStream(files *e2b.Filesystem, ctx context.Context, path string, opts *e2b.FilesystemReadOpts) (io.ReadCloser, error) {
+	readOpts := &e2b.FilesystemReadOpts{Format: e2b.ReadFormatStream}
+	if opts != nil {
+		readOpts = &e2b.FilesystemReadOpts{}
+		*readOpts = *opts
+		readOpts.Format = e2b.ReadFormatStream
+	}
+	value, err := files.Read(ctx, path, readOpts)
+	if err != nil {
+		return nil, err
+	}
+	stream, ok := value.(io.ReadCloser)
+	if !ok {
+		return nil, fmt.Errorf("expected filesystem read to return io.ReadCloser, got %T", value)
+	}
+	return stream, nil
+}
+
+func readVolumeText(vol *e2bvol.Volume, ctx context.Context, path string, opts *e2bvol.VolumeApiOpts) (string, error) {
+	readOpts := &e2bvol.VolumeReadOpts{}
+	if opts != nil {
+		readOpts.VolumeApiOpts = *opts
+	}
+	value, err := vol.ReadFile(ctx, path, readOpts)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("expected volume read to return string, got %T", value)
+	}
+	return text, nil
+}
 
 func TestMain(m *testing.M) {
 	loadDotEnv()
@@ -58,7 +157,7 @@ func TestLiveCommands(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				result, err := sandbox.Commands.Run(ctx, "printf %s "+shellQuote(tc.text), nil)
+				result, err := runForegroundCommand(sandbox.Commands, ctx, "printf %s "+shellQuote(tc.text), nil)
 				if err != nil {
 					t.Fatalf("Run returned error: %v", err)
 				}
@@ -70,7 +169,7 @@ func TestLiveCommands(t *testing.T) {
 	})
 
 	t.Run("run replaces broken utf8", func(t *testing.T) {
-		result, err := sandbox.Commands.Run(ctx, `python3 - <<'PY'
+		result, err := runForegroundCommand(sandbox.Commands, ctx, `python3 - <<'PY'
 import sys
 sys.stdout.buffer.write(b"a" * 8191 + b"\xe2")
 PY`, nil)
@@ -85,14 +184,14 @@ PY`, nil)
 
 	t.Run("timeout", func(t *testing.T) {
 		timeoutMs := 10000
-		if result, err := sandbox.Commands.Run(ctx, "sleep 1 && echo done", &e2b.CommandStartOpts{TimeoutMs: &timeoutMs}); err != nil {
+		if result, err := runForegroundCommand(sandbox.Commands, ctx, "sleep 1 && echo done", &e2b.CommandStartOpts{TimeoutMs: &timeoutMs}); err != nil {
 			t.Fatalf("Run with sufficient timeout returned error: %v", err)
 		} else if strings.TrimSpace(result.Stdout) != "done" {
 			t.Fatalf("unexpected stdout from sufficient timeout command: %#v", result)
 		}
 
 		timeoutMs = 1000
-		_, err := sandbox.Commands.Run(ctx, "sleep 10", &e2b.CommandStartOpts{TimeoutMs: &timeoutMs})
+		_, err := runForegroundCommand(sandbox.Commands, ctx, "sleep 10", &e2b.CommandStartOpts{TimeoutMs: &timeoutMs})
 		if err == nil {
 			t.Fatal("expected timeout error")
 		}
@@ -105,8 +204,7 @@ PY`, nil)
 	t.Run("stdin connect list kill", func(t *testing.T) {
 		for _, input := range []string{"Hello, World!", "", "!@#$%^&*()_+", "Hello,\nWorld!"} {
 			t.Run("stdin_"+strings.ReplaceAll(input, "\n", "_"), func(t *testing.T) {
-				stdin := true
-				handle, err := sandbox.Commands.RunBackground(ctx, "cat", &e2b.CommandStartOpts{Stdin: stdin})
+				handle, err := runBackgroundCommand(sandbox.Commands, ctx, "cat", &e2b.CommandStartOpts{Stdin: boolPtr(true)})
 				if err != nil {
 					t.Fatalf("RunBackground returned error: %v", err)
 				}
@@ -119,17 +217,17 @@ PY`, nil)
 					waitForCommandStdout(t, handle, input)
 				}
 				_, _ = handle.Kill()
-				if got := handle.GetStdout(); got != input {
+				if got := handle.State().Stdout; got != input {
 					t.Fatalf("expected stdin stdout %q, got %q", input, got)
 				}
 			})
 		}
 
-		sleep, err := sandbox.Commands.RunBackground(ctx, "sleep 30", nil)
+		sleep, err := runBackgroundCommand(sandbox.Commands, ctx, "sleep 30", nil)
 		if err != nil {
 			t.Fatalf("RunBackground sleep returned error: %v", err)
 		}
-		sleep2, err := sandbox.Commands.RunBackground(ctx, "sleep 30", nil)
+		sleep2, err := runBackgroundCommand(sandbox.Commands, ctx, "sleep 30", nil)
 		if err != nil {
 			_, _ = sleep.Kill()
 			t.Fatalf("RunBackground second sleep returned error: %v", err)
@@ -194,7 +292,7 @@ func TestLiveCommandOptions(t *testing.T) {
 		Envs: map[string]string{"FOO": "global-bar"},
 	})
 
-	result, err := globalSandbox.Commands.Run(ctx, "echo $FOO", nil)
+	result, err := runForegroundCommand(globalSandbox.Commands, ctx, "echo $FOO", nil)
 	if err != nil {
 		t.Fatalf("global env Run returned error: %v", err)
 	}
@@ -204,7 +302,7 @@ func TestLiveCommandOptions(t *testing.T) {
 
 	sandbox := newLiveSandbox(t, ctx)
 
-	result, err = sandbox.Commands.Run(ctx, "echo $FOO", &e2b.CommandStartOpts{
+	result, err = runForegroundCommand(sandbox.Commands, ctx, "echo $FOO", &e2b.CommandStartOpts{
 		Envs: map[string]string{"FOO": "scoped-bar"},
 	})
 	if err != nil {
@@ -214,7 +312,7 @@ func TestLiveCommandOptions(t *testing.T) {
 		t.Fatalf("expected scoped env to override global env, got %q", result.Stdout)
 	}
 
-	result, err = sandbox.Commands.Run(ctx, `python3 -c "import os; print(os.environ['FOO'])"`, &e2b.CommandStartOpts{
+	result, err = runForegroundCommand(sandbox.Commands, ctx, `python3 -c "import os; print(os.environ['FOO'])"`, &e2b.CommandStartOpts{
 		Envs: map[string]string{"FOO": "python-bar"},
 	})
 	if err != nil {
@@ -224,7 +322,7 @@ func TestLiveCommandOptions(t *testing.T) {
 		t.Fatalf("expected python process to receive scoped env, got %q", result.Stdout)
 	}
 
-	result, err = sandbox.Commands.Run(ctx, "pwd", &e2b.CommandStartOpts{Cwd: "/tmp"})
+	result, err = runForegroundCommand(sandbox.Commands, ctx, "pwd", &e2b.CommandStartOpts{Cwd: "/tmp"})
 	if err != nil {
 		t.Fatalf("cwd Run returned error: %v", err)
 	}
@@ -232,7 +330,7 @@ func TestLiveCommandOptions(t *testing.T) {
 		t.Fatalf("expected cwd /tmp, got %q", result.Stdout)
 	}
 
-	result, err = sandbox.Commands.Run(ctx, "whoami", &e2b.CommandStartOpts{User: "root"})
+	result, err = runForegroundCommand(sandbox.Commands, ctx, "whoami", &e2b.CommandStartOpts{User: "root"})
 	if err != nil {
 		t.Fatalf("root user Run returned error: %v", err)
 	}
@@ -240,7 +338,7 @@ func TestLiveCommandOptions(t *testing.T) {
 		t.Fatalf("expected command user root, got %q", result.Stdout)
 	}
 
-	result, err = sandbox.Commands.Run(ctx, `sudo echo "$FOO"`, nil)
+	result, err = runForegroundCommand(sandbox.Commands, ctx, `sudo echo "$FOO"`, nil)
 	if err != nil {
 		t.Fatalf("sudo env isolation Run returned error: %v", err)
 	}
@@ -260,7 +358,7 @@ func TestLiveFilesystem(t *testing.T) {
 	t.Run("write read overwrite and remove", func(t *testing.T) {
 		filePath := path.Join(baseDir, "test_write.txt")
 		content := "This is a test file."
-		info, err := sandbox.Files.Write(ctx, filePath, strings.NewReader(content), nil)
+		info, err := sandbox.Files.Write(ctx, filePath, content, nil)
 		if err != nil {
 			t.Fatalf("Write returned error: %v", err)
 		}
@@ -271,14 +369,14 @@ func TestLiveFilesystem(t *testing.T) {
 		if err != nil || !exists {
 			t.Fatalf("Exists returned exists=%v err=%v", exists, err)
 		}
-		read, err := sandbox.Files.ReadText(ctx, filePath, nil)
+		read, err := readSandboxText(sandbox.Files, ctx, filePath, nil)
 		if err != nil {
 			t.Fatalf("ReadText returned error: %v", err)
 		}
 		if read != content {
 			t.Fatalf("unexpected read content: %q", read)
 		}
-		stream, err := sandbox.Files.ReadStream(ctx, filePath, nil)
+		stream, err := readSandboxStream(sandbox.Files, ctx, filePath, nil)
 		if err != nil {
 			t.Fatalf("ReadStream returned error: %v", err)
 		}
@@ -294,10 +392,10 @@ func TestLiveFilesystem(t *testing.T) {
 		}
 
 		newContent := "New content."
-		if _, err := sandbox.Files.Write(ctx, filePath, strings.NewReader(newContent), nil); err != nil {
+		if _, err := sandbox.Files.Write(ctx, filePath, []byte(newContent), nil); err != nil {
 			t.Fatalf("overwrite Write returned error: %v", err)
 		}
-		read, err = sandbox.Files.ReadText(ctx, filePath, nil)
+		read, err = readSandboxText(sandbox.Files, ctx, filePath, nil)
 		if err != nil {
 			t.Fatalf("ReadText after overwrite returned error: %v", err)
 		}
@@ -325,11 +423,89 @@ func TestLiveFilesystem(t *testing.T) {
 		}
 	})
 
-	t.Run("write files and create parent directories", func(t *testing.T) {
+	t.Run("write relative paths and create parent directories", func(t *testing.T) {
+		relativeFile := fmt.Sprintf("test_write_relative_%d.txt", time.Now().UnixNano())
+		content := "This is a test file."
+		info, err := sandbox.Files.Write(ctx, relativeFile, content, nil)
+		if err != nil {
+			t.Fatalf("Write relative file returned error: %v", err)
+		}
+		if info.Name != relativeFile || info.Type != e2b.FileTypeFile || info.Path != "/home/user/"+relativeFile {
+			t.Fatalf("unexpected relative write info: %#v", info)
+		}
+		exists, err := sandbox.Files.Exists(ctx, relativeFile, nil)
+		if err != nil || !exists {
+			t.Fatalf("Exists relative file returned exists=%v err=%v", exists, err)
+		}
+		read, err := readSandboxText(sandbox.Files, ctx, relativeFile, nil)
+		if err != nil {
+			t.Fatalf("ReadText relative file returned error: %v", err)
+		}
+		if read != content {
+			t.Fatalf("unexpected relative file content: %q", read)
+		}
+
+		nestedRelative := path.Join(fmt.Sprintf("non_existing_dir_%d", time.Now().UnixNano()), "test_write.txt")
+		nestedContent := "This should succeed too."
+		info, err = sandbox.Files.Write(ctx, nestedRelative, []byte(nestedContent), nil)
+		if err != nil {
+			t.Fatalf("Write nested relative file returned error: %v", err)
+		}
+		if info.Name != "test_write.txt" || info.Type != e2b.FileTypeFile || info.Path != "/home/user/"+nestedRelative {
+			t.Fatalf("unexpected nested relative write info: %#v", info)
+		}
+		read, err = readSandboxText(sandbox.Files, ctx, nestedRelative, nil)
+		if err != nil {
+			t.Fatalf("ReadText nested relative file returned error: %v", err)
+		}
+		if read != nestedContent {
+			t.Fatalf("unexpected nested relative file content: %q", read)
+		}
+	})
+
+	t.Run("write files with relative paths normalizes metadata", func(t *testing.T) {
+		suffix := fmt.Sprint(time.Now().UnixNano())
+		files := []e2b.WriteEntry{
+			{Path: "writefiles_test_" + suffix + "_0.txt", Data: "This is a test file 0."},
+			{Path: "writefiles_test_" + suffix + "_1.txt", Data: []byte("This is a test file 1.")},
+		}
+		wantByPath := map[string]string{
+			files[0].Path: "This is a test file 0.",
+			files[1].Path: "This is a test file 1.",
+		}
+
+		infos, err := sandbox.Files.WriteFiles(ctx, files, nil)
+		if err != nil {
+			t.Fatalf("WriteFiles relative paths returned error: %v", err)
+		}
+		if len(infos) != len(files) {
+			t.Fatalf("expected %d write infos, got %#v", len(files), infos)
+		}
+		for i, file := range files {
+			info := infos[i]
+			if info.Name != path.Base(file.Path) || info.Type != e2b.FileTypeFile || info.Path != "/home/user/"+file.Path {
+				t.Fatalf("unexpected relative WriteFiles info[%d]: %#v", i, info)
+			}
+			read, err := readSandboxText(sandbox.Files, ctx, file.Path, nil)
+			if err != nil {
+				t.Fatalf("ReadText relative WriteFiles path %s returned error: %v", file.Path, err)
+			}
+			if read != wantByPath[file.Path] {
+				t.Fatalf("unexpected relative WriteFiles content for %s: %q", file.Path, read)
+			}
+		}
+	})
+
+	t.Run("write files exact metadata and create parent directories", func(t *testing.T) {
 		files := []e2b.WriteEntry{
 			{Path: path.Join(baseDir, "multi", "one.txt"), Data: strings.NewReader("one")},
 			{Path: path.Join(baseDir, "multi", "two.bin"), Data: bytes.NewReader([]byte("two"))},
 			{Path: path.Join(baseDir, "multi", "nested", "three.txt"), Data: strings.NewReader("three")},
+		}
+		wantByPath := map[string]string{
+			files[0].Path: "one",
+			files[1].Path: "two",
+			files[2].Path: "three",
 		}
 		infos, err := sandbox.Files.WriteFiles(ctx, files, nil)
 		if err != nil {
@@ -338,13 +514,17 @@ func TestLiveFilesystem(t *testing.T) {
 		if len(infos) != len(files) {
 			t.Fatalf("expected %d write infos, got %#v", len(files), infos)
 		}
-		for _, file := range files {
-			read, err := sandbox.Files.ReadText(ctx, file.Path, nil)
+		for i, file := range files {
+			info := infos[i]
+			if info.Name != path.Base(file.Path) || info.Type != e2b.FileTypeFile || info.Path != file.Path {
+				t.Fatalf("unexpected WriteFiles info[%d]: %#v", i, info)
+			}
+			read, err := readSandboxText(sandbox.Files, ctx, file.Path, nil)
 			if err != nil {
 				t.Fatalf("ReadText(%s) returned error: %v", file.Path, err)
 			}
-			if read == "" {
-				t.Fatalf("expected non-empty content for %s", file.Path)
+			if read != wantByPath[file.Path] {
+				t.Fatalf("unexpected content for %s: %q", file.Path, read)
 			}
 		}
 	})
@@ -355,14 +535,14 @@ func TestLiveFilesystem(t *testing.T) {
 		if _, err := sandbox.Files.Write(ctx, filePath, strings.NewReader(content), &e2b.FilesystemWriteOpts{Gzip: true}); err != nil {
 			t.Fatalf("gzip Write returned error: %v", err)
 		}
-		read, err := sandbox.Files.ReadText(ctx, filePath, &e2b.FilesystemReadOpts{Gzip: true})
+		read, err := readSandboxText(sandbox.Files, ctx, filePath, &e2b.FilesystemReadOpts{Gzip: true})
 		if err != nil {
 			t.Fatalf("gzip ReadText returned error: %v", err)
 		}
 		if read != content {
 			t.Fatalf("unexpected gzip read content: %q", read)
 		}
-		plain, err := sandbox.Files.ReadText(ctx, filePath, nil)
+		plain, err := readSandboxText(sandbox.Files, ctx, filePath, nil)
 		if err != nil {
 			t.Fatalf("plain ReadText returned error: %v", err)
 		}
@@ -383,7 +563,7 @@ func TestLiveFilesystem(t *testing.T) {
 			t.Fatalf("expected %d gzip write infos, got %#v", len(gzipFiles), infos)
 		}
 		for _, file := range gzipFiles {
-			read, err := sandbox.Files.ReadText(ctx, file.Path, nil)
+			read, err := readSandboxText(sandbox.Files, ctx, file.Path, nil)
 			if err != nil {
 				t.Fatalf("ReadText gzip WriteFiles path %s returned error: %v", file.Path, err)
 			}
@@ -399,7 +579,7 @@ func TestLiveFilesystem(t *testing.T) {
 		if _, err := sandbox.Files.Write(ctx, bytesPath, bytes.NewReader(bytesContent), nil); err != nil {
 			t.Fatalf("Write gzip bytes fixture returned error: %v", err)
 		}
-		readBytes, err := sandbox.Files.Read(ctx, bytesPath, &e2b.FilesystemReadOpts{Gzip: true})
+		readBytes, err := readSandboxBytes(sandbox.Files, ctx, bytesPath, &e2b.FilesystemReadOpts{Gzip: true})
 		if err != nil {
 			t.Fatalf("Read gzip bytes returned error: %v", err)
 		}
@@ -410,7 +590,7 @@ func TestLiveFilesystem(t *testing.T) {
 
 	t.Run("read mkdir rename remove and list edge cases", func(t *testing.T) {
 		missing := path.Join(baseDir, "missing.txt")
-		if _, err := sandbox.Files.ReadText(ctx, missing, nil); err == nil {
+		if _, err := readSandboxText(sandbox.Files, ctx, missing, nil); err == nil {
 			t.Fatal("expected ReadText of missing file to fail")
 		} else {
 			var fileErr *e2b.FileNotFoundError
@@ -425,7 +605,7 @@ func TestLiveFilesystem(t *testing.T) {
 
 		empty := path.Join(baseDir, "empty-file.txt")
 		mustRun(t, ctx, sandbox, "touch "+shellQuote(empty))
-		content, err := sandbox.Files.ReadText(ctx, empty, nil)
+		content, err := readSandboxText(sandbox.Files, ctx, empty, nil)
 		if err != nil {
 			t.Fatalf("ReadText empty file returned error: %v", err)
 		}
@@ -513,13 +693,19 @@ func TestLiveFilesystem(t *testing.T) {
 		assertListEntries(t, sandbox, ctx, listDir, 2, depthTwo)
 		assertListEntries(t, sandbox, ctx, listDir, 3, depthTwo)
 
-		if _, err := sandbox.Files.List(ctx, listDir, &e2b.FilesystemListOpts{Depth: -1}); err == nil {
+		if _, err := sandbox.Files.List(ctx, listDir, &e2b.FilesystemListOpts{Depth: intPtr(-1)}); err == nil {
 			t.Fatal("expected List with invalid depth to fail")
 		} else if !strings.Contains(err.Error(), "depth should be at least") {
 			t.Fatalf("unexpected invalid depth error: %v", err)
 		}
 
-		details, err := sandbox.Files.List(ctx, listDir, &e2b.FilesystemListOpts{Depth: 1})
+		if _, err := sandbox.Files.List(ctx, listDir, &e2b.FilesystemListOpts{Depth: intPtr(0)}); err == nil {
+			t.Fatal("expected List with invalid depth to fail")
+		} else if !strings.Contains(err.Error(), "depth should be at least") {
+			t.Fatalf("unexpected invalid depth error: %v", err)
+		}
+
+		details, err := sandbox.Files.List(ctx, listDir, &e2b.FilesystemListOpts{Depth: intPtr(1)})
 		if err != nil {
 			t.Fatalf("List for details returned error: %v", err)
 		}
@@ -565,7 +751,7 @@ func TestLiveFilesystem(t *testing.T) {
 		if linkInfo.Name != "link.txt" || linkInfo.SymlinkTarget == "" || !strings.HasSuffix(linkInfo.SymlinkTarget, "/file.txt") {
 			t.Fatalf("unexpected symlink info: %#v", linkInfo)
 		}
-		entries, err := sandbox.Files.List(ctx, dir, &e2b.FilesystemListOpts{Depth: 1})
+		entries, err := sandbox.Files.List(ctx, dir, &e2b.FilesystemListOpts{Depth: intPtr(1)})
 		if err != nil {
 			t.Fatalf("List returned error: %v", err)
 		}
@@ -681,7 +867,7 @@ func TestLivePty(t *testing.T) {
 			t.Fatalf("Pty.Create returned error: %v", err)
 		}
 
-		if err := sandbox.Pty.Resize(ctx, handle.Pid, 100, 24, nil); err != nil {
+		if err := sandbox.Pty.Resize(ctx, handle.Pid, e2b.PtySize{Cols: 100, Rows: 24}, nil); err != nil {
 			_, _ = handle.Kill()
 			t.Fatalf("Pty.Resize returned error: %v", err)
 		}
@@ -1148,7 +1334,7 @@ func TestLiveGit(t *testing.T) {
 		if _, err := sandbox.Git.Clone(ctx, daemon.remoteURL, &e2b.GitCloneOpts{Path: clonePath}); err != nil {
 			t.Fatalf("Git.Clone returned error: %v", err)
 		}
-		contents, err := sandbox.Files.ReadText(ctx, path.Join(clonePath, "README.md"), nil)
+		contents, err := readSandboxText(sandbox.Files, ctx, path.Join(clonePath, "README.md"), nil)
 		if err != nil || !strings.Contains(contents, "hello") {
 			t.Fatalf("expected cloned README to contain hello, contents=%q err=%v", contents, err)
 		}
@@ -1171,7 +1357,7 @@ func TestLiveGit(t *testing.T) {
 		if _, err := sandbox.Git.Pull(ctx, clonePath, nil); err != nil {
 			t.Fatalf("Git.Pull returned error: %v", err)
 		}
-		contents, err = sandbox.Files.ReadText(ctx, path.Join(clonePath, "README.md"), nil)
+		contents, err = readSandboxText(sandbox.Files, ctx, path.Join(clonePath, "README.md"), nil)
 		if err != nil || !strings.Contains(contents, "more") {
 			t.Fatalf("expected pulled clone to contain update, contents=%q err=%v", contents, err)
 		}
@@ -1315,7 +1501,10 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 		time.Sleep(6 * time.Second)
 
 		requestTimeoutMs := 5000
-		running, err := timeoutSandbox.IsRunning(ctx, &struct{ RequestTimeoutMs *int }{RequestTimeoutMs: &requestTimeoutMs})
+		running, err := timeoutSandbox.IsRunning(ctx, &struct {
+			RequestTimeoutMs *int
+			Signal           context.Context
+		}{RequestTimeoutMs: &requestTimeoutMs})
 		if err != nil {
 			t.Fatalf("IsRunning after shortened timeout returned error: %v", err)
 		}
@@ -1447,7 +1636,7 @@ func TestLiveSandboxLifecycle(t *testing.T) {
 		}
 	}
 
-	if _, err := sandbox.Commands.Run(ctx, "python3 - <<'PY'\nprint(sum(range(1000)))\nPY", nil); err != nil {
+	if _, err := runForegroundCommand(sandbox.Commands, ctx, "python3 - <<'PY'\nprint(sum(range(1000)))\nPY", nil); err != nil {
 		t.Fatalf("metrics warmup command returned error: %v", err)
 	}
 	t.Run("metrics", func(t *testing.T) {
@@ -1495,7 +1684,7 @@ func TestLiveSandboxLifecycleAutoPause(t *testing.T) {
 			TimeoutMs: &timeoutMs,
 			Lifecycle: &e2b.SandboxLifecycle{
 				OnTimeout:  "pause",
-				AutoResume: false,
+				AutoResume: boolPtr(false),
 			},
 			Metadata: map[string]string{
 				"sandboxTestId": liveSandboxMetadata(t)["sandboxTestId"] + "-auto-pause-" + fmt.Sprint(time.Now().UnixNano()),
@@ -1517,7 +1706,7 @@ func TestLiveSandboxLifecycleAutoPause(t *testing.T) {
 			TimeoutMs: &timeoutMs,
 			Lifecycle: &e2b.SandboxLifecycle{
 				OnTimeout:  "pause",
-				AutoResume: true,
+				AutoResume: boolPtr(true),
 			},
 			Metadata: map[string]string{
 				"sandboxTestId": liveSandboxMetadata(t)["sandboxTestId"] + "-auto-resume-" + fmt.Sprint(time.Now().UnixNano()),
@@ -1525,7 +1714,7 @@ func TestLiveSandboxLifecycleAutoPause(t *testing.T) {
 		})
 
 		port := 8000
-		handle, err := sandbox.Commands.RunBackground(ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
 		if err != nil {
 			t.Fatalf("RunBackground auto-resume server returned error: %v", err)
 		}
@@ -1584,7 +1773,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 		if err != nil || !exists {
 			t.Fatalf("expected file to exist before pause, exists=%v err=%v", exists, err)
 		}
-		readContent, err := sandbox.Files.ReadText(ctx, filename, nil)
+		readContent, err := readSandboxText(sandbox.Files, ctx, filename, nil)
 		if err != nil || readContent != content {
 			t.Fatalf("unexpected file content before pause: %q err=%v", readContent, err)
 		}
@@ -1595,7 +1784,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 		if err != nil || !exists {
 			t.Fatalf("expected file to exist after resume, exists=%v err=%v", exists, err)
 		}
-		readContent, err = sandbox.Files.ReadText(ctx, filename, nil)
+		readContent, err = readSandboxText(sandbox.Files, ctx, filename, nil)
 		if err != nil || readContent != content {
 			t.Fatalf("unexpected file content after resume: %q err=%v", readContent, err)
 		}
@@ -1607,7 +1796,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 				"sandboxTestId": liveSandboxMetadata(t)["sandboxTestId"] + "-ongoing-process-" + fmt.Sprint(time.Now().UnixNano()),
 			},
 		})
-		handle, err := sandbox.Commands.RunBackground(ctx, "sleep 3600", nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, "sleep 3600", nil)
 		if err != nil {
 			t.Fatalf("RunBackground sleep returned error: %v", err)
 		}
@@ -1640,7 +1829,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 			},
 		})
 		filename := "test_long_running.txt"
-		if _, err := sandbox.Commands.RunBackground(ctx, `sleep 2 && echo "done" > /home/user/`+filename, nil); err != nil {
+		if _, err := runBackgroundCommand(sandbox.Commands, ctx, `sleep 2 && echo "done" > /home/user/`+filename, nil); err != nil {
 			t.Fatalf("RunBackground delayed file command returned error: %v", err)
 		}
 		exists, err := sandbox.Files.Exists(ctx, filename, nil)
@@ -1658,7 +1847,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 		if err != nil || !exists {
 			t.Fatalf("expected delayed file to exist after resume, exists=%v err=%v", exists, err)
 		}
-		content, err := sandbox.Files.ReadText(ctx, filename, nil)
+		content, err := readSandboxText(sandbox.Files, ctx, filename, nil)
 		if err != nil {
 			t.Fatalf("ReadText delayed file returned error: %v", err)
 		}
@@ -1674,7 +1863,7 @@ func TestLiveSandboxPauseResumeStateRetention(t *testing.T) {
 			},
 		})
 		port := 8000
-		handle, err := sandbox.Commands.RunBackground(ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
 		if err != nil {
 			t.Fatalf("RunBackground pause/resume server returned error: %v", err)
 		}
@@ -1691,41 +1880,104 @@ func TestLiveSandboxHost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), liveTestTimeout)
 	defer cancel()
 
-	sandbox := newLiveSandbox(t, ctx)
-	port := 8081
-	handle, err := sandbox.Commands.RunBackground(ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
-	if err != nil {
-		t.Fatalf("RunBackground server returned error: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = handle.Kill()
+	t.Run("running sandbox host responds", func(t *testing.T) {
+		sandbox := newLiveSandbox(t, ctx)
+		port := 8081
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
+		if err != nil {
+			t.Fatalf("RunBackground server returned error: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = handle.Kill()
+		})
+
+		url := "https://" + sandbox.GetHost(port)
+		client := &http.Client{Timeout: 5 * time.Second}
+		deadline := time.Now().Add(60 * time.Second)
+		var lastErr error
+		for time.Now().Before(deadline) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatalf("failed to create host request: %v", err)
+			}
+			if sandbox.TrafficAccessToken != "" {
+				req.Header.Set("e2b-traffic-access-token", sandbox.TrafficAccessToken)
+			}
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return
+				}
+				lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
+			} else {
+				lastErr = err
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Fatalf("sandbox host did not become reachable: %v", lastErr)
 	})
 
-	url := "https://" + sandbox.GetHost(port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(60 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			t.Fatalf("failed to create host request: %v", err)
+	t.Run("killed sandbox host returns 502 payload", func(t *testing.T) {
+		sandbox := newLiveSandbox(t, ctx)
+		port := 3000
+		url := "https://" + sandbox.GetHost(port)
+
+		if err := sandbox.Kill(ctx, nil); err != nil {
+			t.Fatalf("Kill returned error: %v", err)
 		}
-		if sandbox.TrafficAccessToken != "" {
-			req.Header.Set("e2b-traffic-access-token", sandbox.TrafficAccessToken)
-		}
-		resp, err := client.Do(req)
-		if err == nil {
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		deadline := time.Now().Add(30 * time.Second)
+		var lastStatus int
+		var lastBody []byte
+		var lastErr error
+		for time.Now().Before(deadline) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatalf("failed to create killed-host request: %v", err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+			if readErr != nil {
+				t.Fatalf("failed to read killed-host response body: %v", readErr)
+			}
+
+			lastStatus = resp.StatusCode
+			lastBody = body
+			if resp.StatusCode == http.StatusBadGateway {
+				var payload struct {
+					Message   string `json:"message"`
+					SandboxID string `json:"sandboxId"`
+					Code      int    `json:"code"`
+				}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("failed to decode killed-host response body %q: %v", string(body), err)
+				}
+				if payload.Message != "The sandbox was not found" {
+					t.Fatalf("unexpected killed-host message: %#v", payload)
+				}
+				if payload.Code != http.StatusBadGateway {
+					t.Fatalf("unexpected killed-host code: %#v", payload)
+				}
+				if payload.SandboxID == "" || !strings.HasPrefix(sandbox.SandboxID, payload.SandboxID) {
+					t.Fatalf("expected killed-host sandboxId prefix of %q, got %#v", sandbox.SandboxID, payload)
+				}
 				return
 			}
-			lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
-		} else {
-			lastErr = err
+
+			time.Sleep(500 * time.Millisecond)
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Fatalf("sandbox host did not become reachable: %v", lastErr)
+
+		t.Fatalf("killed sandbox host did not return 502 payload: status=%d body=%q err=%v", lastStatus, string(lastBody), lastErr)
+	})
 }
 
 func TestLiveSandboxPublicTraffic(t *testing.T) {
@@ -1737,7 +1989,7 @@ func TestLiveSandboxPublicTraffic(t *testing.T) {
 		sandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{
 			Secure: &secure,
 			Network: &e2b.SandboxNetworkOpts{
-				AllowPublicTraffic: false,
+				AllowPublicTraffic: boolPtr(false),
 			},
 		})
 		if sandbox.TrafficAccessToken == "" {
@@ -1745,7 +1997,7 @@ func TestLiveSandboxPublicTraffic(t *testing.T) {
 		}
 
 		port := 8082
-		handle, err := sandbox.Commands.RunBackground(ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
 		if err != nil {
 			t.Fatalf("RunBackground server returned error: %v", err)
 		}
@@ -1759,12 +2011,12 @@ func TestLiveSandboxPublicTraffic(t *testing.T) {
 	t.Run("allow public traffic true works without token", func(t *testing.T) {
 		sandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{
 			Network: &e2b.SandboxNetworkOpts{
-				AllowPublicTraffic: true,
+				AllowPublicTraffic: boolPtr(true),
 			},
 		})
 
 		port := 8083
-		handle, err := sandbox.Commands.RunBackground(ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, fmt.Sprintf("python3 -m http.server %d", port), nil)
 		if err != nil {
 			t.Fatalf("RunBackground server returned error: %v", err)
 		}
@@ -1777,7 +2029,7 @@ func TestLiveSandboxPublicTraffic(t *testing.T) {
 	t.Run("mask request host", func(t *testing.T) {
 		sandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{
 			Network: &e2b.SandboxNetworkOpts{
-				AllowPublicTraffic: true,
+				AllowPublicTraffic: boolPtr(true),
 				MaskRequestHost:    "custom-host.example.com:${PORT}",
 			},
 		})
@@ -1799,7 +2051,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
 http.server.HTTPServer(("", %d), H).serve_forever()
 PY`, shellQuote(outputFile), port)
-		handle, err := sandbox.Commands.RunBackground(ctx, serverCmd, nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, serverCmd, nil)
 		if err != nil {
 			t.Fatalf("RunBackground masked host server returned error: %v", err)
 		}
@@ -1807,7 +2059,7 @@ PY`, shellQuote(outputFile), port)
 
 		url := "https://" + sandbox.GetHost(port)
 		waitForSandboxHostStatus(t, ctx, url, "", http.StatusOK)
-		result, err := sandbox.Commands.Run(ctx, "cat "+shellQuote(outputFile), nil)
+		result, err := runForegroundCommand(sandbox.Commands, ctx, "cat "+shellQuote(outputFile), nil)
 		if err != nil {
 			t.Fatalf("cat captured headers returned error: %v", err)
 		}
@@ -1832,7 +2084,7 @@ func TestLiveSandboxNetwork(t *testing.T) {
 		},
 	})
 
-	allowed, err := sandbox.Commands.Run(ctx, "curl --connect-timeout 3 --max-time 5 -s -o /dev/null -w '%{http_code}' https://1.1.1.1", nil)
+	allowed, err := runForegroundCommand(sandbox.Commands, ctx, "curl --connect-timeout 3 --max-time 5 -s -o /dev/null -w '%{http_code}' https://1.1.1.1", nil)
 	if err != nil {
 		t.Skipf("allowed network route is not reachable in this environment: %v", err)
 	}
@@ -1840,11 +2092,109 @@ func TestLiveSandboxNetwork(t *testing.T) {
 		t.Skipf("allowed network route returned unexpected status in this environment: %q", allowed.Stdout)
 	}
 
-	_, err = sandbox.Commands.Run(ctx, "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8", nil)
+	_, err = runForegroundCommand(sandbox.Commands, ctx, "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8", nil)
 	var exitErr *e2b.CommandExitError
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("expected denied IP to return CommandExitError, got %T %v", err, err)
 	}
+}
+
+func TestLiveSandboxNetworkRules(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveTestTimeout)
+	defer cancel()
+
+	const injectedHeader = "X-E2B-Test-Token"
+	const injectedValue = "e2b-transform-value-123"
+
+	sandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{
+		Network: &e2b.SandboxNetworkOpts{
+			AllowOut: []string{"httpbin.e2b.team"},
+			DenyOut:  []string{e2b.ALL_TRAFFIC},
+			Rules: e2b.SandboxNetworkRules{
+				"httpbin.e2b.team": {
+					{
+						Transform: &e2b.SandboxNetworkTransform{
+							Headers: map[string]string{
+								injectedHeader: injectedValue,
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	result, err := runForegroundCommand(sandbox.Commands, ctx, "curl -sS --max-time 10 https://httpbin.e2b.team/headers", nil)
+	if err != nil {
+		t.Skipf("network rules are not reachable in this environment: %v", err)
+	}
+
+	var parsed struct {
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &parsed); err != nil {
+		t.Fatalf("failed to decode reflected headers: %v", err)
+	}
+
+	if parsed.Headers[injectedHeader] != injectedValue {
+		t.Skipf("network transform is not enforced in this environment; reflected headers: %#v", parsed.Headers)
+	}
+}
+
+func TestLiveSandboxUpdateNetwork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveTestTimeout)
+	defer cancel()
+
+	t.Run("applies new egress rules", func(t *testing.T) {
+		sandbox := newLiveSandbox(t, ctx)
+
+		before, err := runForegroundCommand(sandbox.Commands, ctx, "curl -s -o /dev/null -w '%{http_code}' https://8.8.8.8", nil)
+		if err != nil {
+			t.Skipf("baseline network route is not reachable in this environment: %v", err)
+		}
+		if before.ExitCode != 0 {
+			t.Skipf("baseline network route returned unexpected exit code in this environment: %d", before.ExitCode)
+		}
+
+		if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{
+			DenyOut: []string{"8.8.8.8"},
+		}, nil); err != nil {
+			t.Fatalf("UpdateNetwork returned error: %v", err)
+		}
+
+		_, err = runForegroundCommand(sandbox.Commands, ctx, "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8", nil)
+		var exitErr *e2b.CommandExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected updated deny rule to return CommandExitError, got %T %v", err, err)
+		}
+	})
+
+	t.Run("clears existing rules when fields are omitted", func(t *testing.T) {
+		sandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{
+			Network: &e2b.SandboxNetworkOpts{
+				DenyOut:  []string{e2b.ALL_TRAFFIC},
+				AllowOut: []string{"1.1.1.1"},
+			},
+		})
+
+		_, err := runForegroundCommand(sandbox.Commands, ctx, "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8", nil)
+		var exitErr *e2b.CommandExitError
+		if !errors.As(err, &exitErr) {
+			t.Skipf("baseline deny rule is not enforced in this environment: %T %v", err, err)
+		}
+
+		if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{}, nil); err != nil {
+			t.Fatalf("UpdateNetwork returned error: %v", err)
+		}
+
+		cleared, err := runForegroundCommand(sandbox.Commands, ctx, "curl -s -o /dev/null -w '%{http_code}' https://8.8.8.8", nil)
+		if err != nil {
+			t.Fatalf("expected omitted update fields to clear deny rules, got %v", err)
+		}
+		if cleared.ExitCode != 0 {
+			t.Fatalf("expected cleared route to keep exit code 0, got %d", cleared.ExitCode)
+		}
+	})
 }
 
 func TestLiveSandboxInternetAccess(t *testing.T) {
@@ -1860,7 +2210,7 @@ func TestLiveSandboxInternetAccess(t *testing.T) {
 
 	allowInternet = false
 	disabledSandbox := newLiveSandboxWithOpts(t, ctx, &e2b.SandboxOpts{AllowInternetAccess: &allowInternet})
-	_, err := disabledSandbox.Commands.Run(ctx, "curl --connect-timeout 3 --max-time 5 -Is https://connectivitycheck.gstatic.com/generate_204", nil)
+	_, err := runForegroundCommand(disabledSandbox.Commands, ctx, "curl --connect-timeout 3 --max-time 5 -Is https://connectivitycheck.gstatic.com/generate_204", nil)
 	if err == nil {
 		t.Skip("allowInternetAccess=false is not enforced in this environment")
 	}
@@ -1911,6 +2261,186 @@ func TestLiveRandomness(t *testing.T) {
 	})
 }
 
+func TestLiveClaudeCodeInterpreterRandomness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveTestTimeout)
+	defer cancel()
+
+	if os.Getenv("E2B_API_KEY") == "" {
+		t.Skip("E2B_API_KEY is required for integration tests")
+	}
+
+	exists, err := e2b.Exists(ctx, "claude-code-interpreter", liveConnectionOpts())
+	if err != nil {
+		t.Skipf("could not check claude-code-interpreter template alias: %v", err)
+	}
+	if !exists {
+		t.Skip("claude-code-interpreter template alias is unavailable in this environment")
+	}
+
+	template := "claude-code-interpreter"
+
+	t.Run("python random numbers differ in same sandbox", func(t *testing.T) {
+		sandbox := createLiveSandboxFromTemplate(t, ctx, template, "claude-random-same")
+		first, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		second, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors in the same sandbox, got %q", first)
+		}
+	})
+
+	t.Run("python random numbers differ across sandboxes from same template", func(t *testing.T) {
+		firstSandbox := createLiveSandboxFromTemplate(t, ctx, template, "claude-random-first")
+		first, ok := runNumpyRandomVector(t, ctx, firstSandbox)
+		if !ok {
+			return
+		}
+		if err := firstSandbox.Kill(ctx, nil); err != nil {
+			t.Fatalf("Kill first randomness sandbox returned error: %v", err)
+		}
+
+		secondSandbox := createLiveSandboxFromTemplate(t, ctx, template, "claude-random-second")
+		second, ok := runNumpyRandomVector(t, ctx, secondSandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors across sandboxes, got %q", first)
+		}
+	})
+}
+
+func TestLiveClaudeCodeInterpreterDerivedNumpyTemplateRandomness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	exists, err := e2b.Exists(ctx, "claude-code-interpreter", liveConnectionOpts())
+	if err != nil {
+		t.Skipf("could not check claude-code-interpreter template alias: %v", err)
+	}
+	if !exists {
+		t.Skip("claude-code-interpreter template alias is unavailable in this environment")
+	}
+
+	name := fmt.Sprintf("go-sdk-claude-derived-numpy-%d", time.Now().UnixNano())
+	template := e2b.Template(nil).
+		FromTemplate("claude-code-interpreter").
+		SkipCache().
+		RunCmd("python3 -m pip install --break-system-packages --no-cache-dir numpy")
+
+	info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Skipf("could not build temporary claude-code-interpreter+numpy template in this environment: %v", err)
+	}
+	if info == nil || info.TemplateID == "" {
+		t.Fatalf("expected temporary claude-code-interpreter+numpy build to return template ID, got %#v", info)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+	}()
+
+	t.Run("python random numbers differ in same sandbox", func(t *testing.T) {
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "claude-derived-numpy-same")
+		first, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		second, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors in the same sandbox, got %q", first)
+		}
+	})
+
+	t.Run("python random numbers differ across sandboxes from same template", func(t *testing.T) {
+		firstSandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "claude-derived-numpy-first")
+		first, ok := runNumpyRandomVector(t, ctx, firstSandbox)
+		if !ok {
+			return
+		}
+		if err := firstSandbox.Kill(ctx, nil); err != nil {
+			t.Fatalf("Kill first randomness sandbox returned error: %v", err)
+		}
+
+		secondSandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "claude-derived-numpy-second")
+		second, ok := runNumpyRandomVector(t, ctx, secondSandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors across sandboxes, got %q", first)
+		}
+	})
+}
+
+func TestLiveTemporaryPythonNumpyTemplateRandomness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	name := fmt.Sprintf("go-sdk-python-numpy-%d", time.Now().UnixNano())
+	template := e2b.Template(nil).
+		FromPythonImage("3.12").
+		SkipCache().
+		RunCmd("python3 -m pip install --no-cache-dir numpy")
+
+	info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Skipf("could not build temporary python+numpy template in this environment: %v", err)
+	}
+	if info == nil || info.TemplateID == "" {
+		t.Fatalf("expected temporary python+numpy template build to return template ID, got %#v", info)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+	}()
+
+	t.Run("python random numbers differ in same sandbox", func(t *testing.T) {
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "tmp-python-numpy-same")
+		first, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		second, ok := runNumpyRandomVector(t, ctx, sandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors in the same sandbox, got %q", first)
+		}
+	})
+
+	t.Run("python random numbers differ across sandboxes from same template", func(t *testing.T) {
+		firstSandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "tmp-python-numpy-first")
+		first, ok := runNumpyRandomVector(t, ctx, firstSandbox)
+		if !ok {
+			return
+		}
+		if err := firstSandbox.Kill(ctx, nil); err != nil {
+			t.Fatalf("Kill first randomness sandbox returned error: %v", err)
+		}
+
+		secondSandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "tmp-python-numpy-second")
+		second, ok := runNumpyRandomVector(t, ctx, secondSandbox)
+		if !ok {
+			return
+		}
+		if first == second {
+			t.Fatalf("expected different random vectors across sandboxes, got %q", first)
+		}
+	})
+}
+
 func TestLiveStress(t *testing.T) {
 	if os.Getenv("E2B_RUN_STRESS") != "1" {
 		t.Skip("set E2B_RUN_STRESS=1 to run expensive live stress tests")
@@ -1935,7 +2465,8 @@ func TestLiveStress(t *testing.T) {
 				defer wg.Done()
 				timeoutMs := int((10 * time.Minute) / time.Millisecond)
 				sandbox, err := e2b.Create(ctx, template, &e2b.SandboxOpts{
-					TimeoutMs: &timeoutMs,
+					ConnectionOpts: mergeLiveConnectionOpts(e2b.ConnectionOpts{}),
+					TimeoutMs:      &timeoutMs,
 					Metadata: map[string]string{
 						"sandboxTestId": fmt.Sprintf("%s-heavy-%d-%d", metadataPrefix, i, time.Now().UnixNano()),
 					},
@@ -1957,7 +2488,7 @@ func TestLiveStress(t *testing.T) {
 					errs <- fmt.Errorf("write sandbox %d: %w", i, err)
 					return
 				}
-				readBack, err := sandbox.Files.Read(ctx, "heavy-file", &e2b.FilesystemReadOpts{
+				readBack, err := readSandboxBytes(sandbox.Files, ctx, "heavy-file", &e2b.FilesystemReadOpts{
 					FilesystemRequestOpts: e2b.FilesystemRequestOpts{RequestTimeoutMs: &requestTimeoutMs},
 				})
 				if err != nil {
@@ -1991,7 +2522,8 @@ func TestLiveStress(t *testing.T) {
 		for i := 0; i < sandboxCount; i++ {
 			timeoutMs := int((10 * time.Minute) / time.Millisecond)
 			sandbox, err := e2b.Create(ctx, template, &e2b.SandboxOpts{
-				TimeoutMs: &timeoutMs,
+				ConnectionOpts: mergeLiveConnectionOpts(e2b.ConnectionOpts{}),
+				TimeoutMs:      &timeoutMs,
 				Metadata: map[string]string{
 					"sandboxTestId": fmt.Sprintf("%s-host-%d-%d", liveSandboxMetadata(t)["sandboxTestId"], i, time.Now().UnixNano()),
 				},
@@ -2099,11 +2631,11 @@ func TestLiveSnapshots(t *testing.T) {
 		if !dirExists {
 			t.Fatalf("%s expected directory from snapshot to exist", name)
 		}
-		config, err := sbx.Files.ReadText(ctx, configPath, nil)
+		config, err := readSandboxText(sbx.Files, ctx, configPath, nil)
 		if err != nil {
 			t.Fatalf("%s ReadText config returned error: %v", name, err)
 		}
-		data, err := sbx.Files.ReadText(ctx, dataPath, nil)
+		data, err := readSandboxText(sbx.Files, ctx, dataPath, nil)
 		if err != nil {
 			t.Fatalf("%s ReadText data returned error: %v", name, err)
 		}
@@ -2115,11 +2647,11 @@ func TestLiveSnapshots(t *testing.T) {
 	if _, err := branch1.Files.Write(ctx, dataPath, strings.NewReader("modified in branch1"), nil); err != nil {
 		t.Fatalf("branch1 Write modified data returned error: %v", err)
 	}
-	branch1Data, err := branch1.Files.ReadText(ctx, dataPath, nil)
+	branch1Data, err := readSandboxText(branch1.Files, ctx, dataPath, nil)
 	if err != nil {
 		t.Fatalf("branch1 ReadText modified data returned error: %v", err)
 	}
-	branch2Data, err := branch2.Files.ReadText(ctx, dataPath, nil)
+	branch2Data, err := readSandboxText(branch2.Files, ctx, dataPath, nil)
 	if err != nil {
 		t.Fatalf("branch2 ReadText data returned error: %v", err)
 	}
@@ -2148,7 +2680,7 @@ func TestLiveSnapshots(t *testing.T) {
 		t.Fatalf("second DeleteSnapshot returned error: %v", err)
 	}
 	if deletedAgain {
-		t.Log("second DeleteSnapshot returned true; current API treats repeated snapshot delete as idempotent")
+		t.Fatal("expected second DeleteSnapshot to return false")
 	}
 	snapshotID = ""
 }
@@ -2162,8 +2694,19 @@ func TestLiveFileSigning(t *testing.T) {
 	validExpiration := 10
 	expiredExpiration := -10
 
-	if _, err := sandbox.Files.Write(ctx, "hello.txt", strings.NewReader("hello world"), nil); err != nil {
+	info, err := sandbox.Files.Write(ctx, "hello.txt", strings.NewReader("hello world"), nil)
+	if err != nil {
 		t.Fatalf("Write hello.txt returned error: %v", err)
+	}
+	if info.Name != "hello.txt" || info.Type != e2b.FileTypeFile || info.Path != "/home/user/hello.txt" {
+		t.Fatalf("unexpected secure write info: %#v", info)
+	}
+	readBack, err := readSandboxText(sandbox.Files, ctx, "hello.txt", nil)
+	if err != nil {
+		t.Fatalf("ReadText hello.txt on secure sandbox returned error: %v", err)
+	}
+	if readBack != "hello world" {
+		t.Fatalf("unexpected secure readback content: %q", readBack)
 	}
 
 	t.Run("secure connect", func(t *testing.T) {
@@ -2207,6 +2750,25 @@ func TestLiveFileSigning(t *testing.T) {
 		waitForFilesystemEvent(t, events, filename)
 	})
 
+	t.Run("secure command run", func(t *testing.T) {
+		result, err := runForegroundCommand(sandbox.Commands, ctx, "echo Hello World!", nil)
+		if err != nil {
+			t.Fatalf("Run on secure sandbox returned error: %v", err)
+		}
+		if result.Stdout != "Hello World!\n" {
+			t.Fatalf("unexpected secure command stdout: %q", result.Stdout)
+		}
+	})
+
+	plainDownload, err := sandbox.DownloadUrl("hello.txt", nil)
+	if err != nil {
+		t.Fatalf("DownloadUrl without expiration returned error: %v", err)
+	}
+	status, body := fetchText(t, ctx, plainDownload)
+	if status != http.StatusOK || body != "hello world" {
+		t.Fatalf("unexpected signed download without expiration response: status=%d body=%q", status, body)
+	}
+
 	validDownload, err := sandbox.DownloadUrl("hello.txt", &struct {
 		UseSignatureExpiration *int
 		User                   string
@@ -2215,7 +2777,7 @@ func TestLiveFileSigning(t *testing.T) {
 		skipIfSigningUnavailable(t, err)
 		t.Fatalf("DownloadUrl returned error: %v", err)
 	}
-	status, body := fetchText(t, ctx, validDownload)
+	status, body = fetchText(t, ctx, validDownload)
 	if status != http.StatusOK || body != "hello world" {
 		t.Fatalf("unexpected signed download response: status=%d body=%q", status, body)
 	}
@@ -2262,6 +2824,19 @@ func TestLiveFileSigning(t *testing.T) {
 	}
 	assertUploadResponsePath(t, body, "/home/user/uploaded.txt")
 
+	rootUploadURL, err := sandbox.UploadUrl("root-uploaded.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{UseSignatureExpiration: &validExpiration, User: "root"})
+	if err != nil {
+		t.Fatalf("root UploadUrl returned error: %v", err)
+	}
+	status, body = postMultipartFile(t, ctx, rootUploadURL, "root-uploaded.txt", "file content")
+	if status != http.StatusOK {
+		t.Fatalf("unexpected root signed upload response: status=%d body=%q", status, body)
+	}
+	assertUploadResponsePath(t, body, "/root/root-uploaded.txt")
+
 	expiredUploadURL, err := sandbox.UploadUrl("expired-upload.txt", &struct {
 		UseSignatureExpiration *int
 		User                   string
@@ -2275,13 +2850,134 @@ func TestLiveFileSigning(t *testing.T) {
 	}
 }
 
+func TestLiveVolumeLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), liveTestTimeout)
+	defer cancel()
+
+	requireLiveEnv(t)
+	if os.Getenv("E2B_API_KEY") == "" {
+		t.Skip("E2B_API_KEY is required for volume integration tests")
+	}
+	requestTimeoutMs := int((2 * time.Minute) / time.Millisecond)
+
+	volumeName := "go-sdk-volume-" + fmt.Sprint(time.Now().UnixNano())
+	vol, err := e2bvol.Create(ctx, volumeName, &e2bvol.ConnectionOpts{
+		ApiKey:           os.Getenv("E2B_API_KEY"),
+		AccessToken:      os.Getenv("E2B_ACCESS_TOKEN"),
+		Domain:           os.Getenv("E2B_DOMAIN"),
+		ApiUrl:           os.Getenv("E2B_API_URL"),
+		RequestTimeoutMs: &requestTimeoutMs,
+	})
+	if err != nil {
+		t.Fatalf("Create volume returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = e2bvol.Destroy(context.Background(), vol.VolumeID, &e2bvol.ConnectionOpts{
+			ApiKey:      os.Getenv("E2B_API_KEY"),
+			AccessToken: os.Getenv("E2B_ACCESS_TOKEN"),
+			Domain:      os.Getenv("E2B_DOMAIN"),
+			ApiUrl:      os.Getenv("E2B_API_URL"),
+		})
+	})
+
+	t.Run("control plane lifecycle", func(t *testing.T) {
+		if vol.Name != volumeName {
+			t.Fatalf("expected created volume name %q, got %q", volumeName, vol.Name)
+		}
+		if vol.VolumeID == "" || vol.Token == "" {
+			t.Fatalf("expected created volume to include ID and token, got %#v", vol)
+		}
+
+		info, err := e2bvol.GetInfo(ctx, vol.VolumeID, &e2bvol.ConnectionOpts{
+			ApiKey:      os.Getenv("E2B_API_KEY"),
+			AccessToken: os.Getenv("E2B_ACCESS_TOKEN"),
+			Domain:      os.Getenv("E2B_DOMAIN"),
+			ApiUrl:      os.Getenv("E2B_API_URL"),
+		})
+		if err != nil {
+			t.Fatalf("GetInfo returned error: %v", err)
+		}
+		if info.VolumeID != vol.VolumeID || info.Name != volumeName {
+			t.Fatalf("unexpected volume info: %#v", info)
+		}
+
+		entries, err := e2bvol.List(ctx, &e2bvol.ConnectionOpts{
+			ApiKey:      os.Getenv("E2B_API_KEY"),
+			AccessToken: os.Getenv("E2B_ACCESS_TOKEN"),
+			Domain:      os.Getenv("E2B_DOMAIN"),
+			ApiUrl:      os.Getenv("E2B_API_URL"),
+		})
+		if err != nil {
+			t.Fatalf("List volumes returned error: %v", err)
+		}
+		if !liveVolumeListContains(entries, vol.VolumeID, volumeName) {
+			t.Fatalf("expected created volume in control-plane list, got %#v", entries)
+		}
+	})
+
+	t.Run("file operations lifecycle", func(t *testing.T) {
+		dirPath := "/multi-file-dir"
+		files := []string{"file1.txt", "file2.txt", "file3.txt"}
+
+		dirStat, err := vol.MakeDir(ctx, dirPath, &e2bvol.VolumeWriteOptions{})
+		if err != nil {
+			t.Skipf("volume content API does not support makeDir in this environment; JS shows the same NotFound behavior: %v", err)
+		}
+		if dirStat.Type != e2bvol.VolumeFileTypeDirectory {
+			t.Fatalf("expected directory type, got %#v", dirStat)
+		}
+
+		for _, fileName := range files {
+			path := dirPath + "/" + fileName
+			content := "Content of " + fileName
+			stat, err := vol.WriteFile(ctx, path, strings.NewReader(content), nil)
+			if err != nil {
+				t.Fatalf("WriteFile(%s) returned error: %v", path, err)
+			}
+			if stat.Type != e2bvol.VolumeFileTypeFile || stat.Name != fileName {
+				t.Fatalf("unexpected file stat for %s: %#v", path, stat)
+			}
+		}
+
+		listing, err := vol.List(ctx, dirPath, nil)
+		if err != nil {
+			t.Fatalf("List(%s) returned error: %v", dirPath, err)
+		}
+		if len(listing) < len(files) {
+			t.Fatalf("expected at least %d files in %s, got %#v", len(files), dirPath, listing)
+		}
+
+		for _, fileName := range files {
+			path := dirPath + "/" + fileName
+			content, err := readVolumeText(vol, ctx, path, nil)
+			if err != nil {
+				t.Fatalf("ReadFileText(%s) returned error: %v", path, err)
+			}
+			if content != "Content of "+fileName {
+				t.Fatalf("unexpected file content for %s: %q", path, content)
+			}
+		}
+
+		if err := vol.Remove(ctx, dirPath, nil); err != nil {
+			t.Fatalf("Remove(%s) returned error: %v", dirPath, err)
+		}
+		exists, err := vol.Exists(ctx, dirPath, nil)
+		if err != nil {
+			t.Fatalf("Exists(%s) returned error: %v", dirPath, err)
+		}
+		if exists {
+			t.Fatalf("expected %s to be removed", dirPath)
+		}
+	})
+}
+
 func TestLiveTemplateBuildUploadAndTags(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	requireLiveEnv(t)
 
 	name := "go-sdk-template-" + fmt.Sprint(time.Now().UnixNano())
-	exists, err := e2b.Exists(ctx, name, liveBuildOptions())
+	exists, err := e2b.Exists(ctx, name, liveConnectionOpts())
 	if err != nil {
 		skipIfTemplateAPIUnavailable(t, err)
 		t.Fatalf("Template.Exists returned error: %v", err)
@@ -2311,7 +3007,7 @@ func TestLiveTemplateBuildUploadAndTags(t *testing.T) {
 		_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
 	}()
 
-	exists, err = e2b.Exists(ctx, name, liveBuildOptions())
+	exists, err = e2b.Exists(ctx, name, liveConnectionOpts())
 	if err != nil {
 		t.Fatalf("Template.Exists after build returned error: %v", err)
 	}
@@ -2320,18 +3016,152 @@ func TestLiveTemplateBuildUploadAndTags(t *testing.T) {
 	}
 
 	tag := name + "-integration"
-	if _, err := e2b.AssignTags(ctx, name, []string{tag}, liveBuildOptions()); err != nil {
+	if _, err := e2b.AssignTags(ctx, name, []string{tag}, liveConnectionOpts()); err != nil {
 		t.Fatalf("AssignTags returned error: %v", err)
 	}
-	tags, err := e2b.GetTags(ctx, info.TemplateID, liveBuildOptions())
+	tags, err := e2b.GetTags(ctx, info.TemplateID, liveConnectionOpts())
 	if err != nil {
 		t.Fatalf("GetTags returned error: %v", err)
 	}
 	if !templateTagsContain(tags, tag) {
 		t.Fatalf("expected tag %q in %#v", tag, tags)
 	}
-	if err := e2b.RemoveTags(ctx, name, []string{tag}, liveBuildOptions()); err != nil {
+	if err := e2b.RemoveTags(ctx, name, []string{tag}, liveConnectionOpts()); err != nil {
 		t.Fatalf("RemoveTags returned error: %v", err)
+	}
+}
+
+func TestLiveTemplateBuildRejectsInvalidTagFormats(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	templateName := "go-sdk-tags-test"
+	initialTag := fmt.Sprintf("%s:v1-%d", templateName, time.Now().UnixNano())
+
+	info, err := e2b.Build(ctx, e2b.Template(nil).FromBaseImage(), initialTag, liveBuildOptions())
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Fatalf("Template.Build returned error: %v", err)
+	}
+	if info.TemplateID == "" || info.BuildID == "" {
+		t.Fatalf("expected template and build IDs, got %#v", info)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+	}()
+
+	cases := []struct {
+		name string
+		tag  string
+	}{
+		{name: "missing alias", tag: ":invalid-tag"},
+		{name: "missing tag", tag: templateName + ":"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := e2b.AssignTags(ctx, initialTag, tc.tag, liveConnectionOpts()); err == nil {
+				t.Fatalf("expected AssignTags(%q) to fail for invalid tag format", tc.tag)
+			}
+		})
+	}
+}
+
+func TestLiveTemplateBuildInBackgroundStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	name := fmt.Sprintf("go-sdk-background:v1-%d", time.Now().UnixNano())
+	template := e2b.Template(nil).
+		FromUbuntuImage("22.04").
+		SkipCache().
+		RunCmd("sleep 5").
+		SetStartCmd(`echo "Hello"`, e2b.WaitForTimeout(10_000))
+
+	buildOpts := liveBuildOptions()
+	buildOpts.CpuCount = 1
+	buildOpts.MemoryMB = 1024
+
+	startedAt := time.Now()
+	info, err := e2b.BuildInBackground(ctx, template, name, buildOpts)
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Fatalf("BuildInBackground returned error: %v", err)
+	}
+	if info == nil || info.TemplateID == "" || info.BuildID == "" {
+		t.Fatalf("expected template and build IDs, got %#v", info)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 5*time.Second {
+		t.Fatalf("expected BuildInBackground to return before the 5s build step finishes, took %s", elapsed)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		status, err := e2b.GetBuildStatus(ctx, info, liveBuildStatusOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("GetBuildStatus returned error: %v", err)
+		}
+		switch string(status.Status) {
+		case "building", "waiting":
+			return
+		case "error":
+			t.Fatalf("expected background build to still be in progress, got error status: %#v", status)
+		case "ready":
+			if time.Now().After(deadline) {
+				t.Fatalf("background build became ready before an in-progress status was observed: %#v", status)
+			}
+		default:
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for in-progress background build status, last status: %#v", status)
+			}
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func TestLiveTemplateBuildFromExistingTemplate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	parentName := fmt.Sprintf("go-sdk-parent-template-%d", time.Now().UnixNano())
+	parentInfo, err := e2b.Build(ctx, e2b.Template(nil).FromBaseImage(), parentName, liveBuildOptions())
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Fatalf("parent Template.Build returned error: %v", err)
+	}
+	if parentInfo.TemplateID == "" || parentInfo.BuildID == "" {
+		t.Fatalf("expected parent template and build IDs, got %#v", parentInfo)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), parentInfo.TemplateID, nil)
+	}()
+
+	childName := fmt.Sprintf("%s-child", parentName)
+	childInfo, err := e2b.Build(ctx, e2b.Template(nil).FromTemplate(parentName), childName, liveBuildOptions())
+	if err != nil {
+		skipIfTemplateAPIUnavailable(t, err)
+		t.Fatalf("child Template.Build returned error: %v", err)
+	}
+	if childInfo.TemplateID == "" || childInfo.BuildID == "" {
+		t.Fatalf("expected child template and build IDs, got %#v", childInfo)
+	}
+	defer func() {
+		_, _ = e2b.DeleteSnapshot(context.Background(), childInfo.TemplateID, nil)
+	}()
+
+	exists, err := e2b.Exists(ctx, childName, liveConnectionOpts())
+	if err != nil {
+		t.Fatalf("Template.Exists after child build returned error: %v", err)
+	}
+	if !exists {
+		t.Fatalf("expected template alias %q to exist after build", childName)
 	}
 }
 
@@ -2348,6 +3178,198 @@ func TestLiveTemplateBuildStacktrace(t *testing.T) {
 	if !strings.Contains(err.Error(), "this-template-does-not-exist") && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		t.Fatalf("expected missing template error to mention missing template or not found, got %v", err)
 	}
+}
+
+func TestLiveTemplateBuildMethodParityOnBaseImage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	requireLiveEnv(t)
+
+	t.Run("run command as root", func(t *testing.T) {
+		name := fmt.Sprintf("go-sdk-run-root-%d", time.Now().UnixNano())
+		template := e2b.Template(nil).
+			FromBaseImage().
+			RunCmd(`test "$(whoami)" = "root"`, &struct{ User string }{User: "root"})
+
+		info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("Template.Build returned error: %v", err)
+		}
+		if info.TemplateID == "" || info.BuildID == "" {
+			t.Fatalf("expected template and build IDs, got %#v", info)
+		}
+		defer func() {
+			_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+		}()
+
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "run-root")
+		result, err := runForegroundCommand(sandbox.Commands, ctx, "whoami", nil)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		if strings.TrimSpace(result.Stdout) != "user" {
+			t.Fatalf("expected sandbox default user to remain user after root build step, got %#v", result)
+		}
+	})
+
+	t.Run("run command as user that does not exist", func(t *testing.T) {
+		name := fmt.Sprintf("go-sdk-run-invalid-user-%d", time.Now().UnixNano())
+		template := e2b.Template(nil).
+			FromBaseImage().
+			RunCmd("whoami", &struct{ User string }{User: "root123"})
+
+		_, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err == nil {
+			t.Fatal("expected Template.Build to fail for an invalid build user")
+		}
+		skipIfTemplateAPIUnavailable(t, err)
+		if !strings.Contains(err.Error(), "invalid username") || !strings.Contains(err.Error(), "root123") {
+			t.Fatalf("expected invalid username error, got %v", err)
+		}
+	})
+
+	t.Run("make symlink", func(t *testing.T) {
+		name := fmt.Sprintf("go-sdk-symlink-%d", time.Now().UnixNano())
+		template := e2b.Template(nil).
+			FromBaseImage().
+			MakeSymlink(".bashrc", ".bashrc.local").
+			RunCmd(`test "$(readlink .bashrc.local)" = ".bashrc"`)
+
+		info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("Template.Build returned error: %v", err)
+		}
+		if info.TemplateID == "" || info.BuildID == "" {
+			t.Fatalf("expected template and build IDs, got %#v", info)
+		}
+		defer func() {
+			_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+		}()
+
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "symlink")
+		result, err := runForegroundCommand(sandbox.Commands, ctx, `readlink /home/user/.bashrc.local`, nil)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		if strings.TrimSpace(result.Stdout) != ".bashrc" {
+			t.Fatalf("expected .bashrc.local symlink target .bashrc, got %#v", result)
+		}
+	})
+
+	t.Run("make symlink force", func(t *testing.T) {
+		name := fmt.Sprintf("go-sdk-symlink-force-%d", time.Now().UnixNano())
+		template := e2b.Template(nil).
+			FromBaseImage().
+			MakeSymlink(".bashrc", ".bashrc.local").
+			SkipCache().
+			MakeSymlink(".bashrc", ".bashrc.local", &struct{ Force bool }{Force: true}).
+			RunCmd(`test "$(readlink .bashrc.local)" = ".bashrc"`)
+
+		info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("Template.Build returned error: %v", err)
+		}
+		if info.TemplateID == "" || info.BuildID == "" {
+			t.Fatalf("expected template and build IDs, got %#v", info)
+		}
+		defer func() {
+			_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+		}()
+
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "symlink-force")
+		result, err := runForegroundCommand(sandbox.Commands, ctx, `readlink /home/user/.bashrc.local`, nil)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		if strings.TrimSpace(result.Stdout) != ".bashrc" {
+			t.Fatalf("expected forced .bashrc.local symlink target .bashrc, got %#v", result)
+		}
+	})
+
+	t.Run("copy symlink without resolve", func(t *testing.T) {
+		contextDir := t.TempDir()
+		if err := os.WriteFile(path.Join(contextDir, "test.txt"), []byte("template symlink content\n"), 0o644); err != nil {
+			t.Fatalf("failed to write template fixture: %v", err)
+		}
+		if err := os.Symlink("test.txt", path.Join(contextDir, "link.txt")); err != nil {
+			t.Fatalf("failed to create symlink fixture: %v", err)
+		}
+
+		name := fmt.Sprintf("go-sdk-copy-symlink-%d", time.Now().UnixNano())
+		template := e2b.Template(&e2b.TemplateOptions{FileContextPath: contextDir}).
+			FromBaseImage().
+			Copy("test.txt", "/app/test.txt", &struct{ ForceUpload bool }{ForceUpload: true}).
+			Copy("link.txt", "/app/link.txt", &struct{ ForceUpload bool }{ForceUpload: true}).
+			RunCmd(`test "$(readlink /app/link.txt)" = "test.txt"`).
+			RunCmd(`test "$(cat /app/link.txt)" = "template symlink content"`)
+
+		info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("Template.Build returned error: %v", err)
+		}
+		if info.TemplateID == "" || info.BuildID == "" {
+			t.Fatalf("expected template and build IDs, got %#v", info)
+		}
+		defer func() {
+			_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+		}()
+
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "copy-symlink")
+		result, err := runForegroundCommand(sandbox.Commands, ctx, `readlink /app/link.txt && cat /app/link.txt`, nil)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		output := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+		if len(output) != 2 || output[0] != "test.txt" || output[1] != "template symlink content" {
+			t.Fatalf("unexpected symlink copy output: %#v", result)
+		}
+	})
+
+	t.Run("copy symlink with resolve", func(t *testing.T) {
+		contextDir := t.TempDir()
+		if err := os.WriteFile(path.Join(contextDir, "test.txt"), []byte("resolved symlink content\n"), 0o644); err != nil {
+			t.Fatalf("failed to write template fixture: %v", err)
+		}
+		if err := os.Symlink("test.txt", path.Join(contextDir, "link.txt")); err != nil {
+			t.Fatalf("failed to create symlink fixture: %v", err)
+		}
+
+		name := fmt.Sprintf("go-sdk-copy-resolved-symlink-%d", time.Now().UnixNano())
+		template := e2b.Template(&e2b.TemplateOptions{FileContextPath: contextDir}).
+			FromBaseImage().
+			Copy("link.txt", "/app/link.txt", &struct {
+				ForceUpload     bool
+				ResolveSymlinks bool
+			}{ForceUpload: true, ResolveSymlinks: true}).
+			RunCmd(`test ! -L /app/link.txt`).
+			RunCmd(`test "$(cat /app/link.txt)" = "resolved symlink content"`)
+
+		info, err := e2b.Build(ctx, template, name, liveBuildOptions())
+		if err != nil {
+			skipIfTemplateAPIUnavailable(t, err)
+			t.Fatalf("Template.Build returned error: %v", err)
+		}
+		if info.TemplateID == "" || info.BuildID == "" {
+			t.Fatalf("expected template and build IDs, got %#v", info)
+		}
+		defer func() {
+			_, _ = e2b.DeleteSnapshot(context.Background(), info.TemplateID, nil)
+		}()
+
+		sandbox := createLiveSandboxFromTemplate(t, ctx, info.TemplateID, "copy-resolved-symlink")
+		result, err := runForegroundCommand(sandbox.Commands, ctx, `if [ -L /app/link.txt ]; then echo symlink; else echo regular; fi && cat /app/link.txt`, nil)
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		output := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+		if len(output) != 2 || output[0] != "regular" || output[1] != "resolved symlink content" {
+			t.Fatalf("unexpected resolved symlink copy output: %#v", result)
+		}
+	})
 }
 
 func newLiveSandbox(t *testing.T, ctx context.Context) *e2b.Sandbox {
@@ -2371,6 +3393,7 @@ func newLiveSandboxWithOpts(t *testing.T, ctx context.Context, opts *e2b.Sandbox
 	if opts.TimeoutMs == nil {
 		opts.TimeoutMs = &timeoutMs
 	}
+	opts.ConnectionOpts = mergeLiveConnectionOpts(opts.ConnectionOpts)
 	if opts.Metadata == nil {
 		opts.Metadata = liveSandboxMetadata(t)
 	} else if _, ok := opts.Metadata["sandboxTestId"]; !ok {
@@ -2400,7 +3423,8 @@ func createLiveSandboxFromTemplate(t *testing.T, ctx context.Context, template s
 	t.Helper()
 	timeoutMs := int((10 * time.Minute) / time.Millisecond)
 	sandbox, err := e2b.Create(ctx, template, &e2b.SandboxOpts{
-		TimeoutMs: &timeoutMs,
+		ConnectionOpts: mergeLiveConnectionOpts(e2b.ConnectionOpts{}),
+		TimeoutMs:      &timeoutMs,
 		Metadata: map[string]string{
 			"sandboxTestId": liveSandboxMetadata(t)["sandboxTestId"] + "-" + label,
 		},
@@ -2483,7 +3507,7 @@ func getLiveTemplate(t *testing.T, ctx context.Context) string {
 		return liveTemplateName
 	}
 
-	exists, err := e2b.Exists(ctx, "base", liveBuildOptions())
+	exists, err := e2b.Exists(ctx, "base", liveConnectionOpts())
 	if err == nil && exists {
 		liveTemplateName = "base"
 		return liveTemplateName
@@ -2548,6 +3572,82 @@ func liveBuildOptions() *e2b.BuildOptions {
 	}
 }
 
+func liveConnectionOpts() *e2b.ConnectionOpts {
+	requestTimeoutMs := int((2 * time.Minute) / time.Millisecond)
+	return &e2b.ConnectionOpts{
+		ApiKey:           os.Getenv("E2B_API_KEY"),
+		AccessToken:      os.Getenv("E2B_ACCESS_TOKEN"),
+		Domain:           os.Getenv("E2B_DOMAIN"),
+		ApiUrl:           os.Getenv("E2B_API_URL"),
+		RequestTimeoutMs: &requestTimeoutMs,
+	}
+}
+
+func mergeLiveConnectionOpts(override e2b.ConnectionOpts) e2b.ConnectionOpts {
+	base := liveConnectionOpts()
+	merged := *base
+
+	if override.ApiKey != "" {
+		merged.ApiKey = override.ApiKey
+	}
+	if override.AccessToken != "" {
+		merged.AccessToken = override.AccessToken
+	}
+	if override.Domain != "" {
+		merged.Domain = override.Domain
+	}
+	if override.ApiUrl != "" {
+		merged.ApiUrl = override.ApiUrl
+	}
+	if override.SandboxUrl != "" {
+		merged.SandboxUrl = override.SandboxUrl
+	}
+	if override.Debug != nil {
+		merged.Debug = override.Debug
+	}
+	if override.Signal != nil {
+		merged.Signal = override.Signal
+	}
+	if override.RequestTimeoutMs != nil {
+		merged.RequestTimeoutMs = override.RequestTimeoutMs
+	}
+	if override.Logger != nil {
+		merged.Logger = override.Logger
+	}
+	merged.Headers = mergeLiveHeaders(merged.Headers, override.Headers)
+	if override.Proxy != "" {
+		merged.Proxy = override.Proxy
+	}
+
+	return merged
+}
+
+func mergeLiveHeaders(base map[string]string, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	headers := make(map[string]string, len(base)+len(override))
+	for k, v := range base {
+		headers[k] = v
+	}
+	for k, v := range override {
+		headers[k] = v
+	}
+	return headers
+}
+
+func liveBuildStatusOptions() *e2b.GetBuildStatusOptions {
+	requestTimeoutMs := int((2 * time.Minute) / time.Millisecond)
+	return &e2b.GetBuildStatusOptions{
+		ApiKey:           os.Getenv("E2B_API_KEY"),
+		AccessToken:      os.Getenv("E2B_ACCESS_TOKEN"),
+		Domain:           os.Getenv("E2B_DOMAIN"),
+		ApiUrl:           os.Getenv("E2B_API_URL"),
+		RequestTimeoutMs: &requestTimeoutMs,
+	}
+}
+
 func cleanupLiveTemplate() {
 	if !liveTemplateBuilt || liveTemplateID == "" {
 		return
@@ -2559,7 +3659,7 @@ func cleanupLiveTemplate() {
 
 func mustRun(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox, cmd string) *e2b.CommandResult {
 	t.Helper()
-	result, err := sandbox.Commands.Run(ctx, cmd, nil)
+	result, err := runForegroundCommand(sandbox.Commands, ctx, cmd, nil)
 	if err != nil {
 		t.Fatalf("command %q returned error: %v", cmd, err)
 	}
@@ -2568,7 +3668,7 @@ func mustRun(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox, cmd string
 
 func runNumpyRandomVector(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox) (string, bool) {
 	t.Helper()
-	result, err := sandbox.Commands.Run(ctx, `python3 - <<'PY'
+	result, err := runForegroundCommand(sandbox.Commands, ctx, `python3 - <<'PY'
 import numpy as np
 print([np.random.normal(), np.random.normal(), np.random.normal()])
 PY`, nil)
@@ -2635,7 +3735,7 @@ func assertListEntries(t *testing.T, sandbox *e2b.Sandbox, ctx context.Context, 
 	t.Helper()
 	var opts *e2b.FilesystemListOpts
 	if depth > 0 {
-		opts = &e2b.FilesystemListOpts{Depth: depth}
+		opts = &e2b.FilesystemListOpts{Depth: intPtr(depth)}
 	}
 	entries, err := sandbox.Files.List(ctx, dir, opts)
 	if err != nil {
@@ -2842,7 +3942,7 @@ func assertGitRepoCleanWithReadme(t *testing.T, sandbox *e2b.Sandbox, ctx contex
 	if !status.IsClean {
 		t.Fatalf("expected clean git status for %s, got %#v", repoPath, status)
 	}
-	contents, err := sandbox.Files.ReadText(ctx, path.Join(repoPath, "README.md"), nil)
+	contents, err := readSandboxText(sandbox.Files, ctx, path.Join(repoPath, "README.md"), nil)
 	if err != nil {
 		t.Fatalf("ReadText README for %s returned error: %v", repoPath, err)
 	}
@@ -2873,7 +3973,7 @@ func startLiveGitDaemon(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox,
 			shellQuote(baseDir),
 			port,
 		)
-		handle, err := sandbox.Commands.RunBackground(ctx, cmd, nil)
+		handle, err := runBackgroundCommand(sandbox.Commands, ctx, cmd, nil)
 		if err != nil {
 			t.Logf("git daemon start attempt %d failed: %v", attempt+1, err)
 			continue
@@ -2881,7 +3981,7 @@ func startLiveGitDaemon(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox,
 
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, err := sandbox.Commands.Run(ctx, "git ls-remote "+shellQuote(remoteURL), nil); err == nil {
+			if _, err := runForegroundCommand(sandbox.Commands, ctx, "git ls-remote "+shellQuote(remoteURL), nil); err == nil {
 				t.Cleanup(func() {
 					_, _ = handle.Kill()
 				})
@@ -3067,6 +4167,15 @@ func templateTagsContain(tags []e2b.TemplateTag, tag string) bool {
 	return false
 }
 
+func liveVolumeListContains(entries []e2bvol.VolumeInfo, volumeID, name string) bool {
+	for _, entry := range entries {
+		if entry.VolumeID == volumeID && entry.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func skipIfTemplateAPIUnavailable(t *testing.T, err error) {
 	t.Helper()
 	msg := strings.ToLower(err.Error())
@@ -3128,12 +4237,12 @@ func waitForCommandStdout(t *testing.T, handle *e2b.CommandHandle, want string) 
 	defer ticker.Stop()
 
 	for {
-		if got := handle.GetStdout(); got == want {
+		if got := handle.State().Stdout; got == want {
 			return
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for stdout %q, got %q", want, handle.GetStdout())
+			t.Fatalf("timed out waiting for stdout %q, got %q", want, handle.State().Stdout)
 		case <-ticker.C:
 		}
 	}
@@ -3146,25 +4255,43 @@ func waitForCommandStdoutContains(t *testing.T, handle *e2b.CommandHandle, want 
 	defer ticker.Stop()
 
 	for {
-		if got := handle.GetStdout(); strings.Contains(got, want) {
+		if got := handle.State().Stdout; strings.Contains(got, want) {
 			return
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for stdout to contain %q, got %q", want, handle.GetStdout())
+			t.Fatalf("timed out waiting for stdout to contain %q, got %q", want, handle.State().Stdout)
 		case <-ticker.C:
 		}
 	}
 }
 
-func waitForMetrics(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox) {
+func waitForMetrics(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox) []e2b.SandboxMetrics {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		metrics, err := sandbox.GetMetrics(ctx, nil)
 		if err == nil && len(metrics) > 0 {
-			return
+			metric := metrics[0]
+			start := metric.Timestamp.Add(-2 * time.Second)
+			end := metric.Timestamp.Add(2 * time.Second)
+			filtered, filteredErr := sandbox.GetMetrics(ctx, &e2b.SandboxMetricsOpts{
+				Start: &start,
+				End:   &end,
+			})
+			if filteredErr != nil {
+				t.Fatalf("filtered metrics query returned error: %v", filteredErr)
+			}
+			if len(filtered) == 0 {
+				t.Skipf(
+					"metrics endpoint returned unfiltered data but did not honor an inclusive filtered window in this environment: metric=%s start=%s end=%s",
+					metric.Timestamp.UTC().Format(time.RFC3339),
+					start.UTC().Format(time.RFC3339),
+					end.UTC().Format(time.RFC3339),
+				)
+			}
+			return metrics
 		}
 		lastErr = err
 		time.Sleep(500 * time.Millisecond)
@@ -3173,11 +4300,12 @@ func waitForMetrics(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox) {
 		t.Fatalf("timed out waiting for metrics: %v", lastErr)
 	}
 	t.Skip("metrics endpoint returned no points in this environment")
+	return nil
 }
 
 func assertSandboxConnectivityCheck(t *testing.T, ctx context.Context, sandbox *e2b.Sandbox, label string) {
 	t.Helper()
-	result, err := sandbox.Commands.Run(ctx, "curl -s -o /dev/null -w '%{http_code}' https://connectivitycheck.gstatic.com/generate_204", nil)
+	result, err := runForegroundCommand(sandbox.Commands, ctx, "curl -s -o /dev/null -w '%{http_code}' https://connectivitycheck.gstatic.com/generate_204", nil)
 	if err != nil {
 		t.Skipf("internet connectivity check is unreachable for %s sandbox in this environment: %v", label, err)
 	}

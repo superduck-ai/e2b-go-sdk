@@ -2,6 +2,7 @@ package commands
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -31,5 +32,40 @@ func TestCommandHandleWaitReturnsCommandExitErrorWithProcessMessage(t *testing.T
 	}
 	if exitErr.CommandResult.Error != "process failed" {
 		t.Fatalf("expected result error field to be preserved, got %q", exitErr.CommandResult.Error)
+	}
+}
+
+func TestCommandHandleStateSnapshotsLiveOutputAndCopiesExitCode(t *testing.T) {
+	handle := newCommandHandle(123, func() {}, func() (bool, error) { return true, nil }, nil, nil)
+	handle.appendStdout("hello")
+	handle.appendStderr("boom")
+
+	running := handle.State()
+	if handle.Pid != 123 {
+		t.Fatalf("expected handle pid 123, got %d", handle.Pid)
+	}
+	if running.Stdout != "hello" || running.Stderr != "boom" {
+		t.Fatalf("unexpected running snapshot: %#v", running)
+	}
+	if _, ok := reflect.TypeOf(running).FieldByName("Pid"); ok {
+		t.Fatal("expected state snapshot to omit pid; pid lives on CommandHandle")
+	}
+	if running.ExitCode != nil {
+		t.Fatalf("expected running snapshot exit code to be nil, got %v", *running.ExitCode)
+	}
+
+	handle.setEnd(7, "process failed")
+	finished := handle.State()
+	if finished.Error != "process failed" {
+		t.Fatalf("expected error snapshot to be preserved, got %q", finished.Error)
+	}
+	if finished.ExitCode == nil || *finished.ExitCode != 7 {
+		t.Fatalf("expected exit code 7, got %#v", finished.ExitCode)
+	}
+
+	*finished.ExitCode = 999
+	again := handle.State()
+	if again.ExitCode == nil || *again.ExitCode != 7 {
+		t.Fatalf("expected fresh state snapshot to preserve exit code 7, got %#v", again.ExitCode)
 	}
 }

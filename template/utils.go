@@ -12,8 +12,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
 
 func validateRelativePath(src string) error {
@@ -91,6 +95,91 @@ func calculateFilesHash(src, dest, contextPath string, ignorePatterns []string, 
 
 func padOctal(mode int) string {
 	return fmt.Sprintf("%04o", mode)
+}
+
+func captureCallerFrame(skipFiles map[string]struct{}) (runtime.Frame, bool) {
+	frames := make([]uintptr, 32)
+	n := runtime.Callers(2, frames)
+	if n == 0 {
+		return runtime.Frame{}, false
+	}
+
+	callers := runtime.CallersFrames(frames[:n])
+	for {
+		frame, more := callers.Next()
+		if frame.File == "" || frame.Function == "" {
+			if !more {
+				break
+			}
+			continue
+		}
+
+		base := filepath.Base(frame.File)
+		if _, skip := skipFiles[base]; skip && !strings.HasPrefix(filepath.Base(frame.Function), "Test") && !strings.HasPrefix(filepath.Base(frame.Function), "Example") {
+			if !more {
+				break
+			}
+			continue
+		}
+
+		return frame, true
+	}
+
+	return runtime.Frame{}, false
+}
+
+func captureCallerTrace(skipFiles map[string]struct{}) string {
+	frame, ok := captureCallerFrame(skipFiles)
+	if !ok {
+		return ""
+	}
+	return formatCallerTrace(frame)
+}
+
+func formatCallerTrace(frame runtime.Frame) string {
+	if frame.File == "" {
+		return ""
+	}
+	function := frame.Function
+	if function == "" {
+		function = "unknown"
+	}
+	return frame.File + ":" + strconv.Itoa(frame.Line) + " " + function
+}
+
+func appendCallerTrace(err error, callerTrace string) error {
+	if err == nil || callerTrace == "" {
+		return err
+	}
+
+	switch typed := err.(type) {
+	case *shared.BuildError:
+		if typed.CallerTrace == "" {
+			typed.CallerTrace = callerTrace
+		}
+		return typed
+	case *shared.FileUploadError:
+		if typed.CallerTrace == "" {
+			typed.CallerTrace = callerTrace
+		}
+		return typed
+	default:
+		return &shared.BuildError{Message: err.Error(), CallerTrace: callerTrace}
+	}
+}
+
+func buildStepIndex(step string, stackTracesLength int) int {
+	if step == baseStepName {
+		return 0
+	}
+	if step == finalizeStepName {
+		return stackTracesLength - 1
+	}
+	index, err := strconv.Atoi(step)
+	if err != nil {
+		return -1
+	}
+	return index
 }
 
 func tarFileBytes(src, contextPath string, ignorePatterns []string, resolveSymlinks bool) ([]byte, error) {
@@ -289,13 +378,9 @@ func fileInfoForPath(fullPath string, resolveSymlinks bool) (os.FileInfo, error)
 
 func shouldIgnore(relPath string, ignorePatterns []string) bool {
 	normalized := normalizePath(relPath)
-	baseName := path.Base(normalized)
 	for _, pattern := range ignorePatterns {
 		pattern = normalizePath(pattern)
 		if globMatch(pattern, normalized) {
-			return true
-		}
-		if !strings.Contains(pattern, "/") && globMatch(pattern, baseName) {
 			return true
 		}
 		prefix := strings.TrimSuffix(pattern, "/")

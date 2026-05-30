@@ -18,11 +18,19 @@ func TestRootAliasesExposeJsStyleFilesystemCommandAndGitTypes(t *testing.T) {
 		FilesystemEventWrite != rootfs.FilesystemEventWrite {
 		t.Fatalf("expected root filesystem event constants to match filesystem package exports")
 	}
+	if ReadFormatText != rootfs.ReadFormatText ||
+		ReadFormatBytes != rootfs.ReadFormatBytes ||
+		ReadFormatStream != rootfs.ReadFormatStream ||
+		ReadFormatBlob != rootfs.ReadFormatBlob {
+		t.Fatalf("expected root read format constants to match filesystem package exports")
+	}
 
 	var _ FileType = rootfs.FileTypeFile
+	var _ Blob = rootfs.Blob([]byte("blob"))
 	var _ WriteInfo = rootfs.WriteInfo{}
 	var _ EntryInfo = rootfs.EntryInfo{}
 	var _ *Filesystem = (*rootfs.Filesystem)(nil)
+	var _ ReadFormat = rootfs.ReadFormat("")
 	var _ FilesystemRequestOpts = rootfs.FilesystemRequestOpts{}
 	var _ FilesystemWriteOpts = rootfs.FilesystemWriteOpts{}
 	var _ FilesystemReadOpts = rootfs.FilesystemReadOpts{}
@@ -45,8 +53,17 @@ func TestRootAliasesExposeJsStyleFilesystemCommandAndGitTypes(t *testing.T) {
 	var _ CommandStartOpts = rootcmd.CommandStartOpts{}
 	var _ *Commands = (*rootcmd.Commands)(nil)
 	var _ *Pty = (*rootcmd.Pty)(nil)
+	var _ PtySize = rootcmd.PtySize{}
 	var _ PtyCreateOpts = rootcmd.PtyCreateOpts{}
 	var _ PtyConnectOpts = rootcmd.PtyConnectOpts{}
+
+	handle := &CommandHandle{}
+	state := handle.State()
+	_ = handle.Pid
+	_ = state.Stdout
+	_ = state.Stderr
+	_ = state.ExitCode
+	_ = state.Error
 
 	var _ *Git = (*rootgit.Git)(nil)
 	var _ GitRequestOpts = rootgit.GitRequestOpts{}

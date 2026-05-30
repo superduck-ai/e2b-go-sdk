@@ -56,31 +56,51 @@ func ToDockerfile(template *TemplateBase) (string, error) {
 	return roottmpl.ToDockerfile(template)
 }
 
-func GetBuildStatus(ctx context.Context, templateID, buildID string, opts *GetBuildStatusOptions) (*TemplateBuildStatusResponse, error) {
-	return roottmpl.GetBuildStatus(ctx, templateID, buildID, opts)
+func GetBuildStatus(ctx context.Context, buildInfo *BuildInfo, opts *GetBuildStatusOptions) (*TemplateBuildStatusResponse, error) {
+	return roottmpl.GetBuildStatus(ctx, buildInfo, opts)
 }
 
-func Exists(ctx context.Context, name string, opts *BuildOptions) (bool, error) {
-	return roottmpl.Exists(ctx, name, opts)
+func toTemplateConnectionOpts(opts *ConnectionOpts) *roottmpl.ConnectionOpts {
+	if opts == nil {
+		return nil
+	}
+
+	return &roottmpl.ConnectionOpts{
+		ApiKey:           opts.ApiKey,
+		AccessToken:      opts.AccessToken,
+		Domain:           opts.Domain,
+		ApiUrl:           opts.ApiUrl,
+		SandboxUrl:       opts.SandboxUrl,
+		Debug:            opts.Debug,
+		Signal:           opts.Signal,
+		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Headers:          opts.Headers,
+		Logger:           opts.Logger,
+		Proxy:            opts.Proxy,
+	}
+}
+
+func Exists(ctx context.Context, name string, opts *ConnectionOpts) (bool, error) {
+	return roottmpl.Exists(ctx, name, toTemplateConnectionOpts(opts))
 }
 
 // AliasExists is deprecated. Use Exists instead.
-func AliasExists(ctx context.Context, alias string, opts *BuildOptions) (bool, error) {
-	return roottmpl.AliasExists(ctx, alias, opts)
+func AliasExists(ctx context.Context, alias string, opts *ConnectionOpts) (bool, error) {
+	return roottmpl.AliasExists(ctx, alias, toTemplateConnectionOpts(opts))
 }
 
 type BuildStatusReason = roottmpl.BuildStatusReason
 
-func AssignTags(ctx context.Context, targetName string, tags any, opts *BuildOptions) (*TemplateTagInfo, error) {
-	return roottmpl.AssignTags(ctx, targetName, tags, opts)
+func AssignTags(ctx context.Context, targetName string, tags any, opts *ConnectionOpts) (*TemplateTagInfo, error) {
+	return roottmpl.AssignTags(ctx, targetName, tags, toTemplateConnectionOpts(opts))
 }
 
-func RemoveTags(ctx context.Context, name string, tags any, opts *BuildOptions) error {
-	return roottmpl.RemoveTags(ctx, name, tags, opts)
+func RemoveTags(ctx context.Context, name string, tags any, opts *ConnectionOpts) error {
+	return roottmpl.RemoveTags(ctx, name, tags, toTemplateConnectionOpts(opts))
 }
 
-func GetTags(ctx context.Context, templateID string, opts *BuildOptions) ([]TemplateTag, error) {
-	return roottmpl.GetTags(ctx, templateID, opts)
+func GetTags(ctx context.Context, templateID string, opts *ConnectionOpts) ([]TemplateTag, error) {
+	return roottmpl.GetTags(ctx, templateID, toTemplateConnectionOpts(opts))
 }
 
 func WaitForPort(port int) *ReadyCmd {

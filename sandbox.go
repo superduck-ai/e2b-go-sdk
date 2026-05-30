@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ type Sandbox struct {
 	envdVersion        string
 	envdAccessToken    string
 	envdApiUrl         string
+	envdDirectUrl      string
 	envdApi            *envd.EnvdApiClient
 	mcpToken           string
 
@@ -46,6 +48,8 @@ func createSandbox(ctx context.Context, template string, opts *SandboxOpts, auto
 	if opts == nil {
 		opts = &SandboxOpts{}
 	}
+	ctx, cancel := shared.MergeContexts(ctx, opts.Signal)
+	defer cancel()
 	if template == "" {
 		template = opts.Template
 	}
@@ -97,7 +101,7 @@ func createSandbox(ctx context.Context, template string, opts *SandboxOpts, auto
 			return nil, fmt.Errorf("failed to marshal MCP config: %w", err)
 		}
 		sbx.mcpToken = uuid.NewString()
-		res, err := sbx.Commands.Run(ctx, "mcp-gateway --config "+shellQuote(string(configJSON)), &commands.CommandStartOpts{
+		execution, err := sbx.Commands.Run(ctx, "mcp-gateway --config "+shellQuote(string(configJSON)), &commands.CommandStartOpts{
 			User: "root",
 			Envs: map[string]string{
 				"GATEWAY_ACCESS_TOKEN": sbx.mcpToken,
@@ -109,6 +113,10 @@ func createSandbox(ctx context.Context, template string, opts *SandboxOpts, auto
 				return nil, fmt.Errorf("Failed to start MCP gateway: %s", exitErr.Stderr)
 			}
 			return nil, fmt.Errorf("Failed to start MCP gateway: %w", err)
+		}
+		res, ok := execution.(*commands.CommandResult)
+		if !ok {
+			return nil, fmt.Errorf("Failed to start MCP gateway: expected foreground command result, got %T", execution)
 		}
 		if res.ExitCode != 0 {
 			return nil, fmt.Errorf("Failed to start MCP gateway: %s", res.Stderr)
@@ -137,6 +145,8 @@ func Connect(ctx context.Context, sandboxId string, opts *SandboxConnectOpts) (*
 	if opts == nil {
 		opts = &SandboxConnectOpts{}
 	}
+	ctx, cancel := shared.MergeContexts(ctx, opts.Signal)
+	defer cancel()
 
 	connConfig := NewConnectionConfig(&opts.ConnectionOpts)
 
@@ -187,7 +197,7 @@ func (s *Sandbox) Connect(ctx context.Context, opts *SandboxConnectOpts) (*Sandb
 		Domain:           connConfig.Domain,
 		ApiUrl:           connConfig.ApiUrl,
 		SandboxUrl:       connConfig.SandboxUrl,
-		Debug:            connConfig.Debug,
+		Debug:            boolRef(connConfig.Debug),
 		RequestTimeoutMs: intPtr(connConfig.RequestTimeoutMs),
 		Logger:           connConfig.Logger,
 		Headers:          connConfig.Headers,
@@ -208,10 +218,15 @@ func List(opts *SandboxListOpts) *SandboxPaginator {
 		opts = &SandboxListOpts{}
 	}
 
-	connConfig := newConnectionConfigFromSandboxApiOpts(&opts.SandboxApiOpts)
 	queryMetadata, queryStates := resolveSandboxListQuery(opts)
-
-	return &SandboxPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
+	fetchPage := func(ctx context.Context, nextToken string, override *SandboxApiOpts) ([]SandboxInfo, string, error) {
+		effectiveOpts := sandboxApiOptsFromSandboxListOpts(opts)
+		if override != nil {
+			effectiveOpts = mergeSandboxApiOpts(effectiveOpts, *override)
+		}
+		ctx, cancel := mergeSandboxApiSignal(ctx, &effectiveOpts)
+		defer cancel()
+		connConfig := newConnectionConfigFromSandboxApiOpts(&effectiveOpts)
 		apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 		if err != nil {
 			return nil, "", err
@@ -257,7 +272,14 @@ func List(opts *SandboxListOpts) *SandboxPaginator {
 			infos[i] = sandboxResponseToInfo(&s)
 		}
 		return infos, nextTok, nil
-	}, opts.NextToken)}
+	}
+
+	return &SandboxPaginator{
+		paginator: newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SandboxInfo, string, error) {
+			return fetchPage(ctx, nextToken, nil)
+		}, opts.NextToken),
+		fetchWithOpts: fetchPage,
+	}
 }
 
 // GetHost returns the hostname for accessing a specific port on the sandbox.
@@ -266,7 +288,17 @@ func (s *Sandbox) GetHost(port int) string {
 }
 
 // IsRunning checks if the sandbox envd is healthy.
-func (s *Sandbox) IsRunning(ctx context.Context, opts *struct{ RequestTimeoutMs *int }) (bool, error) {
+func (s *Sandbox) IsRunning(ctx context.Context, opts *struct {
+	RequestTimeoutMs *int
+	Signal           context.Context
+}) (bool, error) {
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
+
 	if opts == nil || opts.RequestTimeoutMs == nil {
 		_, err := s.envdApi.Health(ctx)
 		if err != nil {
@@ -280,7 +312,7 @@ func (s *Sandbox) IsRunning(ctx context.Context, opts *struct{ RequestTimeoutMs 
 	}
 
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(opts.RequestTimeoutMs)
-	client := shared.NewHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
+	client := shared.NewEnvdRESTHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.envdApiUrl+"/health", nil)
 	if err != nil {
 		return false, err
@@ -312,11 +344,18 @@ func (s *Sandbox) IsRunning(ctx context.Context, opts *struct{ RequestTimeoutMs 
 }
 
 // SetTimeout sets the sandbox timeout.
-func (s *Sandbox) SetTimeout(ctx context.Context, timeoutMs int, opts *struct{ RequestTimeoutMs *int }) error {
+func (s *Sandbox) SetTimeout(ctx context.Context, timeoutMs int, opts *struct {
+	RequestTimeoutMs *int
+	Signal           context.Context
+}) error {
+	var signal context.Context
 	var requestTimeoutMs *int
 	if opts != nil {
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	if connConfig.Debug {
 		return nil
@@ -330,12 +369,46 @@ func (s *Sandbox) SetTimeout(ctx context.Context, timeoutMs int, opts *struct{ R
 	return wrapSandboxNotFoundError(s.SandboxID, err)
 }
 
-// Kill terminates the sandbox.
-func (s *Sandbox) Kill(ctx context.Context, opts *struct{ RequestTimeoutMs *int }) error {
+// UpdateNetwork updates the sandbox egress configuration atomically.
+func (s *Sandbox) UpdateNetwork(ctx context.Context, network SandboxNetworkUpdate, opts *struct {
+	RequestTimeoutMs *int
+	Signal           context.Context
+}) error {
+	var signal context.Context
 	var requestTimeoutMs *int
 	if opts != nil {
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
+	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
+	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
+	if err != nil {
+		return err
+	}
+
+	reqBody, err := buildNetworkUpdateBody(network)
+	if err != nil {
+		return err
+	}
+	_, err = apiClient.Put(ctx, "/sandboxes/"+s.SandboxID+"/network", reqBody, nil)
+	return wrapSandboxNotFoundError(s.SandboxID, err)
+}
+
+// Kill terminates the sandbox.
+func (s *Sandbox) Kill(ctx context.Context, opts *struct {
+	RequestTimeoutMs *int
+	Signal           context.Context
+}) error {
+	var signal context.Context
+	var requestTimeoutMs *int
+	if opts != nil {
+		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
+	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	if connConfig.Debug {
 		return nil
@@ -359,6 +432,12 @@ func (s *Sandbox) Kill(ctx context.Context, opts *struct{ RequestTimeoutMs *int 
 
 // Pause pauses the sandbox.
 func (s *Sandbox) Pause(ctx context.Context, opts *ConnectionOpts) (bool, error) {
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
 	connConfig := s.resolveConnectionConfig(opts)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -385,10 +464,14 @@ func (s *Sandbox) BetaPause(ctx context.Context, opts *ConnectionOpts) (bool, er
 
 // CreateSnapshot creates a snapshot of the sandbox.
 func (s *Sandbox) CreateSnapshot(ctx context.Context, opts *CreateSnapshotOpts) (*SnapshotInfo, error) {
+	var signal context.Context
 	var apiOpts *SandboxApiOpts
 	if opts != nil {
 		apiOpts = &opts.SandboxApiOpts
+		signal = opts.Signal
 	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
 	connConfig := s.resolveSandboxApiConnectionConfig(apiOpts)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -427,10 +510,24 @@ func (s *Sandbox) ListSnapshots(opts *struct {
 		initialToken = opts.NextToken
 	}
 
-	connConfig := s.resolveSandboxApiConnectionConfig(apiOpts)
 	sandboxID := s.SandboxID
 
-	return &SnapshotPaginator{newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
+	fetchPage := func(ctx context.Context, nextToken string, override *SandboxApiOpts) ([]SnapshotInfo, string, error) {
+		var effectiveOpts *SandboxApiOpts
+		switch {
+		case override != nil && apiOpts != nil:
+			merged := mergeSandboxApiOpts(*apiOpts, *override)
+			effectiveOpts = &merged
+		case override != nil:
+			copied := *override
+			effectiveOpts = &copied
+		default:
+			effectiveOpts = apiOpts
+		}
+		ctx, cancel := mergeSandboxApiSignal(ctx, effectiveOpts)
+		defer cancel()
+
+		connConfig := s.resolveSandboxApiConnectionConfig(effectiveOpts)
 		apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 		if err != nil {
 			return nil, "", err
@@ -467,7 +564,14 @@ func (s *Sandbox) ListSnapshots(opts *struct {
 			infos[i] = snapshotInfoFromAPI(s)
 		}
 		return infos, next, nil
-	}, initialToken)}
+	}
+
+	return &SnapshotPaginator{
+		paginator: newPaginatorWithInitialToken(func(ctx context.Context, nextToken string) ([]SnapshotInfo, string, error) {
+			return fetchPage(ctx, nextToken, nil)
+		}, initialToken),
+		fetchWithOpts: fetchPage,
+	}
 }
 
 // GetMcpUrl returns the MCP endpoint URL for this sandbox.
@@ -481,13 +585,17 @@ func (s *Sandbox) GetMcpToken() (string, error) {
 		return s.mcpToken, nil
 	}
 
-	token, err := s.Files.ReadText(context.Background(), "/etc/mcp-gateway/.token", &filesystem.FilesystemReadOpts{
+	tokenValue, err := s.Files.Read(context.Background(), "/etc/mcp-gateway/.token", &filesystem.FilesystemReadOpts{
 		FilesystemRequestOpts: filesystem.FilesystemRequestOpts{
 			User: "root",
 		},
 	})
 	if err != nil {
 		return "", err
+	}
+	token, ok := tokenValue.(string)
+	if !ok {
+		return "", fmt.Errorf("expected MCP token read to return string, got %T", tokenValue)
 	}
 
 	s.mcpToken = token
@@ -581,11 +689,18 @@ func (s *Sandbox) DownloadUrl(path string, opts *struct {
 }
 
 // GetInfo retrieves information about this sandbox from the API.
-func (s *Sandbox) GetInfo(ctx context.Context, opts *struct{ RequestTimeoutMs *int }) (*SandboxInfo, error) {
+func (s *Sandbox) GetInfo(ctx context.Context, opts *struct {
+	RequestTimeoutMs *int
+	Signal           context.Context
+}) (*SandboxInfo, error) {
+	var signal context.Context
 	var requestTimeoutMs *int
 	if opts != nil {
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
+	ctx, cancel := shared.MergeContexts(ctx, signal)
+	defer cancel()
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -606,6 +721,8 @@ func (s *Sandbox) GetMetrics(ctx context.Context, opts *SandboxMetricsOpts) ([]S
 	if opts == nil {
 		opts = &SandboxMetricsOpts{}
 	}
+	ctx, cancel := shared.MergeContexts(ctx, opts.Signal)
+	defer cancel()
 	envdVersion := s.envdVersion
 	if envdVersion == "" && s.envdApi != nil {
 		envdVersion = s.envdApi.Version
@@ -701,6 +818,7 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 	}
 
 	envdApiUrl := connConfig.GetSandboxUrl(resp.SandboxID, sandboxDomain, envdPort)
+	envdDirectUrl := connConfig.GetSandboxDirectUrl(resp.SandboxID, sandboxDomain, envdPort)
 	sandboxHeaders := sandboxTransportHeaders(resp.SandboxID, envdPort, resp.EnvdAccessToken, connConfig.Headers)
 	envdHeaders := sandboxHTTPHeaders(resp.SandboxID, envdPort, resp.EnvdAccessToken, connConfig.Headers)
 
@@ -710,7 +828,7 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		envdHeaders,
 		connConfig.RequestTimeoutMs,
 	)
-	envdApiClient.HttpClient = shared.NewHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
+	envdApiClient.HttpClient = shared.NewEnvdRESTHTTPClient(time.Duration(connConfig.RequestTimeoutMs)*time.Millisecond, connConfig.Proxy, connConfig.Logger)
 
 	cmdConnConfig := &struct {
 		ApiKey           string
@@ -777,6 +895,7 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 		envdVersion:        envdVersion,
 		envdAccessToken:    resp.EnvdAccessToken,
 		envdApiUrl:         envdApiUrl,
+		envdDirectUrl:      envdDirectUrl,
 		envdApi:            envdApiClient,
 		Files:              fs,
 		Commands:           cmds,
@@ -841,8 +960,8 @@ func (s *Sandbox) resolveConnectionConfig(opts *ConnectionOpts) *ConnectionConfi
 	if opts.SandboxUrl != "" {
 		merged.SandboxUrl = opts.SandboxUrl
 	}
-	if opts.Debug {
-		merged.Debug = true
+	if opts.Debug != nil {
+		merged.Debug = *opts.Debug
 	}
 	if opts.RequestTimeoutMs != nil {
 		merged.RequestTimeoutMs = *opts.RequestTimeoutMs
@@ -850,9 +969,7 @@ func (s *Sandbox) resolveConnectionConfig(opts *ConnectionOpts) *ConnectionConfi
 	if opts.Logger != nil {
 		merged.Logger = opts.Logger
 	}
-	if opts.Headers != nil {
-		merged.Headers = opts.Headers
-	}
+	merged.Headers = mergeHeaders(merged.Headers, opts.Headers)
 	if opts.Proxy != "" {
 		merged.Proxy = opts.Proxy
 	}
@@ -871,8 +988,8 @@ func (s *Sandbox) resolveSandboxApiConnectionConfig(opts *SandboxApiOpts) *Conne
 	if opts.Domain != "" {
 		merged.Domain = opts.Domain
 	}
-	if opts.Debug {
-		merged.Debug = true
+	if opts.Debug != nil {
+		merged.Debug = *opts.Debug
 	}
 	if opts.apiUrl != "" {
 		merged.ApiUrl = opts.apiUrl
@@ -880,9 +997,7 @@ func (s *Sandbox) resolveSandboxApiConnectionConfig(opts *SandboxApiOpts) *Conne
 	if opts.RequestTimeoutMs != nil {
 		merged.RequestTimeoutMs = *opts.RequestTimeoutMs
 	}
-	if opts.Headers != nil {
-		merged.Headers = opts.Headers
-	}
+	merged.Headers = mergeHeaders(merged.Headers, opts.Headers)
 	if opts.Proxy != "" {
 		merged.Proxy = opts.Proxy
 	}
@@ -910,20 +1025,44 @@ func (s *Sandbox) resolveSandboxURLUser(user string) string {
 }
 
 func (s *Sandbox) fileURL(path string, username string) string {
-	fileURL, err := url.Parse(s.envdApiUrl)
+	baseURL := s.envdDirectUrl
+	if baseURL == "" {
+		baseURL = s.envdApiUrl
+	}
+
+	fileURL, err := url.Parse(baseURL)
 	if err != nil {
-		return fmt.Sprintf("%s/files", s.envdApiUrl)
+		return fmt.Sprintf("%s/files", baseURL)
 	}
 	fileURL.Path = "/files"
-	values := fileURL.Query()
+	fileURL.RawQuery = sandboxFileQuery(path, username)
+	return fileURL.String()
+}
+
+func sandboxFileQuery(path string, username string) string {
+	parts := make([]string, 0, 2)
 	if username != "" {
-		values.Set("username", username)
+		parts = append(parts, "username="+url.QueryEscape(username))
 	}
 	if path != "" {
-		values.Set("path", path)
+		parts = append(parts, "path="+url.QueryEscape(path))
 	}
-	fileURL.RawQuery = values.Encode()
-	return fileURL.String()
+	return strings.Join(parts, "&")
+}
+
+func mergeHeaders(base map[string]string, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	headers := make(map[string]string, len(base)+len(override))
+	for k, v := range base {
+		headers[k] = v
+	}
+	for k, v := range override {
+		headers[k] = v
+	}
+	return headers
 }
 
 func sandboxVersionGTE(version, minVersion string) bool {
@@ -967,10 +1106,15 @@ func sandboxResponseToInfo(s *api.SandboxResponse) SandboxInfo {
 		info.Metadata[k] = v
 	}
 	if s.Network != nil {
-		info.Network = &SandboxNetworkOpts{
+		var allowPublicTraffic *bool
+		if s.Network.AllowPublicTraffic != nil {
+			allowPublicTraffic = boolRef(*s.Network.AllowPublicTraffic)
+		}
+		info.Network = &SandboxNetworkInfo{
 			AllowOut:           s.Network.AllowOut,
 			DenyOut:            s.Network.DenyOut,
-			AllowPublicTraffic: s.Network.AllowPublicTraffic,
+			Rules:              networkRulesFromAPI(s.Network.Rules),
+			AllowPublicTraffic: allowPublicTraffic,
 			MaskRequestHost:    s.Network.MaskRequestHost,
 		}
 	}

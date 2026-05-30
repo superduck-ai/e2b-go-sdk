@@ -40,7 +40,7 @@ func (l *testLogger) Warn(args ...interface{}) {
 
 func testSandboxApiOpts(serverURL string) SandboxApiOpts {
 	return SandboxApiOpts{
-		ApiKey:           "test-api-key",
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
 		apiUrl:           serverURL,
 		Domain:           "e2b.app",
 		RequestTimeoutMs: intPtr(1000),
@@ -72,6 +72,7 @@ func TestUploadURLUsesUserAndSignatureExpiration(t *testing.T) {
 	sandbox := &Sandbox{
 		envdVersion:      envd.EnvdDefaultUser,
 		envdApiUrl:       "https://envd.example",
+		envdDirectUrl:    "https://envd-direct.example",
 		envdAccessToken:  "token",
 		connectionConfig: &ConnectionConfig{},
 	}
@@ -105,6 +106,7 @@ func TestDownloadURLUsesDefaultUserForOldEnvd(t *testing.T) {
 	sandbox := &Sandbox{
 		envdVersion:      "0.3.0",
 		envdApiUrl:       "https://envd.example",
+		envdDirectUrl:    "https://envd-direct.example",
 		connectionConfig: &ConnectionConfig{},
 	}
 
@@ -118,11 +120,60 @@ func TestDownloadURLUsesDefaultUserForOldEnvd(t *testing.T) {
 	}
 }
 
+func TestDownloadURLMatchesJsDirectUrlSerialization(t *testing.T) {
+	sandbox := &Sandbox{
+		SandboxID:     "sbx-test",
+		SandboxDomain: "e2b.app",
+		envdVersion:   "0.2.4",
+		envdApiUrl:    "https://sandbox.e2b.app",
+		envdDirectUrl: "https://49983-sbx-test.e2b.app",
+		connectionConfig: &ConnectionConfig{
+			Domain:           "e2b.app",
+			RequestTimeoutMs: 1000,
+			Headers:          map[string]string{},
+		},
+	}
+
+	got, err := sandbox.DownloadUrl("/hello.txt", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "https://49983-sbx-test.e2b.app/files?username=user&path=%2Fhello.txt"
+	if got != want {
+		t.Fatalf("expected direct download URL %q, got %q", want, got)
+	}
+}
+
+func TestFileURLPreservesJsQueryParameterOrder(t *testing.T) {
+	sandbox := &Sandbox{
+		envdApiUrl:    "https://envd.example",
+		envdDirectUrl: "https://envd-direct.example",
+	}
+
+	got := sandbox.fileURL("/hello.txt", "user")
+	want := "https://envd-direct.example/files?username=user&path=%2Fhello.txt"
+	if got != want {
+		t.Fatalf("expected file URL %q, got %q", want, got)
+	}
+}
+
+func TestFileURLFallsBackToEnvdApiUrlWhenDirectUrlMissing(t *testing.T) {
+	sandbox := &Sandbox{envdApiUrl: "https://envd.example"}
+
+	got := sandbox.fileURL("/hello.txt", "user")
+	want := "https://envd.example/files?username=user&path=%2Fhello.txt"
+	if got != want {
+		t.Fatalf("expected file URL fallback %q, got %q", want, got)
+	}
+}
+
 func TestUploadURLRejectsSignatureExpirationWithoutSecureSandbox(t *testing.T) {
 	expiration := 60
 	sandbox := &Sandbox{
 		envdVersion:      envd.EnvdDefaultUser,
 		envdApiUrl:       "https://envd.example",
+		envdDirectUrl:    "https://envd-direct.example",
 		connectionConfig: &ConnectionConfig{},
 	}
 
@@ -146,6 +197,7 @@ func TestDownloadURLRejectsSignatureExpirationWithoutSecureSandbox(t *testing.T)
 	sandbox := &Sandbox{
 		envdVersion:      envd.EnvdDefaultUser,
 		envdApiUrl:       "https://envd.example",
+		envdDirectUrl:    "https://envd-direct.example",
 		connectionConfig: &ConnectionConfig{},
 	}
 
@@ -185,7 +237,7 @@ func TestListSandboxSnapshotsUsesSnapshotsEndpoint(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sandbox-123",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -226,6 +278,396 @@ func TestListSandboxSnapshotsUsesSnapshotsEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxHonorsCanceledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Create(ctx, "base", &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %T %v", err, err)
+	}
+}
+
+func TestCreateSandboxHonorsPreCanceledSignalContext(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		t.Fatal("expected pre-canceled signal to prevent create request from being sent")
+	}))
+	defer server.Close()
+
+	signal, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Create(context.Background(), "base", &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Signal:           signal,
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected pre-canceled signal error, got %T %v", err, err)
+	}
+
+	select {
+	case <-requested:
+		t.Fatal("unexpected create request despite pre-canceled signal")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestKillSandboxHonorsCanceledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Kill(ctx, "sbx-1", &SandboxApiOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		apiUrl:           server.URL,
+		Domain:           "e2b.app",
+		RequestTimeoutMs: intPtr(1000),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %T %v", err, err)
+	}
+}
+
+func TestKillSandboxHonorsPreCanceledSignalContext(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		t.Fatal("expected pre-canceled signal to prevent kill request from being sent")
+	}))
+	defer server.Close()
+
+	signal, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Kill(context.Background(), "sbx-1", &SandboxApiOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		apiUrl:           server.URL,
+		Domain:           "e2b.app",
+		RequestTimeoutMs: intPtr(1000),
+		Signal:           signal,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected pre-canceled signal error, got %T %v", err, err)
+	}
+
+	select {
+	case <-requested:
+		t.Fatal("unexpected kill request despite pre-canceled signal")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestUpdateNetworkHonorsPreCanceledSignalContext(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		t.Fatal("expected pre-canceled signal to prevent update-network request from being sent")
+	}))
+	defer server.Close()
+
+	signal, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, &SandboxApiOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		apiUrl:           server.URL,
+		Domain:           "e2b.app",
+		RequestTimeoutMs: intPtr(1000),
+		Signal:           signal,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected pre-canceled signal error, got %T %v", err, err)
+	}
+
+	select {
+	case <-requested:
+		t.Fatal("unexpected update-network request despite pre-canceled signal")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSandboxPaginatorNextItemsContextHonorsCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	paginator := List(&SandboxListOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		apiUrl:           server.URL,
+		Domain:           "e2b.app",
+		RequestTimeoutMs: intPtr(1000),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := paginator.NextItemsContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %T %v", err, err)
+	}
+}
+
+func TestSandboxPaginatorNextItemsContextHonorsPerCallOverrides(t *testing.T) {
+	var gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+
+	paginator := List(&SandboxListOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		apiUrl:           server.URL,
+		Domain:           "e2b.app",
+		RequestTimeoutMs: intPtr(1000),
+	})
+
+	_, err := paginator.NextItemsContext(context.Background(), &SandboxApiOpts{
+		ApiKey: "e2b_1111111111111111111111111111111111111111",
+	})
+	if err != nil {
+		t.Fatalf("expected paginator override call to succeed, got %v", err)
+	}
+	if gotAPIKey != "e2b_1111111111111111111111111111111111111111" {
+		t.Fatalf("expected per-call paginator API key override, got %q", gotAPIKey)
+	}
+}
+
+func TestSandboxAPIsHonorInFlightCancellation(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		requestStarted := make(chan string, 1)
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestStarted <- r.URL.Path
+			<-release
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+
+		go func() {
+			_, err := Create(ctx, "base", &SandboxOpts{
+				ConnectionOpts: ConnectionOpts{
+					ApiKey:           "e2b_0000000000000000000000000000000000000000",
+					ApiUrl:           server.URL,
+					Domain:           "e2b.app",
+					RequestTimeoutMs: intPtr(1000),
+				},
+			})
+			done <- err
+		}()
+
+		select {
+		case path := <-requestStarted:
+			if path != "/sandboxes" {
+				t.Fatalf("expected /sandboxes request, got %s", path)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for create request to start")
+		}
+
+		cancel()
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected canceled context error, got %T %v", err, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for create cancellation")
+		}
+
+		close(release)
+	})
+
+	t.Run("kill", func(t *testing.T) {
+		requestStarted := make(chan string, 1)
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestStarted <- r.URL.Path
+			<-release
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+
+		go func() {
+			_, err := Kill(ctx, "sbx-1", &SandboxApiOpts{
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
+				apiUrl:           server.URL,
+				Domain:           "e2b.app",
+				RequestTimeoutMs: intPtr(1000),
+			})
+			done <- err
+		}()
+
+		select {
+		case path := <-requestStarted:
+			if path != "/sandboxes/sbx-1" {
+				t.Fatalf("expected /sandboxes/sbx-1 request, got %s", path)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for kill request to start")
+		}
+
+		cancel()
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected canceled context error, got %T %v", err, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for kill cancellation")
+		}
+
+		close(release)
+	})
+}
+
+func TestSandboxApisHonorSignalContext(t *testing.T) {
+	runSignalCancellation := func(t *testing.T, invoke func(signal context.Context, apiURL string) error) {
+		t.Helper()
+
+		requestStarted := make(chan struct{}, 1)
+		release := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestStarted <- struct{}{}
+			<-release
+		}))
+		defer server.Close()
+
+		signal, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+
+		go func() {
+			done <- invoke(signal, server.URL)
+		}()
+
+		select {
+		case <-requestStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for request to start")
+		}
+
+		cancel()
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected signal context cancellation, got %T %v", err, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for signal cancellation")
+		}
+
+		close(release)
+	}
+
+	t.Run("create", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			_, err := Create(context.Background(), "base", &SandboxOpts{
+				ConnectionOpts: ConnectionOpts{
+					ApiKey:           "e2b_0000000000000000000000000000000000000000",
+					ApiUrl:           apiURL,
+					Domain:           "e2b.app",
+					RequestTimeoutMs: intPtr(1000),
+					Signal:           signal,
+				},
+			})
+			return err
+		})
+	})
+
+	t.Run("kill", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			_, err := Kill(context.Background(), "sbx-1", &SandboxApiOpts{
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
+				apiUrl:           apiURL,
+				Domain:           "e2b.app",
+				RequestTimeoutMs: intPtr(1000),
+				Signal:           signal,
+			})
+			return err
+		})
+	})
+
+	t.Run("update_network", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			return UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, &SandboxApiOpts{
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
+				apiUrl:           apiURL,
+				Domain:           "e2b.app",
+				RequestTimeoutMs: intPtr(1000),
+				Signal:           signal,
+			})
+		})
+	})
+
+	t.Run("instance_kill", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			sandbox := &Sandbox{
+				SandboxID: "sbx-1",
+				connectionConfig: &ConnectionConfig{
+					ApiKey:           "e2b_0000000000000000000000000000000000000000",
+					ApiUrl:           apiURL,
+					Domain:           "e2b.app",
+					RequestTimeoutMs: 1000,
+					Headers:          map[string]string{},
+				},
+			}
+			return sandbox.Kill(context.Background(), &struct {
+				RequestTimeoutMs *int
+				Signal           context.Context
+			}{RequestTimeoutMs: intPtr(1000), Signal: signal})
+		})
+	})
+
+	t.Run("instance_update_network", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			sandbox := &Sandbox{
+				SandboxID: "sbx-1",
+				connectionConfig: &ConnectionConfig{
+					ApiKey:           "e2b_0000000000000000000000000000000000000000",
+					ApiUrl:           apiURL,
+					Domain:           "e2b.app",
+					RequestTimeoutMs: 1000,
+					Headers:          map[string]string{},
+				},
+			}
+			return sandbox.UpdateNetwork(context.Background(), SandboxNetworkUpdate{}, &struct {
+				RequestTimeoutMs *int
+				Signal           context.Context
+			}{RequestTimeoutMs: intPtr(1000), Signal: signal})
+		})
+	})
+}
+
 func TestListSandboxSnapshotsIgnoresOverriddenSandboxID(t *testing.T) {
 	var gotSandboxID string
 
@@ -240,7 +682,7 @@ func TestListSandboxSnapshotsIgnoresOverriddenSandboxID(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sandbox-123",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -284,7 +726,7 @@ func TestCreateSandboxSnapshotPreservesNamesAndSendsName(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -380,8 +822,12 @@ func TestSandboxApiListSnapshotsIgnoresNames(t *testing.T) {
 
 	apiClient := &sandboxApi{}
 	paginator := apiClient.ListSnapshots(&SnapshotListOpts{
-		SandboxApiOpts: testSandboxApiOpts(server.URL),
-		SandboxID:      "sbx-1",
+		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
+		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		Domain:           testSandboxApiOpts(server.URL).Domain,
+		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
+		Headers:          testSandboxApiOpts(server.URL).Headers,
+		SandboxID:        "sbx-1",
 	})
 
 	items, err := paginator.NextItems()
@@ -420,7 +866,11 @@ func TestListSandboxesUsesQueryFilters(t *testing.T) {
 	defer server.Close()
 
 	paginator := List(&SandboxListOpts{
-		SandboxApiOpts: testSandboxApiOpts(server.URL),
+		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
+		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		Domain:           testSandboxApiOpts(server.URL).Domain,
+		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
+		Headers:          testSandboxApiOpts(server.URL).Headers,
 		Query: &struct {
 			Metadata map[string]string
 			State    []SandboxState
@@ -472,7 +922,11 @@ func TestListSandboxesDoesNotExposeRawNameWithoutAlias(t *testing.T) {
 	defer server.Close()
 
 	paginator := List(&SandboxListOpts{
-		SandboxApiOpts: testSandboxApiOpts(server.URL),
+		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
+		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		Domain:           testSandboxApiOpts(server.URL).Domain,
+		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
+		Headers:          testSandboxApiOpts(server.URL).Headers,
 	})
 
 	items, err := paginator.NextItems()
@@ -491,7 +945,7 @@ func TestSandboxResponseToInfoPreservesNetworkMaskRequestHost(t *testing.T) {
 	info := sandboxResponseToInfo(&api.SandboxResponse{
 		SandboxID: "sbx-1",
 		Network: &api.NetworkOpts{
-			AllowPublicTraffic: true,
+			AllowPublicTraffic: boolRef(true),
 			MaskRequestHost:    "${PORT}-custom.e2b.app",
 		},
 	})
@@ -499,8 +953,75 @@ func TestSandboxResponseToInfoPreservesNetworkMaskRequestHost(t *testing.T) {
 	if info.Network == nil {
 		t.Fatal("expected network info")
 	}
+	if info.Network.AllowPublicTraffic == nil || !*info.Network.AllowPublicTraffic {
+		t.Fatalf("expected allowPublicTraffic to be preserved, got %#v", info.Network.AllowPublicTraffic)
+	}
 	if info.Network.MaskRequestHost != "${PORT}-custom.e2b.app" {
 		t.Fatalf("expected maskRequestHost to be preserved, got %q", info.Network.MaskRequestHost)
+	}
+}
+
+func TestSandboxResponseToInfoLeavesAllowPublicTrafficNilWhenOmitted(t *testing.T) {
+	info := sandboxResponseToInfo(&api.SandboxResponse{
+		SandboxID: "sbx-1",
+		Network: &api.NetworkOpts{
+			MaskRequestHost: "${PORT}-custom.e2b.app",
+		},
+	})
+
+	if info.Network == nil {
+		t.Fatal("expected network info")
+	}
+	if info.Network.AllowPublicTraffic != nil {
+		t.Fatalf("expected allowPublicTraffic to stay nil when omitted, got %#v", info.Network.AllowPublicTraffic)
+	}
+}
+
+func TestSandboxResponseToInfoUsesInfoOnlyNetworkType(t *testing.T) {
+	info := sandboxResponseToInfo(&api.SandboxResponse{SandboxID: "sbx-1"})
+	if info.Network != nil {
+		t.Fatalf("expected nil network info, got %#v", info.Network)
+	}
+
+	infoType := reflect.TypeOf(SandboxInfo{})
+	networkField, ok := infoType.FieldByName("Network")
+	if !ok {
+		t.Fatal("expected SandboxInfo.Network field")
+	}
+	if networkField.Type != reflect.TypeOf(&SandboxNetworkInfo{}) {
+		t.Fatalf("expected SandboxInfo.Network type *SandboxNetworkInfo, got %v", networkField.Type)
+	}
+}
+
+func TestSandboxResponseToInfoPreservesNetworkRules(t *testing.T) {
+	info := sandboxResponseToInfo(&api.SandboxResponse{
+		SandboxID: "sbx-1",
+		Network: &api.NetworkOpts{
+			Rules: map[string][]api.NetworkRule{
+				"httpbin.e2b.team": {
+					{
+						Transform: &api.NetworkTransform{
+							Headers: map[string]string{"X-Test": "value"},
+						},
+					},
+					{},
+				},
+			},
+		},
+	})
+
+	if info.Network == nil {
+		t.Fatal("expected network info")
+	}
+	got := info.Network.Rules["httpbin.e2b.team"]
+	if len(got) != 2 {
+		t.Fatalf("expected two network rules, got %#v", info.Network.Rules)
+	}
+	if got[0].Transform == nil || got[0].Transform.Headers["X-Test"] != "value" {
+		t.Fatalf("expected first rule transform headers to be preserved, got %#v", got[0].Transform)
+	}
+	if got[1].Transform != nil {
+		t.Fatalf("expected second rule transform to stay nil, got %#v", got[1].Transform)
 	}
 }
 
@@ -628,7 +1149,7 @@ func TestSandboxApiCreateSandboxUsesNameAndPathVolumeMounts(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -691,7 +1212,7 @@ func TestSandboxApiCreateSandboxAcceptsVolumeLikeObjectsInVolumeMountMap(t *test
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -741,7 +1262,7 @@ func TestSandboxApiCreateSandboxPreservesNetworkOptions(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -751,7 +1272,7 @@ func TestSandboxApiCreateSandboxPreservesNetworkOptions(t *testing.T) {
 		Network: &SandboxNetworkOpts{
 			AllowOut:           []string{"1.1.1.1"},
 			DenyOut:            []string{ALL_TRAFFIC},
-			AllowPublicTraffic: false,
+			AllowPublicTraffic: boolRef(false),
 			MaskRequestHost:    "custom-host.example.com:${PORT}",
 		},
 	})
@@ -777,6 +1298,182 @@ func TestSandboxApiCreateSandboxPreservesNetworkOptions(t *testing.T) {
 	}
 }
 
+func TestSandboxApiCreateSandboxOmitsAllowPublicTrafficWhenUnset(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+
+		if err := json.NewEncoder(w).Encode(api.SandboxResponse{
+			SandboxID:   "sbx-1",
+			TemplateID:  "base",
+			EnvdVersion: "1.0.0",
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			AllowOut: []string{"1.1.1.1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network, ok := gotBody["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network object in request body, got %#v", gotBody["network"])
+	}
+	if _, ok := network["allowPublicTraffic"]; ok {
+		t.Fatalf("did not expect allowPublicTraffic when unset, got %#v", network["allowPublicTraffic"])
+	}
+}
+
+func TestSandboxApiCreateSandboxPreservesNetworkRules(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+
+		if err := json.NewEncoder(w).Encode(api.SandboxResponse{
+			SandboxID:   "sbx-1",
+			TemplateID:  "base",
+			EnvdVersion: "1.0.0",
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			Rules: SandboxNetworkRules{
+				"httpbin.e2b.team": {
+					{
+						Transform: &SandboxNetworkTransform{
+							Headers: map[string]string{"X-Test": "value"},
+						},
+					},
+					{},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network, ok := gotBody["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network object in request body, got %#v", gotBody["network"])
+	}
+	rawRules, ok := network["rules"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected rules object in request body, got %#v", network["rules"])
+	}
+	hostRules, ok := rawRules["httpbin.e2b.team"].([]any)
+	if !ok || len(hostRules) != 2 {
+		t.Fatalf("expected two rules for host, got %#v", rawRules["httpbin.e2b.team"])
+	}
+	firstRule, ok := hostRules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first rule object, got %#v", hostRules[0])
+	}
+	transform, ok := firstRule["transform"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected transform object in first rule, got %#v", firstRule["transform"])
+	}
+	headers, ok := transform["headers"].(map[string]any)
+	if !ok || headers["X-Test"] != "value" {
+		t.Fatalf("expected transform headers to be preserved, got %#v", transform["headers"])
+	}
+	secondRule, ok := hostRules[1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected second rule object, got %#v", hostRules[1])
+	}
+	if len(secondRule) != 0 {
+		t.Fatalf("expected second rule to stay empty, got %#v", secondRule)
+	}
+}
+
+func TestSandboxApiCreateSandboxPreservesExplicitEmptyNetworkFields(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+
+		if err := json.NewEncoder(w).Encode(api.SandboxResponse{
+			SandboxID:   "sbx-1",
+			TemplateID:  "base",
+			EnvdVersion: "1.0.0",
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			AllowOut: []string{},
+			DenyOut:  []string{},
+			Rules:    SandboxNetworkRules{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network, ok := gotBody["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network object in request body, got %#v", gotBody["network"])
+	}
+	if !reflect.DeepEqual(network["allowOut"], []any{}) {
+		t.Fatalf("expected explicit empty allowOut array, got %#v", network["allowOut"])
+	}
+	if !reflect.DeepEqual(network["denyOut"], []any{}) {
+		t.Fatalf("expected explicit empty denyOut array, got %#v", network["denyOut"])
+	}
+	if !reflect.DeepEqual(network["rules"], map[string]any{}) {
+		t.Fatalf("expected explicit empty rules object, got %#v", network["rules"])
+	}
+}
+
 func TestSandboxApiCreateSandboxDefaultsAllowInternetAccessToTrue(t *testing.T) {
 	var gotBody map[string]any
 
@@ -798,7 +1495,7 @@ func TestSandboxApiCreateSandboxDefaultsAllowInternetAccessToTrue(t *testing.T) 
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -824,8 +1521,16 @@ func TestSandboxApiCreateSandboxDefaultsAllowInternetAccessToTrue(t *testing.T) 
 	if autoPause {
 		t.Fatal("expected default autoPause to be false")
 	}
-	if _, ok := gotBody["autoResume"]; ok {
-		t.Fatalf("did not expect autoResume in default request body, got %#v", gotBody["autoResume"])
+	autoResume, ok := gotBody["autoResume"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected autoResume object in default request body, got %#v", gotBody["autoResume"])
+	}
+	enabled, ok := autoResume["enabled"].(bool)
+	if !ok {
+		t.Fatalf("expected autoResume.enabled bool, got %#v", autoResume["enabled"])
+	}
+	if enabled {
+		t.Fatal("expected default autoResume.enabled to be false")
 	}
 }
 
@@ -851,7 +1556,7 @@ func TestSandboxApiCreateSandboxPreservesExplicitZeroTimeout(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -891,7 +1596,7 @@ func TestSandboxApiCreateSandboxDefaultsSecureToTrue(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -934,7 +1639,7 @@ func TestSandboxApiCreateSandboxPreservesSecureFalse(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -978,7 +1683,7 @@ func TestSandboxApiCreateSandboxPreservesAllowInternetAccessFalse(t *testing.T) 
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -997,6 +1702,258 @@ func TestSandboxApiCreateSandboxPreservesAllowInternetAccessFalse(t *testing.T) 
 	}
 	if value {
 		t.Fatal("expected allowInternetAccess false to be preserved")
+	}
+}
+
+func TestSandboxApiCreateSandboxResolvesNetworkSelectors(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+
+		if err := json.NewEncoder(w).Encode(api.SandboxResponse{
+			SandboxID:   "sbx-1",
+			TemplateID:  "base",
+			EnvdVersion: "1.0.0",
+		}); err != nil {
+			t.Fatalf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			Rules: SandboxNetworkRules{
+				"httpbin.e2b.team": {{}},
+			},
+			AllowOut: func(ctx SandboxNetworkSelectorContext) []string {
+				if len(ctx.Rules["httpbin.e2b.team"]) != 1 {
+					t.Fatalf("expected selector context rules to be preserved, got %#v", ctx.Rules)
+				}
+				return []string{"httpbin.e2b.team"}
+			},
+			DenyOut: func(ctx SandboxNetworkSelectorContext) []string {
+				if ctx.AllTraffic != ALL_TRAFFIC {
+					t.Fatalf("expected allTraffic sentinel %q, got %q", ALL_TRAFFIC, ctx.AllTraffic)
+				}
+				return []string{ctx.AllTraffic}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	network, ok := gotBody["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected network object in request body, got %#v", gotBody["network"])
+	}
+	if !reflect.DeepEqual(network["allowOut"], []any{"httpbin.e2b.team"}) {
+		t.Fatalf("unexpected selector-resolved allowOut payload: %#v", network["allowOut"])
+	}
+	if !reflect.DeepEqual(network["denyOut"], []any{ALL_TRAFFIC}) {
+		t.Fatalf("unexpected selector-resolved denyOut payload: %#v", network["denyOut"])
+	}
+}
+
+func TestSandboxApiCreateSandboxRejectsInvalidNetworkSelectorType(t *testing.T) {
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           "http://127.0.0.1:1",
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Network: &SandboxNetworkOpts{
+			AllowOut: 123,
+		},
+	})
+	var invalidErr *InvalidArgumentError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("expected InvalidArgumentError, got %T %v", err, err)
+	}
+}
+
+func TestSandboxApiUpdateNetworkPreservesRulesAndAllowInternetAccess(t *testing.T) {
+	var gotMethod string
+	var gotPath string
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	allowInternetAccess := false
+	apiClient := &sandboxApi{}
+	err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{
+		AllowOut:            []string{"httpbin.e2b.team"},
+		DenyOut:             []string{"8.8.8.8"},
+		AllowInternetAccess: &allowInternetAccess,
+		Rules: SandboxNetworkRules{
+			"httpbin.e2b.team": {
+				{
+					Transform: &SandboxNetworkTransform{
+						Headers: map[string]string{"X-Test": "value"},
+					},
+				},
+			},
+		},
+	}, testSandboxApiOptsPtr(server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Fatalf("expected PUT request, got %s", gotMethod)
+	}
+	if gotPath != "/sandboxes/sbx-1/network" {
+		t.Fatalf("expected network update path, got %q", gotPath)
+	}
+	if !reflect.DeepEqual(gotBody["allowOut"], []any{"httpbin.e2b.team"}) {
+		t.Fatalf("unexpected allowOut payload: %#v", gotBody["allowOut"])
+	}
+	if !reflect.DeepEqual(gotBody["denyOut"], []any{"8.8.8.8"}) {
+		t.Fatalf("unexpected denyOut payload: %#v", gotBody["denyOut"])
+	}
+	if value, ok := gotBody["allow_internet_access"].(bool); !ok || value {
+		t.Fatalf("expected allow_internet_access=false, got %#v", gotBody["allow_internet_access"])
+	}
+	rawRules, ok := gotBody["rules"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected rules object in update body, got %#v", gotBody["rules"])
+	}
+	hostRules, ok := rawRules["httpbin.e2b.team"].([]any)
+	if !ok || len(hostRules) != 1 {
+		t.Fatalf("expected one rule for host, got %#v", rawRules["httpbin.e2b.team"])
+	}
+	rule, ok := hostRules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected host rule object, got %#v", hostRules[0])
+	}
+	transform, ok := rule["transform"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected transform object, got %#v", rule["transform"])
+	}
+	headers, ok := transform["headers"].(map[string]any)
+	if !ok || headers["X-Test"] != "value" {
+		t.Fatalf("expected transform headers to be preserved, got %#v", transform["headers"])
+	}
+}
+
+func TestSandboxApiUpdateNetworkPreservesExplicitEmptyFields(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{
+		AllowOut: []string{},
+		DenyOut:  []string{},
+		Rules:    SandboxNetworkRules{},
+	}, testSandboxApiOptsPtr(server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !reflect.DeepEqual(gotBody["allowOut"], []any{}) {
+		t.Fatalf("expected explicit empty allowOut array, got %#v", gotBody["allowOut"])
+	}
+	if !reflect.DeepEqual(gotBody["denyOut"], []any{}) {
+		t.Fatalf("expected explicit empty denyOut array, got %#v", gotBody["denyOut"])
+	}
+	if !reflect.DeepEqual(gotBody["rules"], map[string]any{}) {
+		t.Fatalf("expected explicit empty rules object, got %#v", gotBody["rules"])
+	}
+}
+
+func TestSandboxApiUpdateNetworkResolvesSelectors(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{
+		Rules: SandboxNetworkRules{
+			"httpbin.e2b.team": {{}},
+		},
+		AllowOut: func(ctx SandboxNetworkSelectorContext) []string {
+			return []string{"httpbin.e2b.team"}
+		},
+		DenyOut: SandboxNetworkSelectorFunc(func(ctx SandboxNetworkSelectorContext) []string {
+			return []string{ctx.AllTraffic}
+		}),
+	}, testSandboxApiOptsPtr(server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(gotBody["allowOut"], []any{"httpbin.e2b.team"}) {
+		t.Fatalf("unexpected selector-resolved allowOut payload: %#v", gotBody["allowOut"])
+	}
+	if !reflect.DeepEqual(gotBody["denyOut"], []any{ALL_TRAFFIC}) {
+		t.Fatalf("unexpected selector-resolved denyOut payload: %#v", gotBody["denyOut"])
+	}
+}
+
+func TestSandboxApiUpdateNetworkSendsEmptyBodyForZeroValueUpdate(t *testing.T) {
+	var gotBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	if err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, testSandboxApiOptsPtr(server.URL)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gotBody) != 0 {
+		t.Fatalf("expected empty update body, got %#v", gotBody)
+	}
+}
+
+func TestSandboxApiUpdateNetworkRejectsInvalidSelectorType(t *testing.T) {
+	apiClient := &sandboxApi{}
+	err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{
+		DenyOut: 123,
+	}, testSandboxApiOptsPtr("http://127.0.0.1:1"))
+	var invalidErr *InvalidArgumentError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("expected InvalidArgumentError, got %T %v", err, err)
 	}
 }
 
@@ -1021,7 +1978,7 @@ func TestSandboxApiCreateSandboxUsesAutoPauseAndAutoResumeForLifecycle(t *testin
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1030,7 +1987,7 @@ func TestSandboxApiCreateSandboxUsesAutoPauseAndAutoResumeForLifecycle(t *testin
 		Template: "base",
 		Lifecycle: &SandboxLifecycle{
 			OnTimeout:  "pause",
-			AutoResume: true,
+			AutoResume: boolRef(true),
 		},
 	})
 	if err != nil {
@@ -1083,7 +2040,7 @@ func TestBetaCreateSupportsDeprecatedAutoPause(t *testing.T) {
 	_, err := BetaCreate(context.Background(), "base", &SandboxBetaCreateOpts{
 		SandboxOpts: SandboxOpts{
 			ConnectionOpts: ConnectionOpts{
-				ApiKey:           "test-api-key",
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
 				ApiUrl:           server.URL,
 				SandboxUrl:       server.URL,
 				Domain:           "e2b.app",
@@ -1139,7 +2096,7 @@ func TestBetaCreateLifecycleOverridesDeprecatedAutoPause(t *testing.T) {
 	_, err := BetaCreate(context.Background(), "base", &SandboxBetaCreateOpts{
 		SandboxOpts: SandboxOpts{
 			ConnectionOpts: ConnectionOpts{
-				ApiKey:           "test-api-key",
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
 				ApiUrl:           server.URL,
 				SandboxUrl:       server.URL,
 				Domain:           "e2b.app",
@@ -1147,8 +2104,7 @@ func TestBetaCreateLifecycleOverridesDeprecatedAutoPause(t *testing.T) {
 				Headers:          map[string]string{},
 			},
 			Lifecycle: &SandboxLifecycle{
-				OnTimeout:  "kill",
-				AutoResume: true,
+				OnTimeout: "kill",
 			},
 		},
 		AutoPause: true,
@@ -1164,8 +2120,42 @@ func TestBetaCreateLifecycleOverridesDeprecatedAutoPause(t *testing.T) {
 	if autoPause {
 		t.Fatal("expected lifecycle to override deprecated autoPause and keep autoPause false")
 	}
-	if _, ok := gotBody["autoResume"]; ok {
-		t.Fatalf("did not expect autoResume when lifecycle.onTimeout is kill, got %#v", gotBody["autoResume"])
+	autoResume, ok := gotBody["autoResume"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected autoResume object in request body, got %#v", gotBody["autoResume"])
+	}
+	enabled, ok := autoResume["enabled"].(bool)
+	if !ok {
+		t.Fatalf("expected autoResume.enabled bool, got %#v", autoResume["enabled"])
+	}
+	if enabled {
+		t.Fatal("expected lifecycle override to keep autoResume.enabled false")
+	}
+}
+
+func TestSandboxApiCreateSandboxRejectsAutoResumeWithoutPauseLifecycle(t *testing.T) {
+	apiClient := &sandboxApi{}
+	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
+		ConnectionOpts: ConnectionOpts{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           "http://127.0.0.1:1",
+			Domain:           "e2b.app",
+			RequestTimeoutMs: intPtr(1000),
+			Headers:          map[string]string{},
+		},
+		Template: "base",
+		Lifecycle: &SandboxLifecycle{
+			OnTimeout:  "kill",
+			AutoResume: boolRef(true),
+		},
+	})
+
+	var invalidErr *InvalidArgumentError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("expected InvalidArgumentError, got %T %v", err, err)
+	}
+	if invalidErr.Message != "autoResume can only be true when the resolved onTimeout is 'pause'." {
+		t.Fatalf("unexpected error message: %q", invalidErr.Message)
 	}
 }
 
@@ -1190,7 +2180,7 @@ func TestSandboxApiCreateSandboxIncludesMcpConfig(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1249,7 +2239,7 @@ func TestCreateSandboxReturnsJsStyleMcpGatewayFailureMessage(t *testing.T) {
 
 	_, err := Create(context.Background(), "mcp-gateway", &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			SandboxUrl:       server.URL,
 			Domain:           "e2b.app",
@@ -1297,7 +2287,7 @@ func TestSandboxApiCreateSandboxRejectsOldEnvdAndDeletesSandbox(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1346,7 +2336,7 @@ func TestCreateSandboxRejectsOldEnvdAndDeletesSandbox(t *testing.T) {
 
 	_, err := Create(context.Background(), "base", &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1378,7 +2368,7 @@ func TestSandboxApiCreateSandboxErrorsWhenResponseDataIsMissing(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1399,7 +2389,7 @@ func TestCreateSandboxErrorsWhenResponseDataIsMissing(t *testing.T) {
 
 	_, err := Create(context.Background(), "base", &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1419,7 +2409,7 @@ func TestCreateSandboxSurfacesControlPlaneErrorWithoutWrapper(t *testing.T) {
 
 	_, err := Create(context.Background(), "base", &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1457,7 +2447,7 @@ func TestCreateSandboxDoesNotCallEnvdHealthOrInit(t *testing.T) {
 
 	sandbox, err := Create(context.Background(), "base", &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			SandboxUrl:       server.URL,
 			Domain:           "e2b.app",
@@ -1500,7 +2490,7 @@ func TestBetaCreateUsesDefaultTemplate(t *testing.T) {
 	sandbox, err := BetaCreate(context.Background(), "", &SandboxBetaCreateOpts{
 		SandboxOpts: SandboxOpts{
 			ConnectionOpts: ConnectionOpts{
-				ApiKey:           "test-api-key",
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
 				ApiUrl:           server.URL,
 				SandboxUrl:       server.URL,
 				Domain:           "e2b.app",
@@ -1552,7 +2542,7 @@ func TestBetaCreateUsesDefaultMcpTemplate(t *testing.T) {
 	sandbox, err := BetaCreate(context.Background(), "", &SandboxBetaCreateOpts{
 		SandboxOpts: SandboxOpts{
 			ConnectionOpts: ConnectionOpts{
-				ApiKey:           "test-api-key",
+				ApiKey:           "e2b_0000000000000000000000000000000000000000",
 				ApiUrl:           server.URL,
 				SandboxUrl:       server.URL,
 				Domain:           "e2b.app",
@@ -1695,7 +2685,7 @@ func TestSandboxRespToFullInfoPreservesExtendedFields(t *testing.T) {
 		Network: &api.NetworkOpts{
 			AllowOut:           []string{"1.1.1.1"},
 			DenyOut:            []string{"2.2.2.2"},
-			AllowPublicTraffic: true,
+			AllowPublicTraffic: boolRef(true),
 			MaskRequestHost:    "${PORT}-masked.e2b.app",
 		},
 		Lifecycle: &api.LifecycleInfoOpts{
@@ -1712,6 +2702,9 @@ func TestSandboxRespToFullInfoPreservesExtendedFields(t *testing.T) {
 	}
 	if info.Network == nil || info.Network.MaskRequestHost != "${PORT}-masked.e2b.app" {
 		t.Fatalf("expected network to be preserved, got %#v", info.Network)
+	}
+	if info.Network.AllowPublicTraffic == nil || !*info.Network.AllowPublicTraffic {
+		t.Fatalf("expected allowPublicTraffic to be preserved, got %#v", info.Network.AllowPublicTraffic)
 	}
 	if info.Lifecycle == nil || info.Lifecycle.OnTimeout != "pause" || !info.Lifecycle.AutoResume {
 		t.Fatalf("expected lifecycle to be preserved, got %#v", info.Lifecycle)
@@ -1788,6 +2781,9 @@ func TestSandboxApiGetFullInfoReturnsExtendedFields(t *testing.T) {
 	if info.Network == nil || info.Network.MaskRequestHost != "${PORT}-masked.e2b.app" {
 		t.Fatalf("expected network to be preserved, got %#v", info.Network)
 	}
+	if info.Network.AllowPublicTraffic != nil {
+		t.Fatalf("expected allowPublicTraffic to stay nil when omitted, got %#v", info.Network.AllowPublicTraffic)
+	}
 	if info.Lifecycle == nil || info.Lifecycle.OnTimeout != "pause" || !info.Lifecycle.AutoResume {
 		t.Fatalf("expected lifecycle to be preserved, got %#v", info.Lifecycle)
 	}
@@ -1818,7 +2814,7 @@ func TestSandboxApiCreateSandboxReturnsOnlyConnectionFields(t *testing.T) {
 	apiClient := &sandboxApi{}
 	info, err := apiClient.createSandbox(context.Background(), &SandboxOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -1958,6 +2954,37 @@ func TestSandboxListOptsDoesNotExposeLegacyTopLevelFilters(t *testing.T) {
 	if _, ok := queryField.Type.Elem().FieldByName("State"); !ok {
 		t.Fatal("expected SandboxListOpts.Query to expose State")
 	}
+	if _, ok := optsType.FieldByName("Signal"); ok {
+		t.Fatal("did not expect SandboxListOpts to expose Signal")
+	}
+	for _, field := range []string{"ApiKey", "Domain", "Debug", "RequestTimeoutMs", "Headers"} {
+		if _, ok := optsType.FieldByName(field); !ok {
+			t.Fatalf("expected SandboxListOpts to expose %s", field)
+		}
+	}
+	if field, ok := optsType.FieldByName("Debug"); !ok {
+		t.Fatal("expected SandboxListOpts to expose Debug")
+	} else if field.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SandboxListOpts.Debug to be *bool, got %v", field.Type)
+	}
+}
+
+func TestSnapshotListOptsMatchJsAndPythonRequestFieldShape(t *testing.T) {
+	optsType := reflect.TypeOf(SnapshotListOpts{})
+
+	if _, ok := optsType.FieldByName("Signal"); ok {
+		t.Fatal("did not expect SnapshotListOpts to expose Signal")
+	}
+	for _, field := range []string{"ApiKey", "Domain", "Debug", "RequestTimeoutMs", "Headers", "SandboxID", "Limit", "NextToken"} {
+		if _, ok := optsType.FieldByName(field); !ok {
+			t.Fatalf("expected SnapshotListOpts to expose %s", field)
+		}
+	}
+	if field, ok := optsType.FieldByName("Debug"); !ok {
+		t.Fatal("expected SnapshotListOpts to expose Debug")
+	} else if field.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SnapshotListOpts.Debug to be *bool, got %v", field.Type)
+	}
 }
 
 func TestSandboxListOptsDoNotExposeStandaloneQueryHelperType(t *testing.T) {
@@ -1993,6 +3020,40 @@ func TestCreateOptionsKeepDeprecatedAutoPauseBetaOnly(t *testing.T) {
 	}
 }
 
+func TestSandboxLifecycleAndNetworkOptionalBooleanShapesMatchJsAndPython(t *testing.T) {
+	networkField, ok := reflect.TypeOf(SandboxNetworkOpts{}).FieldByName("AllowPublicTraffic")
+	if !ok {
+		t.Fatal("expected SandboxNetworkOpts to expose AllowPublicTraffic")
+	}
+	if networkField.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SandboxNetworkOpts.AllowPublicTraffic to be *bool, got %v", networkField.Type)
+	}
+
+	infoField, ok := reflect.TypeOf(SandboxNetworkInfo{}).FieldByName("AllowPublicTraffic")
+	if !ok {
+		t.Fatal("expected SandboxNetworkInfo to expose AllowPublicTraffic")
+	}
+	if infoField.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SandboxNetworkInfo.AllowPublicTraffic to be *bool, got %v", infoField.Type)
+	}
+
+	lifecycleField, ok := reflect.TypeOf(SandboxLifecycle{}).FieldByName("AutoResume")
+	if !ok {
+		t.Fatal("expected SandboxLifecycle to expose AutoResume")
+	}
+	if lifecycleField.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SandboxLifecycle.AutoResume to be *bool, got %v", lifecycleField.Type)
+	}
+
+	infoLifecycleField, ok := reflect.TypeOf(SandboxInfoLifecycle{}).FieldByName("AutoResume")
+	if !ok {
+		t.Fatal("expected SandboxInfoLifecycle to expose AutoResume")
+	}
+	if infoLifecycleField.Type != reflect.TypeOf(false) {
+		t.Fatalf("expected SandboxInfoLifecycle.AutoResume to remain bool, got %v", infoLifecycleField.Type)
+	}
+}
+
 func TestSandboxApiOptsExposeOnlyPublicJsFields(t *testing.T) {
 	optsType := reflect.TypeOf(SandboxApiOpts{})
 
@@ -2017,8 +3078,16 @@ func TestSandboxApiOptsExposeOnlyPublicJsFields(t *testing.T) {
 	if _, ok := optsType.FieldByName("Debug"); !ok {
 		t.Fatal("expected SandboxApiOpts to expose Debug")
 	}
+	if field, ok := optsType.FieldByName("Debug"); !ok {
+		t.Fatal("expected SandboxApiOpts to expose Debug")
+	} else if field.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected SandboxApiOpts.Debug to be *bool, got %v", field.Type)
+	}
 	if _, ok := optsType.FieldByName("RequestTimeoutMs"); !ok {
 		t.Fatal("expected SandboxApiOpts to expose RequestTimeoutMs")
+	}
+	if _, ok := optsType.FieldByName("Signal"); !ok {
+		t.Fatal("expected SandboxApiOpts to expose Signal")
 	}
 	if _, ok := optsType.FieldByName("Headers"); !ok {
 		t.Fatal("expected SandboxApiOpts to expose Headers")
@@ -2034,6 +3103,7 @@ func TestSandboxApiMethodsUseSandboxApiOpts(t *testing.T) {
 		{name: "Kill", fn: Kill, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "GetInfo", fn: GetInfo, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "SetTimeout", fn: SetTimeout, optsType: reflect.TypeOf(&SandboxApiOpts{})},
+		{name: "UpdateNetwork", fn: UpdateNetwork, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "Pause", fn: Pause, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "BetaPause", fn: BetaPause, optsType: reflect.TypeOf(&SandboxApiOpts{})},
 		{name: "CreateSnapshot", fn: CreateSnapshot, optsType: reflect.TypeOf(&CreateSnapshotOpts{})},
@@ -2090,6 +3160,30 @@ func TestListFactoriesDoNotExposeContextParameter(t *testing.T) {
 	}
 	if got := listSandboxesType.Out(0); got != reflect.TypeOf(&SandboxPaginator{}) {
 		t.Fatalf("expected List to return *SandboxPaginator, got %v", got)
+	}
+
+	sandboxPaginatorType := reflect.TypeOf(&SandboxPaginator{})
+	nextItemsMethod, ok := sandboxPaginatorType.MethodByName("NextItems")
+	if !ok {
+		t.Fatal("expected SandboxPaginator.NextItems to exist")
+	}
+	if nextItemsMethod.Type.NumIn() != 2 {
+		t.Fatalf("expected SandboxPaginator.NextItems to accept optional opts, got %d inputs", nextItemsMethod.Type.NumIn()-1)
+	}
+	if got := nextItemsMethod.Type.In(1); got != reflect.TypeOf([]*SandboxApiOpts{}) {
+		t.Fatalf("expected SandboxPaginator.NextItems variadic opts type []*SandboxApiOpts, got %v", got)
+	}
+
+	snapshotPaginatorType := reflect.TypeOf(&SnapshotPaginator{})
+	nextSnapshotItemsMethod, ok := snapshotPaginatorType.MethodByName("NextItems")
+	if !ok {
+		t.Fatal("expected SnapshotPaginator.NextItems to exist")
+	}
+	if nextSnapshotItemsMethod.Type.NumIn() != 2 {
+		t.Fatalf("expected SnapshotPaginator.NextItems to accept optional opts, got %d inputs", nextSnapshotItemsMethod.Type.NumIn()-1)
+	}
+	if got := nextSnapshotItemsMethod.Type.In(1); got != reflect.TypeOf([]*SandboxApiOpts{}) {
+		t.Fatalf("expected SnapshotPaginator.NextItems variadic opts type []*SandboxApiOpts, got %v", got)
 	}
 }
 
@@ -2175,8 +3269,8 @@ func TestSandboxWrapperMethodsUseNarrowJsOptionShapes(t *testing.T) {
 	if isRunningOpts.Kind() != reflect.Pointer || isRunningOpts.Elem().Kind() != reflect.Struct {
 		t.Fatalf("expected Sandbox.IsRunning opts to be a pointer to struct, got %v", isRunningOpts)
 	}
-	if isRunningOpts.Elem().NumField() != 1 || isRunningOpts.Elem().Field(0).Name != "RequestTimeoutMs" {
-		t.Fatalf("expected Sandbox.IsRunning opts to expose only RequestTimeoutMs, got %v", isRunningOpts.Elem())
+	if isRunningOpts.Elem().NumField() != 2 || isRunningOpts.Elem().Field(0).Name != "RequestTimeoutMs" || isRunningOpts.Elem().Field(1).Name != "Signal" {
+		t.Fatalf("expected Sandbox.IsRunning opts to expose RequestTimeoutMs and Signal, got %v", isRunningOpts.Elem())
 	}
 
 	setTimeoutMethod, ok := sandboxType.MethodByName("SetTimeout")
@@ -2187,8 +3281,23 @@ func TestSandboxWrapperMethodsUseNarrowJsOptionShapes(t *testing.T) {
 	if setTimeoutOpts.Kind() != reflect.Pointer || setTimeoutOpts.Elem().Kind() != reflect.Struct {
 		t.Fatalf("expected Sandbox.SetTimeout opts to be a pointer to struct, got %v", setTimeoutOpts)
 	}
-	if setTimeoutOpts.Elem().NumField() != 1 || setTimeoutOpts.Elem().Field(0).Name != "RequestTimeoutMs" {
-		t.Fatalf("expected Sandbox.SetTimeout opts to expose only RequestTimeoutMs, got %v", setTimeoutOpts.Elem())
+	if setTimeoutOpts.Elem().NumField() != 2 || setTimeoutOpts.Elem().Field(0).Name != "RequestTimeoutMs" || setTimeoutOpts.Elem().Field(1).Name != "Signal" {
+		t.Fatalf("expected Sandbox.SetTimeout opts to expose RequestTimeoutMs and Signal, got %v", setTimeoutOpts.Elem())
+	}
+
+	updateNetworkMethod, ok := sandboxType.MethodByName("UpdateNetwork")
+	if !ok {
+		t.Fatal("expected Sandbox.UpdateNetwork to exist")
+	}
+	if got := updateNetworkMethod.Type.In(2); got != reflect.TypeOf(SandboxNetworkUpdate{}) {
+		t.Fatalf("expected Sandbox.UpdateNetwork network arg type SandboxNetworkUpdate, got %v", got)
+	}
+	updateNetworkOpts := updateNetworkMethod.Type.In(3)
+	if updateNetworkOpts.Kind() != reflect.Pointer || updateNetworkOpts.Elem().Kind() != reflect.Struct {
+		t.Fatalf("expected Sandbox.UpdateNetwork opts to be a pointer to struct, got %v", updateNetworkOpts)
+	}
+	if updateNetworkOpts.Elem().NumField() != 2 || updateNetworkOpts.Elem().Field(0).Name != "RequestTimeoutMs" || updateNetworkOpts.Elem().Field(1).Name != "Signal" {
+		t.Fatalf("expected Sandbox.UpdateNetwork opts to expose RequestTimeoutMs and Signal, got %v", updateNetworkOpts.Elem())
 	}
 
 	killMethod, ok := sandboxType.MethodByName("Kill")
@@ -2199,8 +3308,8 @@ func TestSandboxWrapperMethodsUseNarrowJsOptionShapes(t *testing.T) {
 	if killOpts.Kind() != reflect.Pointer || killOpts.Elem().Kind() != reflect.Struct {
 		t.Fatalf("expected Sandbox.Kill opts to be a pointer to struct, got %v", killOpts)
 	}
-	if killOpts.Elem().NumField() != 1 || killOpts.Elem().Field(0).Name != "RequestTimeoutMs" {
-		t.Fatalf("expected Sandbox.Kill opts to expose only RequestTimeoutMs, got %v", killOpts.Elem())
+	if killOpts.Elem().NumField() != 2 || killOpts.Elem().Field(0).Name != "RequestTimeoutMs" || killOpts.Elem().Field(1).Name != "Signal" {
+		t.Fatalf("expected Sandbox.Kill opts to expose RequestTimeoutMs and Signal, got %v", killOpts.Elem())
 	}
 
 	getInfoMethod, ok := sandboxType.MethodByName("GetInfo")
@@ -2211,8 +3320,8 @@ func TestSandboxWrapperMethodsUseNarrowJsOptionShapes(t *testing.T) {
 	if getInfoOpts.Kind() != reflect.Pointer || getInfoOpts.Elem().Kind() != reflect.Struct {
 		t.Fatalf("expected Sandbox.GetInfo opts to be a pointer to struct, got %v", getInfoOpts)
 	}
-	if getInfoOpts.Elem().NumField() != 1 || getInfoOpts.Elem().Field(0).Name != "RequestTimeoutMs" {
-		t.Fatalf("expected Sandbox.GetInfo opts to expose only RequestTimeoutMs, got %v", getInfoOpts.Elem())
+	if getInfoOpts.Elem().NumField() != 2 || getInfoOpts.Elem().Field(0).Name != "RequestTimeoutMs" || getInfoOpts.Elem().Field(1).Name != "Signal" {
+		t.Fatalf("expected Sandbox.GetInfo opts to expose RequestTimeoutMs and Signal, got %v", getInfoOpts.Elem())
 	}
 
 	createSnapshotMethod, ok := sandboxType.MethodByName("CreateSnapshot")
@@ -2276,6 +3385,7 @@ func TestSandboxApiGetMetricsUsesCurrentMetricFieldNames(t *testing.T) {
 				CpuCount:   2,
 				MemUsed:    1234,
 				MemTotal:   5678,
+				MemCache:   2468,
 				DiskUsed:   9012,
 				DiskTotal:  3456,
 			},
@@ -2300,6 +3410,9 @@ func TestSandboxApiGetMetricsUsesCurrentMetricFieldNames(t *testing.T) {
 	if metric.MemUsed != 1234 || metric.MemTotal != 5678 {
 		t.Fatalf("expected current memory metric fields to be populated, got %#v", metric)
 	}
+	if metric.MemCache != 2468 {
+		t.Fatalf("expected mem cache to be populated, got %#v", metric)
+	}
 	if metric.DiskUsed != 9012 || metric.DiskTotal != 3456 {
 		t.Fatalf("expected current disk metric fields to be populated, got %#v", metric)
 	}
@@ -2317,6 +3430,7 @@ func TestSandboxApiGetMetricsFallsBackToLegacyMetricFieldNames(t *testing.T) {
 				CpuCount:     2,
 				MemUsedMiB:   1234,
 				MemTotalMiB:  5678,
+				MemCache:     2468,
 				DiskUsedMiB:  9012,
 				DiskTotalMiB: 3456,
 			},
@@ -2340,6 +3454,9 @@ func TestSandboxApiGetMetricsFallsBackToLegacyMetricFieldNames(t *testing.T) {
 	metric := metrics[0]
 	if metric.MemUsed != 1234 || metric.MemTotal != 5678 {
 		t.Fatalf("expected legacy memory metric fields to backfill current fields, got %#v", metric)
+	}
+	if metric.MemCache != 2468 {
+		t.Fatalf("expected mem cache to remain populated, got %#v", metric)
 	}
 	if metric.DiskUsed != 9012 || metric.DiskTotal != 3456 {
 		t.Fatalf("expected legacy disk metric fields to backfill current fields, got %#v", metric)
@@ -2385,7 +3502,7 @@ func TestGetSandboxMetricsRejectsOldEnvdVersion(t *testing.T) {
 		SandboxID:   "sbx-1",
 		envdVersion: "0.1.4",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
 			Headers:          map[string]string{},
@@ -2426,7 +3543,7 @@ func TestGetSandboxMetricsWarnsWhenDiskMetricsUnsupported(t *testing.T) {
 		SandboxID:   "sbx-1",
 		envdVersion: "0.2.3",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2469,7 +3586,7 @@ func TestGetSandboxMetricsRoundsTimeFiltersToNearestSecond(t *testing.T) {
 		SandboxID:   "sbx-1",
 		envdVersion: "1.0.0",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2504,6 +3621,51 @@ func TestNewSandboxFromResponseUsesDomainField(t *testing.T) {
 
 	if sandbox.SandboxDomain != "sandbox.example.com" {
 		t.Fatalf("expected sandbox domain to use response domain field, got %q", sandbox.SandboxDomain)
+	}
+}
+
+func TestNewSandboxFromResponseUsesStableApiUrlAndDirectFileUrlForSupportedDomains(t *testing.T) {
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:   "sbx-1",
+		Domain:      "e2b.app",
+		EnvdVersion: "1.0.0",
+	}, &ConnectionConfig{
+		Domain:           "e2b.app",
+		RequestTimeoutMs: 1000,
+		Headers:          map[string]string{},
+	})
+
+	if sandbox.envdApiUrl != "https://sandbox.e2b.app" {
+		t.Fatalf("expected stable envd API URL, got %q", sandbox.envdApiUrl)
+	}
+	if sandbox.envdDirectUrl != "https://49983-sbx-1.e2b.app" {
+		t.Fatalf("expected direct envd URL, got %q", sandbox.envdDirectUrl)
+	}
+
+	got := sandbox.fileURL("/hello.txt", "user")
+	want := "https://49983-sbx-1.e2b.app/files?username=user&path=%2Fhello.txt"
+	if got != want {
+		t.Fatalf("expected direct file URL %q, got %q", want, got)
+	}
+}
+
+func TestNewSandboxFromResponseKeepsPerSandboxApiUrlOutsideSupportedDomains(t *testing.T) {
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:   "sbx-1",
+		Domain:      "sandbox.example.com",
+		EnvdVersion: "1.0.0",
+	}, &ConnectionConfig{
+		Domain:           "e2b.app",
+		RequestTimeoutMs: 1000,
+		Headers:          map[string]string{},
+	})
+
+	want := "https://49983-sbx-1.sandbox.example.com"
+	if sandbox.envdApiUrl != want {
+		t.Fatalf("expected envd API URL %q, got %q", want, sandbox.envdApiUrl)
+	}
+	if sandbox.envdDirectUrl != want {
+		t.Fatalf("expected envd direct URL %q, got %q", want, sandbox.envdDirectUrl)
 	}
 }
 
@@ -2590,7 +3752,10 @@ func TestIsRunningUsesPerCallRequestTimeoutOverride(t *testing.T) {
 
 	timeout := 20
 	start := time.Now()
-	_, err := sandbox.IsRunning(context.Background(), &struct{ RequestTimeoutMs *int }{
+	_, err := sandbox.IsRunning(context.Background(), &struct {
+		RequestTimeoutMs *int
+		Signal           context.Context
+	}{
 		RequestTimeoutMs: &timeout,
 	})
 	if err == nil {
@@ -2601,11 +3766,140 @@ func TestIsRunningUsesPerCallRequestTimeoutOverride(t *testing.T) {
 	}
 }
 
+func TestIsRunningHonorsPreCanceledSignalContext(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- struct{}{}
+		t.Fatal("expected pre-canceled signal to prevent IsRunning request from being sent")
+	}))
+	defer server.Close()
+
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:   "sbx-1",
+		Domain:      "sandbox.example.com",
+		EnvdVersion: "1.0.0",
+	}, &ConnectionConfig{
+		Domain:           "e2b.app",
+		SandboxUrl:       server.URL,
+		RequestTimeoutMs: 1000,
+		Headers:          map[string]string{},
+	})
+
+	signal, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := sandbox.IsRunning(context.Background(), &struct {
+		RequestTimeoutMs *int
+		Signal           context.Context
+	}{
+		Signal: signal,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected pre-canceled signal error, got %T %v", err, err)
+	}
+
+	select {
+	case <-requested:
+		t.Fatal("unexpected IsRunning request despite pre-canceled signal")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestIsRunningHonorsSignalContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:   "sbx-1",
+		Domain:      "sandbox.example.com",
+		EnvdVersion: "1.0.0",
+	}, &ConnectionConfig{
+		Domain:           "e2b.app",
+		SandboxUrl:       server.URL,
+		RequestTimeoutMs: 1000,
+		Headers:          map[string]string{},
+	})
+
+	signal, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := sandbox.IsRunning(context.Background(), &struct {
+		RequestTimeoutMs *int
+		Signal           context.Context
+	}{
+		Signal: signal,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled signal error, got %T %v", err, err)
+	}
+}
+
+func TestUpdateNetworkForwardsPerCallSignal(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sandboxes/sbx-1/network" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		requestStarted <- struct{}{}
+		<-release
+	}))
+	defer server.Close()
+
+	sandbox := &Sandbox{
+		SandboxID: "sbx-1",
+		connectionConfig: &ConnectionConfig{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: 1000,
+			Headers:          map[string]string{},
+		},
+	}
+
+	signal, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- sandbox.UpdateNetwork(context.Background(), SandboxNetworkUpdate{}, &struct {
+			RequestTimeoutMs *int
+			Signal           context.Context
+		}{
+			Signal: signal,
+		})
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for update-network request to start")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected canceled signal error, got %T %v", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for update-network signal cancellation")
+	}
+
+	close(release)
+}
+
 func TestNewSandboxFromResponseAddsSandboxHeadersToCommandRequests(t *testing.T) {
 	var gotSandboxID string
 	var gotSandboxPort string
 	var gotAccessToken string
 	var gotCustomHeader string
+	var gotUserAgent string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/process.Process/List" {
@@ -2615,6 +3909,7 @@ func TestNewSandboxFromResponseAddsSandboxHeadersToCommandRequests(t *testing.T)
 		gotSandboxPort = r.Header.Get("E2b-Sandbox-Port")
 		gotAccessToken = r.Header.Get("X-Access-Token")
 		gotCustomHeader = r.Header.Get("X-Test")
+		gotUserAgent = r.Header.Get("User-Agent")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"processes": []any{},
 		}); err != nil {
@@ -2623,19 +3918,22 @@ func TestNewSandboxFromResponseAddsSandboxHeadersToCommandRequests(t *testing.T)
 	}))
 	defer server.Close()
 
+	timeout := 1000
+	connConfig := NewConnectionConfig(&ConnectionOpts{
+		Domain:           "e2b.app",
+		SandboxUrl:       server.URL,
+		RequestTimeoutMs: &timeout,
+		Headers: map[string]string{
+			"X-Test": "value",
+		},
+	})
+
 	sandbox := newSandboxFromResponse(&api.SandboxResponse{
 		SandboxID:       "sbx-1",
 		Domain:          "sandbox.example.com",
 		EnvdVersion:     "1.0.0",
 		EnvdAccessToken: "envd-token",
-	}, &ConnectionConfig{
-		Domain:           "e2b.app",
-		SandboxUrl:       server.URL,
-		RequestTimeoutMs: 1000,
-		Headers: map[string]string{
-			"X-Test": "value",
-		},
-	})
+	}, connConfig)
 
 	processes, err := sandbox.Commands.List(context.Background(), nil)
 	if err != nil {
@@ -2655,6 +3953,152 @@ func TestNewSandboxFromResponseAddsSandboxHeadersToCommandRequests(t *testing.T)
 	}
 	if gotCustomHeader != "value" {
 		t.Fatalf("expected custom header to be preserved, got %q", gotCustomHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected User-Agent to be preserved, got %q", gotUserAgent)
+	}
+}
+
+func TestNewSandboxFromResponseAddsSandboxHeadersToFilesystemRequests(t *testing.T) {
+	var gotSandboxID string
+	var gotSandboxPort string
+	var gotAccessToken string
+	var gotCustomHeader string
+	var gotUserAgent string
+	var gotPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		gotSandboxID = r.Header.Get("E2b-Sandbox-Id")
+		gotSandboxPort = r.Header.Get("E2b-Sandbox-Port")
+		gotAccessToken = r.Header.Get("X-Access-Token")
+		gotCustomHeader = r.Header.Get("X-Test")
+		gotUserAgent = r.Header.Get("User-Agent")
+		gotPath = r.URL.Query().Get("path")
+		if _, err := w.Write([]byte("hello")); err != nil {
+			t.Fatalf("failed to write filesystem response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	timeout := 1000
+	connConfig := NewConnectionConfig(&ConnectionOpts{
+		Domain:           "e2b.app",
+		SandboxUrl:       server.URL,
+		RequestTimeoutMs: &timeout,
+		Headers: map[string]string{
+			"X-Test": "value",
+		},
+	})
+
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:       "sbx-1",
+		Domain:          "sandbox.example.com",
+		EnvdVersion:     "1.0.0",
+		EnvdAccessToken: "envd-token",
+	}, connConfig)
+
+	readValue, err := sandbox.Files.Read(context.Background(), "/tmp/hello.txt", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text, ok := readValue.(string)
+	if !ok {
+		t.Fatalf("expected text read result, got %T", readValue)
+	}
+	if text != "hello" {
+		t.Fatalf("expected filesystem body %q, got %q", "hello", text)
+	}
+	if gotPath != "/tmp/hello.txt" {
+		t.Fatalf("expected filesystem path query to be preserved, got %q", gotPath)
+	}
+	if gotSandboxID != "sbx-1" {
+		t.Fatalf("expected E2b-Sandbox-Id header, got %q", gotSandboxID)
+	}
+	if gotSandboxPort != "49983" {
+		t.Fatalf("expected E2b-Sandbox-Port header 49983, got %q", gotSandboxPort)
+	}
+	if gotAccessToken != "envd-token" {
+		t.Fatalf("expected X-Access-Token header envd-token, got %q", gotAccessToken)
+	}
+	if gotCustomHeader != "value" {
+		t.Fatalf("expected custom header to be preserved, got %q", gotCustomHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected User-Agent to be preserved, got %q", gotUserAgent)
+	}
+}
+
+func TestNewSandboxFromResponseAddsSandboxHeadersToPtyRequests(t *testing.T) {
+	var gotSandboxID string
+	var gotSandboxPort string
+	var gotAccessToken string
+	var gotCustomHeader string
+	var gotUserAgent string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		gotSandboxID = r.Header.Get("E2b-Sandbox-Id")
+		gotSandboxPort = r.Header.Get("E2b-Sandbox-Port")
+		gotAccessToken = r.Header.Get("X-Access-Token")
+		gotCustomHeader = r.Header.Get("X-Test")
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeProcessEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeProcessEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write pty response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	timeout := 1000
+	connConfig := NewConnectionConfig(&ConnectionOpts{
+		Domain:           "e2b.app",
+		SandboxUrl:       server.URL,
+		RequestTimeoutMs: &timeout,
+		Headers: map[string]string{
+			"X-Test": "value",
+		},
+	})
+
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:       "sbx-1",
+		Domain:          "sandbox.example.com",
+		EnvdVersion:     "1.0.0",
+		EnvdAccessToken: "envd-token",
+	}, connConfig)
+
+	handle, err := sandbox.Pty.Create(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result, err := handle.Wait()
+	if err != nil {
+		t.Fatalf("unexpected wait error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected pty exit code 0, got %#v", result)
+	}
+	if gotSandboxID != "sbx-1" {
+		t.Fatalf("expected E2b-Sandbox-Id header, got %q", gotSandboxID)
+	}
+	if gotSandboxPort != "49983" {
+		t.Fatalf("expected E2b-Sandbox-Port header 49983, got %q", gotSandboxPort)
+	}
+	if gotAccessToken != "envd-token" {
+		t.Fatalf("expected X-Access-Token header envd-token, got %q", gotAccessToken)
+	}
+	if gotCustomHeader != "value" {
+		t.Fatalf("expected custom header to be preserved, got %q", gotCustomHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected User-Agent to be preserved, got %q", gotUserAgent)
 	}
 }
 
@@ -2699,7 +4143,7 @@ func TestGetSandboxInfoWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2723,7 +4167,7 @@ func TestGetSandboxInfoReturnsSandboxNotFoundOnEmptyBody(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2746,7 +4190,7 @@ func TestCreateSandboxSnapshotErrorsWhenResponseDataIsMissing(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2769,7 +4213,7 @@ func TestCreateSandboxSnapshotWrapsNotFoundAsSandboxNotFoundError(t *testing.T) 
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2793,7 +4237,7 @@ func TestPauseSandboxWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -2808,6 +4252,44 @@ func TestPauseSandboxWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
 	}
 }
 
+func TestUpdateNetworkWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	sandbox := &Sandbox{
+		SandboxID: "sbx-1",
+		connectionConfig: &ConnectionConfig{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: 1000,
+			Headers:          map[string]string{},
+		},
+	}
+
+	err := sandbox.UpdateNetwork(context.Background(), SandboxNetworkUpdate{}, nil)
+	var notFoundErr *SandboxNotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected SandboxNotFoundError, got %T %v", err, err)
+	}
+}
+
+func TestSandboxApiUpdateNetworkWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	apiClient := &sandboxApi{}
+	err := apiClient.UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, testSandboxApiOptsPtr(server.URL))
+	var notFoundErr *SandboxNotFoundError
+	if !errors.As(err, &notFoundErr) {
+		t.Fatalf("expected SandboxNotFoundError, got %T %v", err, err)
+	}
+}
+
 func TestConnectSandboxWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"missing"}`, http.StatusNotFound)
@@ -2816,7 +4298,7 @@ func TestConnectSandboxWrapsNotFoundAsSandboxNotFoundError(t *testing.T) {
 
 	_, err := Connect(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -2841,7 +4323,7 @@ func TestSandboxApiConnectSandboxUsesPausedSandboxNotFoundMessage(t *testing.T) 
 	apiClient := &sandboxApi{}
 	_, err := apiClient.connectSandbox(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -2881,7 +4363,7 @@ func TestSandboxApiConnectSandboxPreservesExplicitZeroTimeout(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.connectSandbox(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -2906,7 +4388,7 @@ func TestConnectSandboxErrorsWhenResponseDataIsMissing(t *testing.T) {
 
 	_, err := Connect(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -2927,7 +4409,7 @@ func TestSandboxApiConnectSandboxErrorsWhenResponseDataIsMissing(t *testing.T) {
 	apiClient := &sandboxApi{}
 	_, err := apiClient.connectSandbox(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: intPtr(1000),
@@ -2965,7 +4447,7 @@ func TestConnectSandboxDoesNotCallEnvdHealth(t *testing.T) {
 
 	sandbox, err := Connect(context.Background(), "sbx-1", &SandboxConnectOpts{
 		ConnectionOpts: ConnectionOpts{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			SandboxUrl:       server.URL,
 			Domain:           "e2b.app",
@@ -3011,7 +4493,7 @@ func TestKillIgnoresNotFound(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -3048,7 +4530,7 @@ func TestBetaPauseMatchesPauseConflictBehavior(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -3108,7 +4590,7 @@ func TestPauseAliasMatchesPauseSandboxConflictBehavior(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -3122,6 +4604,171 @@ func TestPauseAliasMatchesPauseSandboxConflictBehavior(t *testing.T) {
 	}
 	if paused {
 		t.Fatal("expected Pause alias to return false on 409 conflict")
+	}
+}
+
+func TestPausePassesInheritedConnectionConfigWithoutOverrides(t *testing.T) {
+	var gotAPIKey string
+	var gotTestHeader string
+	var gotUserAgent string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		gotTestHeader = r.Header.Get("X-Test")
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	timeout := 1111
+	connConfig := NewConnectionConfig(&ConnectionOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		ApiUrl:           server.URL,
+		Domain:           "base.e2b.dev",
+		RequestTimeoutMs: &timeout,
+		Headers: map[string]string{
+			"X-Test": "base",
+		},
+	})
+	connConfig.Debug = false
+
+	sandbox := &Sandbox{
+		SandboxID:        "sbx-test",
+		connectionConfig: connConfig,
+	}
+
+	paused, err := sandbox.Pause(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected pause without overrides to succeed, got %v", err)
+	}
+	if !paused {
+		t.Fatal("expected Pause to return true on successful pause")
+	}
+	if gotAPIKey != "e2b_0000000000000000000000000000000000000000" {
+		t.Fatalf("expected inherited API key to be forwarded, got %q", gotAPIKey)
+	}
+	if gotTestHeader != "base" {
+		t.Fatalf("expected inherited X-Test header to be forwarded, got %q", gotTestHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected inherited User-Agent to be forwarded, got %q", gotUserAgent)
+	}
+}
+
+func TestPauseLetsPerCallOverridesWinOverInheritedConnectionConfig(t *testing.T) {
+	var gotAPIKey string
+	var gotTestHeader string
+	var gotExtraHeader string
+	var gotUserAgent string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		gotTestHeader = r.Header.Get("X-Test")
+		gotExtraHeader = r.Header.Get("X-Extra")
+		gotUserAgent = r.Header.Get("User-Agent")
+		time.Sleep(60 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	baseTimeout := 20
+	overrideTimeout := 200
+	connConfig := NewConnectionConfig(&ConnectionOpts{
+		ApiKey:           "e2b_0000000000000000000000000000000000000000",
+		ApiUrl:           server.URL,
+		Domain:           "base.e2b.dev",
+		RequestTimeoutMs: &baseTimeout,
+		Headers: map[string]string{
+			"X-Test": "base",
+		},
+	})
+	connConfig.Debug = false
+
+	sandbox := &Sandbox{
+		SandboxID:        "sbx-test",
+		connectionConfig: connConfig,
+	}
+
+	start := time.Now()
+	paused, err := sandbox.Pause(context.Background(), &ConnectionOpts{
+		ApiKey:           "e2b_1111111111111111111111111111111111111111",
+		Domain:           "override.e2b.dev",
+		RequestTimeoutMs: &overrideTimeout,
+		Headers: map[string]string{
+			"X-Test":  "override",
+			"X-Extra": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected pause override call to succeed, got %v", err)
+	}
+	if !paused {
+		t.Fatal("expected Pause to return true when override timeout allows response to complete")
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("expected override request timeout to allow delayed response, elapsed=%s", elapsed)
+	}
+	if gotAPIKey != "e2b_1111111111111111111111111111111111111111" {
+		t.Fatalf("expected per-call API key override to win, got %q", gotAPIKey)
+	}
+	if gotTestHeader != "override" {
+		t.Fatalf("expected per-call X-Test header override to win, got %q", gotTestHeader)
+	}
+	if gotExtraHeader != "1" {
+		t.Fatalf("expected per-call X-Extra header to be forwarded, got %q", gotExtraHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected inherited User-Agent to be preserved, got %q", gotUserAgent)
+	}
+}
+
+func TestPauseMergesPerCallHeadersOverInheritedConnectionHeaders(t *testing.T) {
+	var gotTestHeader string
+	var gotExtraHeader string
+	var gotUserAgent string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTestHeader = r.Header.Get("X-Test")
+		gotExtraHeader = r.Header.Get("X-Extra")
+		gotUserAgent = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"already paused"}`))
+	}))
+	defer server.Close()
+
+	sandbox := &Sandbox{
+		SandboxID: "sbx-1",
+		connectionConfig: &ConnectionConfig{
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			Domain:           "e2b.app",
+			RequestTimeoutMs: 1000,
+			Headers: map[string]string{
+				"User-Agent": "e2b-go-sdk/dev",
+				"X-Test":     "base",
+			},
+		},
+	}
+
+	paused, err := sandbox.Pause(context.Background(), &ConnectionOpts{
+		Headers: map[string]string{
+			"X-Extra": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no error for 409 conflict, got %v", err)
+	}
+	if paused {
+		t.Fatal("expected Pause alias to return false on 409 conflict")
+	}
+	if gotTestHeader != "base" {
+		t.Fatalf("expected inherited X-Test header to be preserved, got %q", gotTestHeader)
+	}
+	if gotExtraHeader != "1" {
+		t.Fatalf("expected per-call X-Extra header to be forwarded, got %q", gotExtraHeader)
+	}
+	if gotUserAgent != "e2b-go-sdk/dev" {
+		t.Fatalf("expected inherited User-Agent to be preserved, got %q", gotUserAgent)
 	}
 }
 
@@ -3143,7 +4790,7 @@ func TestConnectMethodReturnsSameSandboxHandle(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,
@@ -3206,6 +4853,123 @@ func TestResolveConnectionConfigCarriesSandboxUrlAndLoggerOverrides(t *testing.T
 	}
 }
 
+func TestResolveConnectionConfigMergesHeadersWithPerCallOverrides(t *testing.T) {
+	sandbox := &Sandbox{
+		connectionConfig: &ConnectionConfig{
+			RequestTimeoutMs: 1000,
+			Headers: map[string]string{
+				"User-Agent": "e2b-go-sdk/dev",
+				"X-Test":     "base",
+			},
+		},
+	}
+
+	resolved := sandbox.resolveConnectionConfig(&ConnectionOpts{
+		Headers: map[string]string{
+			"X-Extra": "1",
+		},
+	})
+
+	if resolved.Headers["User-Agent"] != "e2b-go-sdk/dev" {
+		t.Fatalf("expected base User-Agent to be preserved, got %#v", resolved.Headers)
+	}
+	if resolved.Headers["X-Test"] != "base" {
+		t.Fatalf("expected base header to be preserved, got %#v", resolved.Headers)
+	}
+	if resolved.Headers["X-Extra"] != "1" {
+		t.Fatalf("expected override header to be merged, got %#v", resolved.Headers)
+	}
+}
+
+func TestResolveConnectionConfigLetsPerCallHeadersOverrideBaseValues(t *testing.T) {
+	sandbox := &Sandbox{
+		connectionConfig: &ConnectionConfig{
+			RequestTimeoutMs: 1000,
+			Headers: map[string]string{
+				"X-Test":  "base",
+				"X-Other": "keep",
+			},
+		},
+	}
+
+	resolved := sandbox.resolveConnectionConfig(&ConnectionOpts{
+		Headers: map[string]string{
+			"X-Test": "override",
+		},
+	})
+
+	if resolved.Headers["X-Test"] != "override" {
+		t.Fatalf("expected override header to win, got %#v", resolved.Headers)
+	}
+	if resolved.Headers["X-Other"] != "keep" {
+		t.Fatalf("expected unrelated base header to be preserved, got %#v", resolved.Headers)
+	}
+}
+
+func TestResolveConnectionConfigAllowsExplicitFalseDebugOverride(t *testing.T) {
+	sandbox := &Sandbox{
+		connectionConfig: &ConnectionConfig{
+			Debug:            true,
+			RequestTimeoutMs: 1000,
+			Headers:          map[string]string{},
+		},
+	}
+
+	resolved := sandbox.resolveConnectionConfig(&ConnectionOpts{
+		Debug: boolRef(false),
+	})
+
+	if resolved.Debug {
+		t.Fatalf("expected explicit false debug override to disable inherited debug, got %#v", resolved)
+	}
+}
+
+func TestResolveSandboxApiConnectionConfigMergesHeadersWithOverrides(t *testing.T) {
+	sandbox := &Sandbox{
+		connectionConfig: &ConnectionConfig{
+			RequestTimeoutMs: 1000,
+			Headers: map[string]string{
+				"User-Agent": "e2b-go-sdk/dev",
+				"X-Test":     "base",
+			},
+		},
+	}
+
+	resolved := sandbox.resolveSandboxApiConnectionConfig(&SandboxApiOpts{
+		Headers: map[string]string{
+			"X-Extra": "1",
+		},
+	})
+
+	if resolved.Headers["User-Agent"] != "e2b-go-sdk/dev" {
+		t.Fatalf("expected base User-Agent to be preserved, got %#v", resolved.Headers)
+	}
+	if resolved.Headers["X-Test"] != "base" {
+		t.Fatalf("expected base header to be preserved, got %#v", resolved.Headers)
+	}
+	if resolved.Headers["X-Extra"] != "1" {
+		t.Fatalf("expected override header to be merged, got %#v", resolved.Headers)
+	}
+}
+
+func TestResolveSandboxApiConnectionConfigAllowsExplicitFalseDebugOverride(t *testing.T) {
+	sandbox := &Sandbox{
+		connectionConfig: &ConnectionConfig{
+			Debug:            true,
+			RequestTimeoutMs: 1000,
+			Headers:          map[string]string{},
+		},
+	}
+
+	resolved := sandbox.resolveSandboxApiConnectionConfig(&SandboxApiOpts{
+		Debug: boolRef(false),
+	})
+
+	if resolved.Debug {
+		t.Fatalf("expected explicit false debug override to disable inherited debug, got %#v", resolved)
+	}
+}
+
 func TestListSnapshotsAliasUsesSandboxSnapshotsEndpoint(t *testing.T) {
 	var gotPath string
 	var gotSandboxID string
@@ -3222,7 +4986,7 @@ func TestListSnapshotsAliasUsesSandboxSnapshotsEndpoint(t *testing.T) {
 	sandbox := &Sandbox{
 		SandboxID: "sbx-1",
 		connectionConfig: &ConnectionConfig{
-			ApiKey:           "test-api-key",
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
 			ApiUrl:           server.URL,
 			Domain:           "e2b.app",
 			RequestTimeoutMs: 1000,

@@ -170,6 +170,54 @@ func TestGetAllFilesInPathMatchesNestedIgnorePatterns(t *testing.T) {
 	})
 }
 
+func TestGetAllFilesInPathTreatsSlashlessIgnorePatternsAsRootRelativeLikeJsAndPython(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateFixture(t, dir, ".env", "root secret")
+	writeTemplateFixture(t, dir, "temp.txt", "root temp")
+	writeTemplateFixture(t, dir, "sub/.env", "nested secret")
+	writeTemplateFixture(t, dir, "sub/temp.txt", "nested temp")
+	writeTemplateFixture(t, dir, "sub/file.txt", "nested file")
+
+	files, err := getAllFilesInPath("*", dir, []string{".env", "temp*"}, true, false)
+	if err != nil {
+		t.Fatalf("getAllFilesInPath root-relative ignore returned error: %v", err)
+	}
+	assertStringSet(t, files, []string{
+		"sub",
+		"sub/.env",
+		"sub/file.txt",
+		"sub/temp.txt",
+	})
+
+	files, err = getAllFilesInPath("sub", dir, []string{".env", "temp*"}, true, false)
+	if err != nil {
+		t.Fatalf("getAllFilesInPath nested root-relative ignore returned error: %v", err)
+	}
+	assertStringSet(t, files, []string{
+		"sub",
+		"sub/.env",
+		"sub/file.txt",
+		"sub/temp.txt",
+	})
+}
+
+func TestGetAllFilesInPathDotPatternStaysWithinContextLikeJsAndPython(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateFixture(t, dir, "root.txt", "root")
+	writeTemplateFixture(t, dir, "subdir/nested.txt", "nested")
+
+	files, err := getAllFilesInPath(".", dir, nil, true, false)
+	if err != nil {
+		t.Fatalf("getAllFilesInPath dot pattern returned error: %v", err)
+	}
+	assertStringSet(t, files, []string{
+		".",
+		"root.txt",
+		"subdir",
+		"subdir/nested.txt",
+	})
+}
+
 func TestTarFileBytesPreservesAndResolvesSymlinksLikeJsAndPython(t *testing.T) {
 	dir := t.TempDir()
 	writeTemplateFixture(t, dir, "original.txt", "original content")

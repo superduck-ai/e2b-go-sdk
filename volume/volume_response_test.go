@@ -15,7 +15,7 @@ func TestVolumeListReturnsEmptySliceWhenResponseBodyMissing(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	entries, err := v.List(context.Background(), "/dir", nil)
+	entries, err := v.List(context.Background(), "/dir", testVolumeListOpts(server.URL))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestVolumeGetInfoErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	_, err := v.GetInfo(context.Background(), "/file.txt", nil)
+	_, err := v.GetInfo(context.Background(), "/file.txt", testVolumeApiOpts(server.URL))
 	if err == nil {
 		t.Fatal("expected missing response data error")
 	}
@@ -50,7 +50,7 @@ func TestVolumeMakeDirErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	_, err := v.MakeDir(context.Background(), "/dir", nil)
+	_, err := v.MakeDir(context.Background(), "/dir", &VolumeWriteOptions{ApiUrl: server.URL})
 	if err == nil {
 		t.Fatal("expected missing response data error")
 	}
@@ -66,7 +66,7 @@ func TestVolumeUpdateMetadataErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	_, err := v.UpdateMetadata(context.Background(), "/file.txt", &VolumeMetadataOptions{}, nil)
+	_, err := v.UpdateMetadata(context.Background(), "/file.txt", &VolumeMetadataOptions{}, testVolumeApiOpts(server.URL))
 	if err == nil {
 		t.Fatal("expected missing response data error")
 	}
@@ -82,7 +82,7 @@ func TestVolumeWriteFileErrorsWhenResponseDataIsMissing(t *testing.T) {
 	defer server.Close()
 
 	v := testVolumeClient(server.URL)
-	_, err := v.WriteFile(context.Background(), "/file.txt", http.NoBody, nil)
+	_, err := v.WriteFile(context.Background(), "/file.txt", http.NoBody, &VolumeWriteOptions{ApiUrl: server.URL})
 	if err == nil {
 		t.Fatal("expected missing response data error")
 	}

@@ -9,12 +9,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/superduck-ai/e2b-go-sdk/commands"
 	"github.com/superduck-ai/e2b-go-sdk/envd/process"
 	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
 )
+
+func boolPtr(v bool) *bool { return &v }
+
+func directFieldNames(typ reflect.Type) []string {
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		names = append(names, typ.Field(i).Name)
+	}
+	return names
+}
 
 func TestResolveOptionalBool(t *testing.T) {
 	if !resolveOptionalBool(nil, true) {
@@ -132,6 +143,110 @@ func TestRemoteGetRejectsMissingName(t *testing.T) {
 	}
 }
 
+func TestGitOptionStructsMatchJsAndPythonFieldShapes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		typ  reflect.Type
+		want []string
+	}{
+		{
+			name: "clone",
+			typ:  reflect.TypeOf(GitCloneOpts{}),
+			want: []string{"GitRequestOpts", "Path", "Branch", "Depth", "Username", "Password", "DangerouslyStoreCredentials"},
+		},
+		{
+			name: "commit",
+			typ:  reflect.TypeOf(GitCommitOpts{}),
+			want: []string{"GitRequestOpts", "AuthorName", "AuthorEmail", "AllowEmpty"},
+		},
+		{
+			name: "push",
+			typ:  reflect.TypeOf(GitPushOpts{}),
+			want: []string{"GitRequestOpts", "Remote", "Branch", "SetUpstream", "Username", "Password"},
+		},
+		{
+			name: "pull",
+			typ:  reflect.TypeOf(GitPullOpts{}),
+			want: []string{"GitRequestOpts", "Remote", "Branch", "Username", "Password"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := directFieldNames(tc.typ); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("unexpected field shape for %s opts: got %v want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+
+	cloneOptsType := reflect.TypeOf(GitCloneOpts{})
+	if field, ok := cloneOptsType.FieldByName("Depth"); !ok {
+		t.Fatal("expected GitCloneOpts to expose Depth")
+	} else if field.Type != reflect.TypeOf((*int)(nil)) {
+		t.Fatalf("expected GitCloneOpts.Depth to be *int, got %v", field.Type)
+	}
+}
+
+func TestCloneUsesOptionalDepthLikeJsAndPython(t *testing.T) {
+	var commandsSeen []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		got := decodeStartRequest(t, r)
+		if got.Process == nil || len(got.Process.Args) != 3 {
+			t.Fatalf("unexpected process config: %#v", got.Process)
+		}
+		commandsSeen = append(commandsSeen, got.Process.Args[2])
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	if _, err := g.Clone(context.Background(), "https://example.com/repo.git", &GitCloneOpts{Path: "/tmp/repo"}); err != nil {
+		t.Fatalf("Clone without depth returned error: %v", err)
+	}
+	depth := 3
+	if _, err := g.Clone(context.Background(), "https://example.com/repo.git", &GitCloneOpts{Path: "/tmp/repo", Depth: &depth}); err != nil {
+		t.Fatalf("Clone with depth returned error: %v", err)
+	}
+
+	want := []string{
+		"git clone 'https://example.com/repo.git' '/tmp/repo'",
+		"git clone 'https://example.com/repo.git' --depth 3 '/tmp/repo'",
+	}
+	if !reflect.DeepEqual(commandsSeen, want) {
+		t.Fatalf("unexpected clone commands: got %#v want %#v", commandsSeen, want)
+	}
+}
+
 func TestPushWithoutRemoteDoesNotDefaultToOrigin(t *testing.T) {
 	var got process.StartRequest
 
@@ -176,6 +291,58 @@ func TestPushWithoutRemoteDoesNotDefaultToOrigin(t *testing.T) {
 	}
 	if got.Process.Args[2] != "git -C '/tmp/repo' push" {
 		t.Fatalf("unexpected git push command: %q", got.Process.Args[2])
+	}
+}
+
+func TestCommitUsesJsAndPythonAuthorConfigOrder(t *testing.T) {
+	var got process.StartRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		got = decodeStartRequest(t, r)
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	_, err := g.Commit(context.Background(), "/tmp/repo", "Initial commit", &GitCommitOpts{
+		AuthorName:  "Sandbox Bot",
+		AuthorEmail: "sandbox@example.com",
+		AllowEmpty:  true,
+	})
+	if err != nil {
+		t.Fatalf("Commit returned error: %v", err)
+	}
+
+	if got.Process == nil || len(got.Process.Args) != 3 {
+		t.Fatalf("unexpected process config: %#v", got.Process)
+	}
+	expected := "git -C '/tmp/repo' -c 'user.name=Sandbox Bot' -c 'user.email=sandbox@example.com' commit -m 'Initial commit' --allow-empty"
+	if got.Process.Args[2] != expected {
+		t.Fatalf("unexpected git commit command: %q", got.Process.Args[2])
 	}
 }
 
@@ -255,6 +422,128 @@ func TestPullRejectsPasswordWithoutUsername(t *testing.T) {
 	}
 	if err.Error() != "Username is required when using a password or token for git pull." {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGitRestoreOptsExposeJsStylePathsField(t *testing.T) {
+	optsType := reflect.TypeOf(GitRestoreOpts{})
+
+	pathsField, ok := optsType.FieldByName("Paths")
+	if !ok {
+		t.Fatal("expected GitRestoreOpts to expose Paths")
+	}
+	if pathsField.Type != reflect.TypeOf([]string{}) {
+		t.Fatalf("expected GitRestoreOpts.Paths to be []string, got %v", pathsField.Type)
+	}
+
+	filesField, ok := optsType.FieldByName("Files")
+	if !ok {
+		t.Fatal("expected GitRestoreOpts to keep legacy Files alias for compatibility")
+	}
+	if filesField.Type != reflect.TypeOf([]string{}) {
+		t.Fatalf("expected GitRestoreOpts.Files to be []string, got %v", filesField.Type)
+	}
+}
+
+func TestRestoreUsesPathsFieldLikeJsAndPython(t *testing.T) {
+	var got process.StartRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		got = decodeStartRequest(t, r)
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	_, err := g.Restore(context.Background(), "/tmp/repo", &GitRestoreOpts{
+		Paths:    []string{"README.md"},
+		Staged:   boolPtr(true),
+		Worktree: boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	if got.Process == nil || len(got.Process.Args) != 3 {
+		t.Fatalf("unexpected process config: %#v", got.Process)
+	}
+	expected := "git -C '/tmp/repo' restore --staged -- 'README.md'"
+	if got.Process.Args[2] != expected {
+		t.Fatalf("unexpected git restore command: %q", got.Process.Args[2])
+	}
+}
+
+func TestRestoreFallsBackToLegacyFilesFieldForCompatibility(t *testing.T) {
+	var got process.StartRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		got = decodeStartRequest(t, r)
+
+		w.WriteHeader(http.StatusOK)
+		var stream bytes.Buffer
+		writeEnvelope(t, &stream, 0x00, []byte(`{"start":{"pid":123}}`))
+		writeEnvelope(t, &stream, 0x00, []byte(`{"end":{"exitCode":0}}`))
+		if _, err := w.Write(stream.Bytes()); err != nil {
+			t.Fatalf("failed to write stream: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cmds := commands.NewCommands(&struct {
+		ApiKey           string
+		AccessToken      string
+		Domain           string
+		ApiUrl           string
+		SandboxUrl       string
+		Debug            bool
+		RequestTimeoutMs int
+		Headers          map[string]string
+	}{
+		SandboxUrl: server.URL,
+		Headers:    map[string]string{},
+	}, "1.0.0")
+	g := NewGit(cmds)
+
+	_, err := g.Restore(context.Background(), "/tmp/repo", &GitRestoreOpts{
+		Files: []string{"README.md"},
+	})
+	if err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	if got.Process == nil || len(got.Process.Args) != 3 {
+		t.Fatalf("unexpected process config: %#v", got.Process)
+	}
+	expected := "git -C '/tmp/repo' restore --worktree -- 'README.md'"
+	if got.Process.Args[2] != expected {
+		t.Fatalf("unexpected git restore command: %q", got.Process.Args[2])
 	}
 }
 

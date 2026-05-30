@@ -16,12 +16,21 @@ type CommandResult struct {
 	Stderr   string
 }
 
+func (*CommandResult) isCommandExecution() {}
+
 type CommandExitError struct {
 	CommandResult
 	Message string
 }
 
 func (e *CommandExitError) Error() string { return e.Message }
+
+type commandHandleState struct {
+	Stdout   string
+	Stderr   string
+	ExitCode *int
+	Error    string
+}
 
 type CommandHandle struct {
 	Pid        uint32
@@ -39,6 +48,8 @@ type CommandHandle struct {
 	onStderr   func(data Stderr)
 }
 
+func (*CommandHandle) isCommandExecution() {}
+
 var errProcessExitedWithoutResult = errors.New("Process exited without a result")
 
 func newCommandHandle(pid uint32, disconnect func(), killFn func() (bool, error), onStdout func(Stdout), onStderr func(Stderr)) *CommandHandle {
@@ -48,10 +59,31 @@ func newCommandHandle(pid uint32, disconnect func(), killFn func() (bool, error)
 	}
 }
 
-func (h *CommandHandle) GetStdout() string { h.mu.Lock(); defer h.mu.Unlock(); return h.stdout }
-func (h *CommandHandle) GetStderr() string { h.mu.Lock(); defer h.mu.Unlock(); return h.stderr }
-func (h *CommandHandle) GetExitCode() *int { h.mu.Lock(); defer h.mu.Unlock(); return h.exitCode }
-func (h *CommandHandle) GetError() string  { h.mu.Lock(); defer h.mu.Unlock(); return h.error }
+// State returns a snapshot of the handle's current live output/result state.
+func (h *CommandHandle) State() commandHandleState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var exitCode *int
+	if h.exitCode != nil {
+		code := *h.exitCode
+		exitCode = &code
+	}
+
+	return commandHandleState{
+		Stdout:   h.stdout,
+		Stderr:   h.stderr,
+		ExitCode: exitCode,
+		Error:    h.error,
+	}
+}
+
+func (h *CommandHandle) hasExitCode() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.exitCode != nil
+}
 
 func (h *CommandHandle) Wait() (*CommandResult, error) {
 	<-h.done

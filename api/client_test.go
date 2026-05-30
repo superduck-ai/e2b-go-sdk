@@ -10,6 +10,8 @@ import (
 	"testing"
 )
 
+const testAPIKey = "e2b_0000000000000000000000000000000000000000"
+
 func TestNewApiClientRequiresApiKeyWithAlignedMessage(t *testing.T) {
 	_, err := NewApiClient(&ClientConfig{Domain: "e2b.app"}, WithRequireApiKey())
 	if err == nil {
@@ -27,7 +29,7 @@ func TestNewApiClientRequiresApiKeyWithAlignedMessage(t *testing.T) {
 }
 
 func TestNewApiClientRequiresAccessTokenWithAlignedMessage(t *testing.T) {
-	_, err := NewApiClient(&ClientConfig{Domain: "e2b.app"}, WithRequireAccessToken())
+	_, err := NewApiClient(&ClientConfig{Domain: "e2b.app", ApiKey: testAPIKey}, WithRequireAccessToken())
 	if err == nil {
 		t.Fatal("expected missing access token to fail")
 	}
@@ -63,6 +65,61 @@ func TestHandleApiErrorUnauthorizedHandlesEmptyBody(t *testing.T) {
 	}
 	if authErr.Message != "Unauthorized, please check your credentials." {
 		t.Fatalf("unexpected auth error message: %q", authErr.Message)
+	}
+}
+
+func TestValidateApiKeyMatchesJsAndPython(t *testing.T) {
+	if err := ValidateApiKey(testAPIKey); err != nil {
+		t.Fatalf("expected valid API key to pass validation, got %v", err)
+	}
+	if err := ValidateApiKey("e2b_" + strings.Repeat("0", 20)); err != nil {
+		t.Fatalf("expected non-default length API key to pass validation, got %v", err)
+	}
+
+	for _, apiKey := range []string{
+		"sk_" + strings.Repeat("0", 40),
+		"e2b_",
+		"e2b_" + strings.Repeat("z", 40),
+		testAPIKey + "\n",
+	} {
+		err := ValidateApiKey(apiKey)
+		var authErr *AuthenticationError
+		if !errors.As(err, &authErr) {
+			t.Fatalf("expected invalid key %q to raise AuthenticationError, got %T %v", apiKey, err, err)
+		}
+		if !strings.Contains(authErr.Message, apiKeyExample) {
+			t.Fatalf("expected validation error to include example key, got %q", authErr.Message)
+		}
+	}
+}
+
+func TestNewApiClientRejectsInvalidApiKeyFormat(t *testing.T) {
+	_, err := NewApiClient(&ClientConfig{Domain: "e2b.app", ApiKey: "nope"})
+	if err == nil {
+		t.Fatal("expected invalid API key format to fail")
+	}
+
+	var authErr *AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("expected AuthenticationError, got %T %v", err, err)
+	}
+	if !strings.Contains(authErr.Message, "Invalid API key format") {
+		t.Fatalf("unexpected validation error message: %q", authErr.Message)
+	}
+}
+
+func TestNewApiClientSurfacesMalformedTransportEnvConfiguration(t *testing.T) {
+	t.Setenv("E2B_API_CONNECTIONS", "bogus")
+
+	_, err := NewApiClient(&ClientConfig{
+		Domain: "e2b.app",
+		ApiKey: testAPIKey,
+	})
+	if err == nil {
+		t.Fatal("expected malformed transport env configuration to fail")
+	}
+	if !strings.Contains(err.Error(), "E2B_API_CONNECTIONS") {
+		t.Fatalf("expected transport env error, got %v", err)
 	}
 }
 
@@ -153,6 +210,7 @@ func TestApiClientLogsRequestAndResponse(t *testing.T) {
 	client, err := NewApiClient(&ClientConfig{
 		ApiUrl:           server.URL,
 		RequestTimeoutMs: 1000,
+		ApiKey:           testAPIKey,
 		Logger:           logger,
 	})
 	if err != nil {
@@ -183,6 +241,7 @@ func TestApiClientUsesConfiguredProxy(t *testing.T) {
 	client, err := NewApiClient(&ClientConfig{
 		ApiUrl:           "http://api.example.test",
 		RequestTimeoutMs: 1000,
+		ApiKey:           testAPIKey,
 		Proxy:            proxy.URL,
 	})
 	if err != nil {

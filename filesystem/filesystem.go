@@ -53,28 +53,41 @@ type EntryInfo struct {
 
 type WriteEntry struct {
 	Path string
-	Data io.Reader
+	Data any
 }
+
+type Blob = shared.Blob
 
 type FilesystemRequestOpts struct {
 	RequestTimeoutMs *int
+	Signal           context.Context
 	User             string
 }
 
 type FilesystemWriteOpts struct {
 	FilesystemRequestOpts
-	Gzip bool
+	Gzip           bool
+	UseOctetStream bool
 }
 
 type FilesystemReadOpts struct {
 	FilesystemRequestOpts
 	Gzip   bool
-	Format string // Deprecated: Go Read always returns bytes; use ReadText for strings.
+	Format ReadFormat
 }
+
+type ReadFormat string
+
+const (
+	ReadFormatText   ReadFormat = "text"
+	ReadFormatBytes  ReadFormat = "bytes"
+	ReadFormatStream ReadFormat = "stream"
+	ReadFormatBlob   ReadFormat = "blob"
+)
 
 type FilesystemListOpts struct {
 	FilesystemRequestOpts
-	Depth int
+	Depth *int
 }
 
 type WatchOpts struct {
@@ -100,7 +113,8 @@ type connectionConfig struct {
 type Filesystem struct {
 	connectionConfig *connectionConfig
 	envdVersion      string
-	httpClient       *http.Client
+	restHTTPClient   *http.Client
+	rpcHTTPClient    *http.Client
 }
 
 type streamEnvelope struct {
@@ -130,7 +144,8 @@ func NewFilesystem(cfg any, envdVersion string) *Filesystem {
 	return &Filesystem{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       shared.NewHTTPClient(0, proxy, logger),
+		restHTTPClient:   shared.NewEnvdRESTHTTPClient(0, proxy, logger),
+		rpcHTTPClient:    shared.NewEnvdRPCHTTPClient(0, proxy, logger),
 	}
 }
 
@@ -265,13 +280,31 @@ func requestContext(ctx context.Context, timeoutMs *int) (context.Context, conte
 	return context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
 }
 
+func requestContextWithSignal(ctx context.Context, signal context.Context, timeoutMs *int) (context.Context, context.CancelFunc) {
+	merged, cancelSignal := shared.MergeContexts(ctx, signal)
+	reqCtx, cancelTimeout := requestContext(merged, timeoutMs)
+	return reqCtx, func() {
+		cancelTimeout()
+		cancelSignal()
+	}
+}
+
+func requestTimeoutStreamContextWithSignal(ctx context.Context, signal context.Context, timeoutMs *int) (context.Context, func(), context.CancelFunc) {
+	merged, cancelSignal := shared.MergeContexts(ctx, signal)
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(merged, timeoutMs)
+	return requestCtx, clearRequestTimeout, func() {
+		cancelRequestTimeout()
+		cancelSignal()
+	}
+}
+
 func (f *Filesystem) connectUnary(ctx context.Context, path string, reqBody interface{}, respBody interface{}, user string) error {
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
 	u := f.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(data))
+	req, err := newRetryableRequest(ctx, http.MethodPost, u, data)
 	if err != nil {
 		return err
 	}
@@ -279,7 +312,22 @@ func (f *Filesystem) connectUnary(ctx context.Context, path string, reqBody inte
 	for k, v := range f.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := f.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = f.rpcHTTPClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return err
 	}
@@ -310,7 +358,7 @@ func (f *Filesystem) connectServerStream(ctx context.Context, path string, reqBo
 		return nil, err
 	}
 	u := f.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
+	req, err := newRetryableRequest(ctx, http.MethodPost, u, envd.EncodeConnectEnvelope(data))
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +367,22 @@ func (f *Filesystem) connectServerStream(ctx context.Context, path string, reqBo
 	for k, v := range f.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := f.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = f.rpcHTTPClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +401,37 @@ func (f *Filesystem) connectServerStream(ctx context.Context, path string, reqBo
 	return resp.Body, nil
 }
 
-func (f *Filesystem) Read(ctx context.Context, path string, opts *FilesystemReadOpts) ([]byte, error) {
+func newRetryableRequest(ctx context.Context, method, url string, data []byte) (*http.Request, error) {
+	return http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
+}
+
+// Read provides the JS/Python-style single-entry read surface. It returns text
+// by default, and the return type changes when opts.Format is set.
+func (f *Filesystem) Read(ctx context.Context, path string, opts *FilesystemReadOpts) (any, error) {
+	format := ReadFormatText
+	if opts != nil && opts.Format != "" {
+		format = opts.Format
+	}
+
+	switch format {
+	case ReadFormatText:
+		return f.readText(ctx, path, opts)
+	case ReadFormatBytes:
+		return f.readBytes(ctx, path, opts)
+	case ReadFormatBlob:
+		data, err := f.readBytes(ctx, path, opts)
+		if err != nil {
+			return nil, err
+		}
+		return Blob(data), nil
+	case ReadFormatStream:
+		return f.readStream(ctx, path, opts)
+	default:
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported read format %s", format)}}
+	}
+}
+
+func (f *Filesystem) readBytes(ctx context.Context, path string, opts *FilesystemReadOpts) ([]byte, error) {
 	body, _, err := f.readFile(ctx, path, opts)
 	if err != nil {
 		return nil, err
@@ -346,7 +439,7 @@ func (f *Filesystem) Read(ctx context.Context, path string, opts *FilesystemRead
 	return body, nil
 }
 
-func (f *Filesystem) ReadStream(ctx context.Context, path string, opts *FilesystemReadOpts) (io.ReadCloser, error) {
+func (f *Filesystem) readStream(ctx context.Context, path string, opts *FilesystemReadOpts) (io.ReadCloser, error) {
 	resp, cancel, err := f.openReadResponse(ctx, path, opts)
 	if err != nil {
 		return nil, err
@@ -354,7 +447,7 @@ func (f *Filesystem) ReadStream(ctx context.Context, path string, opts *Filesyst
 	return cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
 }
 
-func (f *Filesystem) ReadText(ctx context.Context, path string, opts *FilesystemReadOpts) (string, error) {
+func (f *Filesystem) readText(ctx context.Context, path string, opts *FilesystemReadOpts) (string, error) {
 	data, resp, err := f.readFile(ctx, path, opts)
 	if err != nil {
 		return "", err
@@ -392,15 +485,17 @@ func (f *Filesystem) readFile(ctx context.Context, path string, opts *Filesystem
 
 func (f *Filesystem) openReadResponse(ctx context.Context, path string, opts *FilesystemReadOpts) (*http.Response, context.CancelFunc, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	user = f.resolveUser(user)
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
 
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 
 	u := fmt.Sprintf("%s/files?path=%s", f.baseUrl(), url.QueryEscape(path))
 	if user != "" {
@@ -417,7 +512,7 @@ func (f *Filesystem) openReadResponse(ctx context.Context, path string, opts *Fi
 	if opts != nil && opts.Gzip {
 		req.Header.Set("Accept-Encoding", "gzip")
 	}
-	resp, err := f.httpClient.Do(req)
+	resp, err := f.restHTTPClient.Do(req)
 	if err != nil {
 		cancel()
 		return nil, nil, err
@@ -431,19 +526,64 @@ func (f *Filesystem) openReadResponse(ctx context.Context, path string, opts *Fi
 	return resp, cancel, nil
 }
 
-func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opts *FilesystemWriteOpts) (*WriteInfo, error) {
+func normalizeWriteData(path string, data any) (io.Reader, error) {
+	if data == nil {
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
+	}
+
+	switch v := data.(type) {
+	case string:
+		return strings.NewReader(v), nil
+	case []byte:
+		return bytes.NewReader(v), nil
+	case Blob:
+		return v.Reader(), nil
+	case io.Reader:
+		if isNilWriteData(v) {
+			return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
+		}
+		return v, nil
+	default:
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
+	}
+}
+
+func isNilWriteData(data any) bool {
+	if data == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (f *Filesystem) Write(ctx context.Context, path string, data any, opts *FilesystemWriteOpts) (*WriteInfo, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	useGzip := false
+	useOctetStream := false
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 		useGzip = opts.Gzip
+		useOctetStream = opts.UseOctetStream && versionGTE(f.envdVersion, envd.EnvdOctetStreamUpload)
 	}
 	user = f.resolveUser(user)
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
 
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reader, err := normalizeWriteData(path, data)
+	if err != nil {
+		return nil, err
+	}
+
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 
 	u := fmt.Sprintf("%s/files?path=%s", f.baseUrl(), url.QueryEscape(path))
@@ -455,11 +595,11 @@ func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opt
 	var body io.Reader
 	var contentType string
 
-	if versionGTE(f.envdVersion, envd.EnvdOctetStreamUpload) {
+	if useOctetStream {
 		if useGzip {
 			var buf bytes.Buffer
 			gz := gzip.NewWriter(&buf)
-			if _, err := io.Copy(gz, data); err != nil {
+			if _, err := io.Copy(gz, reader); err != nil {
 				gz.Close()
 				return nil, err
 			}
@@ -469,7 +609,7 @@ func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opt
 			body = &buf
 			headers["Content-Encoding"] = "gzip"
 		} else {
-			body = data
+			body = reader
 		}
 		contentType = "application/octet-stream"
 	} else {
@@ -480,7 +620,7 @@ func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opt
 		if err != nil {
 			return nil, err
 		}
-		if _, err := io.Copy(part, data); err != nil {
+		if _, err := io.Copy(part, reader); err != nil {
 			return nil, err
 		}
 		if err := writer.Close(); err != nil {
@@ -498,7 +638,7 @@ func (f *Filesystem) Write(ctx context.Context, path string, data io.Reader, opt
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := f.httpClient.Do(req)
+	resp, err := f.restHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +664,8 @@ func (f *Filesystem) WriteFiles(ctx context.Context, files []WriteEntry, opts *F
 		return []WriteInfo{}, nil
 	}
 
-	if versionGTE(f.envdVersion, envd.EnvdOctetStreamUpload) {
+	useOctetStream := opts != nil && opts.UseOctetStream && versionGTE(f.envdVersion, envd.EnvdOctetStreamUpload)
+	if useOctetStream {
 		results := make([]WriteInfo, 0, len(files))
 		for _, file := range files {
 			info, err := f.Write(ctx, file.Path, file.Data, opts)
@@ -541,15 +682,17 @@ func (f *Filesystem) WriteFiles(ctx context.Context, files []WriteEntry, opts *F
 
 func (f *Filesystem) writeMultipartFiles(ctx context.Context, files []WriteEntry, opts *FilesystemWriteOpts) ([]WriteInfo, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	user = f.resolveUser(user)
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
 
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 
 	var queryPath string
@@ -576,7 +719,11 @@ func (f *Filesystem) writeMultipartFiles(ctx context.Context, files []WriteEntry
 		if err != nil {
 			return nil, err
 		}
-		if _, err := io.Copy(part, file.Data); err != nil {
+		reader, err := normalizeWriteData(file.Path, file.Data)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(part, reader); err != nil {
 			return nil, err
 		}
 	}
@@ -593,7 +740,7 @@ func (f *Filesystem) writeMultipartFiles(ctx context.Context, files []WriteEntry
 		req.Header.Set(k, v)
 	}
 
-	resp, err := f.httpClient.Do(req)
+	resp, err := f.restHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -617,19 +764,22 @@ func (f *Filesystem) writeMultipartFiles(ctx context.Context, files []WriteEntry
 
 func (f *Filesystem) List(ctx context.Context, path string, opts *FilesystemListOpts) ([]EntryInfo, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	depth := int32(1)
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
-		if opts.Depth > 0 {
-			depth = int32(opts.Depth)
-		} else if opts.Depth < 0 {
-			return nil, fmt.Errorf("depth should be at least one")
+		signal = opts.Signal
+		if opts.Depth != nil {
+			if *opts.Depth < 1 {
+				return nil, fmt.Errorf("depth should be at least one")
+			}
+			depth = int32(*opts.Depth)
 		}
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.ListDirRequest{Path: path, Depth: depth}
 	var resp envdfs.ListDirResponse
@@ -648,13 +798,15 @@ func (f *Filesystem) List(ctx context.Context, path string, opts *FilesystemList
 
 func (f *Filesystem) MakeDir(ctx context.Context, path string, opts *FilesystemRequestOpts) (bool, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.MakeDirRequest{Path: path}
 	var resp envdfs.MakeDirResponse
@@ -672,13 +824,15 @@ func (f *Filesystem) MakeDir(ctx context.Context, path string, opts *FilesystemR
 
 func (f *Filesystem) Rename(ctx context.Context, oldPath, newPath string, opts *FilesystemRequestOpts) (*EntryInfo, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.MoveRequest{Source: oldPath, Destination: newPath}
 	var resp envdfs.MoveResponse
@@ -694,13 +848,15 @@ func (f *Filesystem) Rename(ctx context.Context, oldPath, newPath string, opts *
 
 func (f *Filesystem) Remove(ctx context.Context, path string, opts *FilesystemRequestOpts) error {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.RemoveRequest{Path: path}
 	if err := f.connectUnary(reqCtx, "/filesystem.Filesystem/Remove", req, nil, user); err != nil {
@@ -714,13 +870,15 @@ func (f *Filesystem) Remove(ctx context.Context, path string, opts *FilesystemRe
 
 func (f *Filesystem) Exists(ctx context.Context, path string, opts *FilesystemRequestOpts) (bool, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.StatRequest{Path: path}
 	var resp envdfs.StatResponse
@@ -736,13 +894,15 @@ func (f *Filesystem) Exists(ctx context.Context, path string, opts *FilesystemRe
 
 func (f *Filesystem) GetInfo(ctx context.Context, path string, opts *FilesystemRequestOpts) (*EntryInfo, error) {
 	var requestTimeoutMs *int
+	var signal context.Context
 	user := ""
 	if opts != nil {
 		user = opts.User
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
-	reqCtx, cancel := requestContext(ctx, requestTimeoutMs)
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, requestTimeoutMs)
 	defer cancel()
 	req := &envdfs.StatRequest{Path: path}
 	var resp envdfs.StatResponse
@@ -759,6 +919,7 @@ func (f *Filesystem) GetInfo(ctx context.Context, path string, opts *FilesystemR
 func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(FilesystemEvent), opts *WatchOpts) (*WatchHandle, error) {
 	var requestTimeoutMs *int
 	var timeoutMs *int
+	var signal context.Context
 	user := ""
 	recursive := false
 	var onExit func(err error)
@@ -768,6 +929,7 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 		onExit = opts.OnExit
 		timeoutMs = opts.TimeoutMs
 		requestTimeoutMs = opts.RequestTimeoutMs
+		signal = opts.Signal
 	}
 	requestTimeoutMs = f.requestTimeout(requestTimeoutMs)
 	if recursive && !versionGTE(f.envdVersion, envd.EnvdVersionRecursiveWatch) {
@@ -775,7 +937,7 @@ func (f *Filesystem) WatchDir(ctx context.Context, path string, onEvent func(Fil
 	}
 
 	req := &envdfs.WatchDirRequest{Path: path, Recursive: recursive}
-	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, requestTimeoutMs)
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContextWithSignal(ctx, signal, requestTimeoutMs)
 	streamCtx, streamCancel := streamContext(requestCtx, timeoutMs, defaultWatchTimeoutMs)
 	body, err := f.connectServerStream(streamCtx, "/filesystem.Filesystem/WatchDir", req, user)
 	if err != nil {

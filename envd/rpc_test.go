@@ -2,6 +2,8 @@ package envd
 
 import (
 	"context"
+	"errors"
+	"io"
 	"testing"
 )
 
@@ -76,4 +78,55 @@ func TestParseConnectEndStreamError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRetryRPCTransportError(t *testing.T) {
+	t.Run("retries_expected_transport_errors", func(t *testing.T) {
+		attempts := 0
+		err := RetryRPCTransportError(context.Background(), func() error {
+			attempts++
+			if attempts < 3 {
+				return io.ErrUnexpectedEOF
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("expected retry to eventually succeed, got %v", err)
+		}
+		if attempts != 3 {
+			t.Fatalf("expected 3 attempts, got %d", attempts)
+		}
+	})
+
+	t.Run("does_not_retry_unexpected_errors", func(t *testing.T) {
+		attempts := 0
+		want := errors.New("boom")
+		err := RetryRPCTransportError(context.Background(), func() error {
+			attempts++
+			return want
+		})
+		if !errors.Is(err, want) {
+			t.Fatalf("expected original error, got %v", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("expected single attempt, got %d", attempts)
+		}
+	})
+
+	t.Run("does_not_retry_after_context_cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		attempts := 0
+		err := RetryRPCTransportError(ctx, func() error {
+			attempts++
+			return io.ErrUnexpectedEOF
+		})
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("expected original transport error, got %v", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("expected canceled context to stop retries, got %d attempts", attempts)
+		}
+	})
 }

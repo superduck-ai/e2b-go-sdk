@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
@@ -46,6 +47,8 @@ type apiClientOptions struct {
 	RequireApiKey      bool
 }
 
+const apiKeyExample = "e2b_0000000000000000000000000000000000000000"
+
 func WithRequireApiKey() ApiClientOption {
 	return func(o *apiClientOptions) {
 		o.RequireApiKey = true
@@ -66,6 +69,12 @@ func NewApiClient(config *ClientConfig, opts ...ApiClientOption) (*ApiClient, er
 
 	if options.RequireApiKey && config.ApiKey == "" {
 		return nil, &AuthenticationError{Message: "API key is required, please visit the Team tab at https://e2b.dev/dashboard to get your API key. You can either set the environment variable `E2B_API_KEY` or you can pass it directly to the sandbox like Sandbox.create({ apiKey: 'e2b_...' })"}
+	}
+
+	if config.ApiKey != "" {
+		if err := ValidateApiKey(config.ApiKey); err != nil {
+			return nil, err
+		}
 	}
 
 	if options.RequireAccessToken && config.AccessToken == "" {
@@ -91,7 +100,10 @@ func NewApiClient(config *ClientConfig, opts ...ApiClientOption) (*ApiClient, er
 		headers[k] = v
 	}
 
-	client := shared.NewHTTPClient(time.Duration(config.RequestTimeoutMs)*time.Millisecond, config.Proxy, config.Logger)
+	client, err := shared.NewAPIHTTPClient(time.Duration(config.RequestTimeoutMs)*time.Millisecond, config.Proxy, config.Logger)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ApiClient{
 		BaseUrl:    baseUrl,
@@ -127,6 +139,30 @@ type ApiError struct {
 }
 
 func (e *ApiError) Error() string { return fmt.Sprintf("%d: %s", e.StatusCode, e.Message) }
+
+// ValidateApiKey validates that an E2B API key has the expected e2b_ prefix
+// followed by lowercase hex characters.
+func ValidateApiKey(apiKey string) error {
+	const prefix = "e2b_"
+	if !strings.HasPrefix(apiKey, prefix) || len(apiKey) == len(prefix) {
+		return &AuthenticationError{Message: invalidAPIKeyMessage()}
+	}
+
+	for _, ch := range apiKey[len(prefix):] {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return &AuthenticationError{Message: invalidAPIKeyMessage()}
+		}
+	}
+
+	return nil
+}
+
+func invalidAPIKeyMessage() string {
+	return fmt.Sprintf(
+		`Invalid API key format: expected "e2b_" followed by hex characters (e.g. "%s"). Visit the API Keys tab at https://e2b.dev/dashboard?tab=keys to get your API key.`,
+		apiKeyExample,
+	)
+}
 
 // HandleApiError maps HTTP response status code to the appropriate error type.
 func HandleApiError(statusCode int, body []byte) error {
@@ -217,6 +253,11 @@ func (c *ApiClient) Get(ctx context.Context, path string, result interface{}) (*
 // Post performs an HTTP POST request.
 func (c *ApiClient) Post(ctx context.Context, path string, body interface{}, result interface{}) (*http.Response, error) {
 	return c.Do(ctx, http.MethodPost, path, body, result)
+}
+
+// Put performs an HTTP PUT request.
+func (c *ApiClient) Put(ctx context.Context, path string, body interface{}, result interface{}) (*http.Response, error) {
+	return c.Do(ctx, http.MethodPut, path, body, result)
 }
 
 // Delete performs an HTTP DELETE request.

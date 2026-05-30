@@ -9,11 +9,22 @@ import (
 
 func TestBuildApiClientConfigUsesDebugApiURL(t *testing.T) {
 	config := buildApiClientConfig(&ConnectionOpts{
-		Debug: true,
+		Debug: boolPtr(true),
 	})
 
 	if config.ApiUrl != "http://localhost:3000" {
 		t.Fatalf("expected debug API URL http://localhost:3000, got %q", config.ApiUrl)
+	}
+}
+
+func TestBuildApiClientConfigUsesDebugApiURLFromEnv(t *testing.T) {
+	t.Setenv("E2B_API_URL", "")
+	t.Setenv("E2B_DEBUG", "true")
+
+	config := buildApiClientConfig(&ConnectionOpts{})
+
+	if config.ApiUrl != "http://localhost:3000" {
+		t.Fatalf("expected debug API URL from env http://localhost:3000, got %q", config.ApiUrl)
 	}
 }
 
@@ -40,11 +51,74 @@ func TestNewVolumeConnectionConfigUsesApiDomainByDefault(t *testing.T) {
 
 func TestNewVolumeConnectionConfigUsesDebugApiURL(t *testing.T) {
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{
-		Debug: true,
+		Debug: boolPtr(true),
 	})
 
 	if config.ApiUrl != "http://localhost:8080" {
 		t.Fatalf("expected debug volume API URL http://localhost:8080, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewVolumeConnectionConfigPreservesExplicitFalseDebugOverEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_DEBUG", "true")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{
+		Domain: "example.test",
+		Debug:  boolPtr(false),
+	})
+
+	if config.Debug {
+		t.Fatal("expected explicit false debug to override env debug=true")
+	}
+	if config.ApiUrl != "https://api.example.test" {
+		t.Fatalf("expected explicit false debug to keep hosted volume API URL, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewVolumeConnectionConfigUsesApiUrlFromEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "http://localhost:8080")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{})
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected volume API URL from env, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewVolumeConnectionConfigApiUrlArgsHavePriorityOverEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "http://localhost:1111")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{
+		ApiUrl: "http://localhost:8080",
+	})
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected API URL arg to win over env, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewVolumeConnectionConfigUsesDebugApiURLFromEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_DOMAIN", "")
+	t.Setenv("E2B_DEBUG", "true")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{})
+
+	if config.ApiUrl != "http://localhost:8080" {
+		t.Fatalf("expected debug env to select local volume API URL, got %q", config.ApiUrl)
+	}
+}
+
+func TestNewVolumeConnectionConfigUsesDomainFromEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_DEBUG", "")
+	t.Setenv("E2B_DOMAIN", "custom.com")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{})
+
+	if config.ApiUrl != "https://api.custom.com" {
+		t.Fatalf("expected volume API URL to use env domain, got %q", config.ApiUrl)
 	}
 }
 
@@ -108,9 +182,9 @@ func TestCreateExposesJsStyleVolumeMetadataFields(t *testing.T) {
 	defer server.Close()
 
 	volume, err := Create(context.Background(), "test-volume", &ConnectionOpts{
-		ApiKey: "test-api-key",
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
 		Domain: "example.test",
-		Debug:  true,
+		Debug:  boolPtr(true),
 		ApiUrl: server.URL,
 	})
 	if err != nil {
@@ -123,7 +197,114 @@ func TestCreateExposesJsStyleVolumeMetadataFields(t *testing.T) {
 	if volume.Domain != "example.test" {
 		t.Fatalf("expected domain to be exported on Volume, got %q", volume.Domain)
 	}
-	if !volume.Debug {
+	if volume.Debug == nil || !*volume.Debug {
 		t.Fatal("expected debug flag to be exported on Volume")
+	}
+}
+
+func TestResolveClientUsesPersistedVolumeFieldsWhenOptsNil(t *testing.T) {
+	v := &Volume{
+		VolumeID: "vol-1",
+		Name:     "test-volume",
+		Token:    "secret-token",
+		Domain:   "example.test",
+	}
+
+	client := v.resolveClient(nil)
+
+	if client.config.Token != "secret-token" {
+		t.Fatalf("expected persisted token to be used, got %q", client.config.Token)
+	}
+	if client.config.Domain != "example.test" {
+		t.Fatalf("expected persisted domain to be used, got %q", client.config.Domain)
+	}
+	if client.config.ApiUrl != "https://api.example.test" {
+		t.Fatalf("expected default volume API URL from persisted domain, got %q", client.config.ApiUrl)
+	}
+	if client.config.RequestTimeoutMs != nil {
+		t.Fatalf("expected request timeout to stay unset, got %#v", client.config.RequestTimeoutMs)
+	}
+	if client.config.Headers["X-Test"] != "" {
+		t.Fatalf("did not expect inherited create/connect-only headers, got %#v", client.config.Headers)
+	}
+}
+
+func TestConnectAllowsNilOptsAndExposesJsStyleVolumeMetadataFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/volumes/vol-1" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"volumeID":"vol-1","name":"test-volume","token":"secret-token"}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("E2B_API_URL", server.URL)
+	t.Setenv("E2B_API_KEY", "e2b_0000000000000000000000000000000000000000")
+	t.Setenv("E2B_DOMAIN", "example.test")
+	t.Setenv("E2B_DEBUG", "")
+
+	volume, err := Connect(context.Background(), "vol-1", nil)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+
+	if volume.VolumeID != "vol-1" {
+		t.Fatalf("expected volume ID to be exported on Volume, got %q", volume.VolumeID)
+	}
+	if volume.Name != "test-volume" {
+		t.Fatalf("expected name to be exported on Volume, got %q", volume.Name)
+	}
+	if volume.Token != "secret-token" {
+		t.Fatalf("expected token to be exported on Volume, got %q", volume.Token)
+	}
+	if volume.Domain != "example.test" {
+		t.Fatalf("expected domain to be exported on Volume, got %q", volume.Domain)
+	}
+	if volume.Debug == nil || *volume.Debug {
+		t.Fatal("expected debug flag to default to false when opts are nil")
+	}
+}
+
+func TestResolveClientPreservesPersistedExplicitFalseDebugOverEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_DEBUG", "true")
+
+	v := &Volume{
+		VolumeID: "vol-1",
+		Name:     "test-volume",
+		Token:    "secret-token",
+		Domain:   "example.test",
+		Debug:    boolPtr(false),
+	}
+
+	client := v.resolveClient(nil)
+
+	if client.config.Debug {
+		t.Fatal("expected persisted debug=false to override env debug=true")
+	}
+	if client.config.ApiUrl != "https://api.example.test" {
+		t.Fatalf("expected persisted debug=false to keep hosted volume API URL, got %q", client.config.ApiUrl)
+	}
+}
+
+func TestResolveClientAllowsExplicitFalseDebugOverride(t *testing.T) {
+	v := &Volume{
+		VolumeID: "vol-1",
+		Name:     "test-volume",
+		Token:    "secret-token",
+		Domain:   "example.test",
+		Debug:    boolPtr(true),
+	}
+
+	client := v.resolveClient(&VolumeApiOpts{
+		Debug: boolPtr(false),
+	})
+
+	if client.config.Debug {
+		t.Fatal("expected per-call debug=false to override persisted debug=true")
+	}
+	if client.config.ApiUrl != "https://api.example.test" {
+		t.Fatalf("expected per-call debug=false to keep hosted volume API URL, got %q", client.config.ApiUrl)
 	}
 }

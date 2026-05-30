@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
@@ -22,8 +23,9 @@ type ConnectionOpts struct {
 	Domain           string
 	ApiUrl           string
 	SandboxUrl       string
-	Debug            bool
+	Debug            *bool
 	RequestTimeoutMs *int
+	Signal           context.Context
 	Logger           api.Logger
 	Headers          map[string]string
 	Proxy            string
@@ -34,9 +36,30 @@ type Volume struct {
 	Name     string
 	Token    string
 	Domain   string
-	Debug    bool
-	client   *volumeApiClient
+	Debug    *bool
 }
+
+type Blob = shared.Blob
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func volumeApiDebugFromConnectionOpts(value *bool) *bool {
+	if value == nil || !*value {
+		return nil
+	}
+	return boolPtr(true)
+}
+
+type ReadFileFormat string
+
+const (
+	ReadFileFormatText   ReadFileFormat = "text"
+	ReadFileFormatBytes  ReadFileFormat = "bytes"
+	ReadFileFormatStream ReadFileFormat = "stream"
+	ReadFileFormatBlob   ReadFileFormat = "blob"
+)
 
 type cancelReadCloser struct {
 	io.ReadCloser
@@ -76,7 +99,15 @@ func buildApiClientConfig(opts *ConnectionOpts) *api.ClientConfig {
 	if apiUrl == "" {
 		apiUrl = os.Getenv("E2B_API_URL")
 	}
-	if apiUrl == "" && opts.Debug {
+	var debug bool
+	if opts.Debug != nil && *opts.Debug {
+		debug = true
+	} else {
+		if v, err := strconv.ParseBool(os.Getenv("E2B_DEBUG")); err == nil {
+			debug = v
+		}
+	}
+	if apiUrl == "" && debug {
 		apiUrl = "http://localhost:3000"
 	}
 
@@ -104,7 +135,7 @@ func newVolumeApiClient(volumeID string, token string, opts *ConnectionOpts) *vo
 	apiOpts := &VolumeApiOpts{
 		Token:            token,
 		Domain:           opts.Domain,
-		Debug:            opts.Debug,
+		Debug:            volumeApiDebugFromConnectionOpts(opts.Debug),
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Logger:           opts.Logger,
 		Headers:          opts.Headers,
@@ -136,7 +167,10 @@ func Create(ctx context.Context, name string, opts *ConnectionOpts) (*Volume, er
 	}
 
 	var resp createResponse
-	_, err = apiClient.Post(ctx, "/volumes", &createRequest{Name: name}, &resp)
+	reqCtx, cancel := requestContextWithSignal(ctx, opts.Signal, nil)
+	defer cancel()
+
+	_, err = apiClient.Post(reqCtx, "/volumes", &createRequest{Name: name}, &resp)
 	if err != nil {
 		return nil, wrapControlPlaneVolumeError(err, "")
 	}
@@ -149,14 +183,22 @@ func Create(ctx context.Context, name string, opts *ConnectionOpts) (*Volume, er
 	if v.VolumeID == "" && v.Name == "" && v.Token == "" {
 		return nil, fmt.Errorf("Response data is missing")
 	}
-	v.client = newVolumeApiClient(v.VolumeID, v.Token, opts)
-	v.Domain = v.client.config.Domain
-	v.Debug = v.client.config.Debug
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{
+		Token:  v.Token,
+		Domain: opts.Domain,
+		Debug:  volumeApiDebugFromConnectionOpts(opts.Debug),
+	})
+	v.Domain = config.Domain
+	v.Debug = boolPtr(config.Debug)
 	return v, nil
 }
 
 // Connect connects to an existing volume by its ID.
 func Connect(ctx context.Context, volumeId string, opts *ConnectionOpts) (*Volume, error) {
+	if opts == nil {
+		opts = &ConnectionOpts{}
+	}
+
 	info, err := GetInfo(ctx, volumeId, opts)
 	if err != nil {
 		return nil, err
@@ -170,9 +212,13 @@ func Connect(ctx context.Context, volumeId string, opts *ConnectionOpts) (*Volum
 	if v.VolumeID == "" && v.Name == "" && v.Token == "" {
 		return nil, fmt.Errorf("Response data is missing")
 	}
-	v.client = newVolumeApiClient(v.VolumeID, v.Token, opts)
-	v.Domain = v.client.config.Domain
-	v.Debug = v.client.config.Debug
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{
+		Token:  v.Token,
+		Domain: opts.Domain,
+		Debug:  volumeApiDebugFromConnectionOpts(opts.Debug),
+	})
+	v.Domain = config.Domain
+	v.Debug = boolPtr(config.Debug)
 	return v, nil
 }
 
@@ -195,7 +241,10 @@ func GetInfo(ctx context.Context, volumeId string, opts *ConnectionOpts) (*Volum
 	}
 
 	var resp infoResponse
-	_, err = apiClient.Get(ctx, "/volumes/"+url.PathEscape(volumeId), &resp)
+	reqCtx, cancel := requestContextWithSignal(ctx, opts.Signal, nil)
+	defer cancel()
+
+	_, err = apiClient.Get(reqCtx, "/volumes/"+url.PathEscape(volumeId), &resp)
 	if err != nil {
 		return nil, wrapControlPlaneVolumeError(err, fmt.Sprintf("Volume %s not found", volumeId))
 	}
@@ -227,7 +276,10 @@ func List(ctx context.Context, opts *ConnectionOpts) ([]VolumeInfo, error) {
 	}
 
 	var resp []listItem
-	_, err = apiClient.Get(ctx, "/volumes", &resp)
+	reqCtx, cancel := requestContextWithSignal(ctx, opts.Signal, nil)
+	defer cancel()
+
+	_, err = apiClient.Get(reqCtx, "/volumes", &resp)
 	if err != nil {
 		return nil, wrapControlPlaneVolumeError(err, "")
 	}
@@ -254,7 +306,10 @@ func Destroy(ctx context.Context, volumeId string, opts *ConnectionOpts) (bool, 
 		return false, err
 	}
 
-	_, err = apiClient.Delete(ctx, "/volumes/"+url.PathEscape(volumeId), nil)
+	reqCtx, cancel := requestContextWithSignal(ctx, opts.Signal, nil)
+	defer cancel()
+
+	_, err = apiClient.Delete(reqCtx, "/volumes/"+url.PathEscape(volumeId), nil)
 	if err != nil {
 		if _, ok := err.(*api.NotFoundError); ok {
 			return false, nil
@@ -275,35 +330,15 @@ func (v *Volume) volumeContentPath(endpoint string, path string, query url.Value
 }
 
 // List lists the contents of a directory at the given path.
-func (v *Volume) List(ctx context.Context, path string, opts *struct {
-	Token            string
-	Domain           string
-	Debug            bool
-	ApiUrl           string
-	RequestTimeoutMs *int
-	Logger           api.Logger
-	Headers          map[string]string
-	Depth            *int
-}) ([]VolumeEntryStat, error) {
+func (v *Volume) List(ctx context.Context, path string, opts *VolumeListOpts) ([]VolumeEntryStat, error) {
 	query := url.Values{}
-	// Default depth 1
-	depth := 1
 	if opts != nil && opts.Depth != nil {
-		depth = *opts.Depth
+		query.Set("depth", strconv.Itoa(*opts.Depth))
 	}
-	query.Set("depth", strconv.Itoa(depth))
 
 	var clientOpts *VolumeApiOpts
 	if opts != nil {
-		clientOpts = &VolumeApiOpts{
-			Token:            opts.Token,
-			Domain:           opts.Domain,
-			Debug:            opts.Debug,
-			ApiUrl:           opts.ApiUrl,
-			RequestTimeoutMs: opts.RequestTimeoutMs,
-			Logger:           opts.Logger,
-			Headers:          opts.Headers,
-		}
+		clientOpts = &opts.VolumeApiOpts
 	}
 
 	var result []VolumeEntryStat
@@ -397,9 +432,38 @@ func (v *Volume) UpdateMetadata(ctx context.Context, path string, metadata *Volu
 	return &result, nil
 }
 
-// ReadFile reads the raw bytes of a file at the given path.
-func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts) ([]byte, error) {
-	body, err := v.ReadFileStream(ctx, path, opts)
+// ReadFile provides the JS/Python-style single-entry read surface. It returns
+// text by default, and the return type changes when opts.Format is set.
+func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeReadOpts) (any, error) {
+	format := ReadFileFormatText
+	var apiOpts *VolumeApiOpts
+	if opts != nil {
+		apiOpts = &opts.VolumeApiOpts
+		if opts.Format != "" {
+			format = opts.Format
+		}
+	}
+
+	switch format {
+	case ReadFileFormatText:
+		return v.readFileText(ctx, path, apiOpts)
+	case ReadFileFormatBytes:
+		return v.readFileBytes(ctx, path, apiOpts)
+	case ReadFileFormatBlob:
+		data, err := v.readFileBytes(ctx, path, apiOpts)
+		if err != nil {
+			return nil, err
+		}
+		return Blob(data), nil
+	case ReadFileFormatStream:
+		return v.readFileStream(ctx, path, apiOpts)
+	default:
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported read format %s", format)}}
+	}
+}
+
+func (v *Volume) readFileBytes(ctx context.Context, path string, opts *VolumeApiOpts) ([]byte, error) {
+	body, err := v.readFileStream(ctx, path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -407,13 +471,12 @@ func (v *Volume) ReadFile(ctx context.Context, path string, opts *VolumeApiOpts)
 	return io.ReadAll(body)
 }
 
-// ReadFileStream reads the raw bytes of a file as a stream.
-func (v *Volume) ReadFileStream(ctx context.Context, path string, opts *VolumeApiOpts) (io.ReadCloser, error) {
+func (v *Volume) readFileStream(ctx context.Context, path string, opts *VolumeApiOpts) (io.ReadCloser, error) {
 	query := url.Values{}
 	client := v.resolveClient(opts)
 	reqPath := v.volumeContentPath("file", path, query)
 	reqUrl := client.config.ApiUrl + reqPath
-	reqCtx, cancel := requestContext(ctx, fileRequestTimeout(opts))
+	reqCtx, cancel := requestContextWithSignal(ctx, client.config.Signal, fileRequestTimeout(opts))
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, reqUrl, nil)
 	if err != nil {
@@ -444,40 +507,66 @@ func (v *Volume) ReadFileStream(ctx context.Context, path string, opts *VolumeAp
 	return cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
 }
 
-// ReadFileText reads the contents of a file as a string.
-func (v *Volume) ReadFileText(ctx context.Context, path string, opts *VolumeApiOpts) (string, error) {
-	data, err := v.ReadFile(ctx, path, opts)
+func (v *Volume) readFileText(ctx context.Context, path string, opts *VolumeApiOpts) (string, error) {
+	data, err := v.readFileBytes(ctx, path, opts)
 	if err != nil {
 		return "", err
 	}
 	return string(data), nil
 }
 
-// WriteFile writes data to a file at the given path.
-func (v *Volume) WriteFile(ctx context.Context, path string, data io.Reader, opts *VolumeWriteOptions) (*VolumeEntryStat, error) {
-	query := url.Values{}
-	if opts != nil {
-		if opts.UID != nil {
-			query.Set("uid", strconv.Itoa(*opts.UID))
-		}
-		if opts.GID != nil {
-			query.Set("gid", strconv.Itoa(*opts.GID))
-		}
-		if opts.Mode != nil {
-			query.Set("mode", strconv.Itoa(*opts.Mode))
-		}
-		if opts.Force {
-			query.Set("force", "true")
-		}
+func normalizeVolumeWriteData(path string, data any) (io.Reader, error) {
+	if data == nil {
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
 	}
 
-	client := v.resolveClient(volumeWriteOptsToApiOpts(opts))
+	switch v := data.(type) {
+	case string:
+		return bytes.NewBufferString(v), nil
+	case []byte:
+		return bytes.NewReader(v), nil
+	case Blob:
+		return v.Reader(), nil
+	case io.Reader:
+		if isNilVolumeWriteData(v) {
+			return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
+		}
+		return v, nil
+	default:
+		return nil, &shared.InvalidArgumentError{SandboxError: shared.SandboxError{Message: fmt.Sprintf("Unsupported data type for file %s", path)}}
+	}
+}
+
+func isNilVolumeWriteData(data any) bool {
+	if data == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// WriteFile writes data to a file at the given path.
+func (v *Volume) WriteFile(ctx context.Context, path string, data any, opts *VolumeWriteOptions) (*VolumeEntryStat, error) {
+	query := queryFromVolumeWriteOpts(opts)
+	apiOpts := volumeWriteOptsToApiOpts(opts)
+	client := v.resolveClient(apiOpts)
 	reqPath := v.volumeContentPath("file", path, query)
 	reqUrl := client.config.ApiUrl + reqPath
-	reqCtx, cancel := requestContext(ctx, fileRequestTimeout(volumeWriteOptsToApiOpts(opts)))
+	reqCtx, cancel := requestContextWithSignal(ctx, client.config.Signal, fileRequestTimeout(apiOpts))
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, reqUrl, data)
+	reader, err := normalizeVolumeWriteData(path, data)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPut, reqUrl, reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -526,23 +615,14 @@ func (v *Volume) Remove(ctx context.Context, path string, opts *VolumeApiOpts) e
 }
 
 func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
-	if v.client == nil {
-		return newVolumeApiClientWithConfig(NewVolumeConnectionConfig(opts))
-	}
-
 	if opts == nil {
-		return v.client
+		opts = &VolumeApiOpts{}
 	}
 
 	merged := &VolumeApiOpts{
-		Token:            v.client.config.Token,
-		Domain:           v.client.config.Domain,
-		Debug:            v.client.config.Debug,
-		ApiUrl:           v.client.config.ApiUrl,
-		RequestTimeoutMs: v.client.config.RequestTimeoutMs,
-		Logger:           v.client.config.Logger,
-		Headers:          v.client.config.Headers,
-		Proxy:            v.client.config.Proxy,
+		Token:  v.Token,
+		Domain: v.Domain,
+		Debug:  v.Debug,
 	}
 
 	if opts.Token != "" {
@@ -551,14 +631,17 @@ func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
 	if opts.Domain != "" {
 		merged.Domain = opts.Domain
 	}
-	if opts.Debug {
-		merged.Debug = true
+	if opts.Debug != nil {
+		merged.Debug = opts.Debug
 	}
 	if opts.ApiUrl != "" {
 		merged.ApiUrl = opts.ApiUrl
 	}
 	if opts.RequestTimeoutMs != nil {
 		merged.RequestTimeoutMs = opts.RequestTimeoutMs
+	}
+	if opts.Signal != nil {
+		merged.Signal = opts.Signal
 	}
 	if opts.Headers != nil {
 		merged.Headers = opts.Headers
@@ -621,8 +704,8 @@ func queryFromVolumeWriteOpts(opts *VolumeWriteOptions) url.Values {
 	if opts.Mode != nil {
 		query.Set("mode", strconv.Itoa(*opts.Mode))
 	}
-	if opts.Force {
-		query.Set("force", "true")
+	if opts.Force != nil {
+		query.Set("force", strconv.FormatBool(*opts.Force))
 	}
 	return query
 }
@@ -645,6 +728,8 @@ func volumeWriteOptsToApiOpts(opts *VolumeWriteOptions) *VolumeApiOpts {
 		Debug:            opts.Debug,
 		ApiUrl:           opts.ApiUrl,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
+		Signal:           opts.Signal,
+		Logger:           opts.Logger,
 		Headers:          opts.Headers,
 		Proxy:            opts.Proxy,
 	}

@@ -1,5 +1,10 @@
 package shared
 
+import (
+	"context"
+	"time"
+)
+
 // Logger interface compatible with standard logging.
 type Logger interface {
 	Debug(args ...interface{})
@@ -104,7 +109,8 @@ func (e *GitAuthError) Unwrap() error {
 }
 
 type BuildError struct {
-	Message string
+	Message     string
+	CallerTrace string
 }
 
 func (e *BuildError) Error() string { return e.Message }
@@ -123,3 +129,56 @@ type VolumeError struct {
 }
 
 func (e *VolumeError) Error() string { return e.Message }
+
+func MergeContexts(primary context.Context, secondary context.Context) (context.Context, context.CancelFunc) {
+	if primary == nil {
+		primary = context.Background()
+	}
+	if secondary == nil {
+		return primary, func() {}
+	}
+
+	if err := primary.Err(); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+	if err := secondary.Err(); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+
+	var deadline time.Time
+	hasDeadline := false
+	if d, ok := primary.Deadline(); ok {
+		deadline = d
+		hasDeadline = true
+	}
+	if d, ok := secondary.Deadline(); ok && (!hasDeadline || d.Before(deadline)) {
+		deadline = d
+		hasDeadline = true
+	}
+
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if hasDeadline {
+		ctx, cancel = context.WithDeadline(context.Background(), deadline)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+
+	go func() {
+		select {
+		case <-primary.Done():
+			cancel()
+		case <-secondary.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return ctx, cancel
+}

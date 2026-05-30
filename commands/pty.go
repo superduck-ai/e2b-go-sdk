@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,12 +20,19 @@ type PtyCreateOpts struct {
 	User             string
 	Envs             map[string]string
 	Cwd              string
+	Signal           context.Context
 	RequestTimeoutMs *int
+}
+
+type PtySize struct {
+	Cols uint32
+	Rows uint32
 }
 
 type PtyConnectOpts struct {
 	OnData           func(data PtyOutput)
 	TimeoutMs        *int
+	Signal           context.Context
 	RequestTimeoutMs *int
 }
 
@@ -47,7 +53,7 @@ func NewPty(cfg any, envdVersion string) *Pty {
 	return &Pty{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       shared.NewHTTPClient(0, proxy, logger),
+		httpClient:       shared.NewEnvdRPCHTTPClient(0, proxy, logger),
 	}
 }
 
@@ -72,7 +78,7 @@ func (p *Pty) connectUnary(ctx context.Context, path string, reqBody interface{}
 		return err
 	}
 	url := p.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	req, err := newRetryableRequest(ctx, http.MethodPost, url, data)
 	if err != nil {
 		return err
 	}
@@ -80,7 +86,22 @@ func (p *Pty) connectUnary(ctx context.Context, path string, reqBody interface{}
 	for k, v := range p.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := p.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = p.httpClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return err
 	}
@@ -111,7 +132,7 @@ func (p *Pty) connectServerStream(ctx context.Context, path string, reqBody inte
 		return nil, err
 	}
 	url := p.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
+	req, err := newRetryableRequest(ctx, http.MethodPost, url, envd.EncodeConnectEnvelope(data))
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +141,22 @@ func (p *Pty) connectServerStream(ctx context.Context, path string, reqBody inte
 	for k, v := range p.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := p.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = p.httpClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +212,7 @@ func (p *Pty) Create(ctx context.Context, opts *PtyCreateOpts) (*CommandHandle, 
 		},
 	}
 
-	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, p.requestTimeoutFromCreateOpts(opts))
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContextWithSignal(ctx, opts.Signal, p.requestTimeoutFromCreateOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := p.connectServerStream(streamCtx, "/process.Process/Start", startReq, user)
 	if err != nil {
@@ -272,7 +308,7 @@ func (p *Pty) Connect(ctx context.Context, pid uint32, opts *PtyConnectOpts) (*C
 	}
 
 	req := &process.ConnectRequest{Process: process.PidSelector(pid)}
-	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, p.requestTimeoutFromConnectOpts(opts))
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContextWithSignal(ctx, opts.Signal, p.requestTimeoutFromConnectOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := p.connectServerStream(streamCtx, "/process.Process/Connect", req, "")
 	if err != nil {
@@ -372,7 +408,11 @@ func appendPtyOutput(handle *CommandHandle, data []byte, onData func(PtyOutput))
 }
 
 func (p *Pty) SendInput(ctx context.Context, pid uint32, data []byte, opts *CommandRequestOpts) error {
-	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, p.requestTimeout(opts))
 	defer cancel()
 
 	req := &process.SendInputRequest{
@@ -382,16 +422,20 @@ func (p *Pty) SendInput(ctx context.Context, pid uint32, data []byte, opts *Comm
 	return p.connectUnary(reqCtx, "/process.Process/SendInput", req, nil, "")
 }
 
-func (p *Pty) Resize(ctx context.Context, pid uint32, cols, rows uint32, opts *CommandRequestOpts) error {
-	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+func (p *Pty) Resize(ctx context.Context, pid uint32, size PtySize, opts *CommandRequestOpts) error {
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, p.requestTimeout(opts))
 	defer cancel()
 
 	req := &process.UpdateRequest{
 		Process: process.PidSelector(pid),
 		Pty: &process.PTY{
 			Size: &process.PTYSize{
-				Cols: cols,
-				Rows: rows,
+				Cols: size.Cols,
+				Rows: size.Rows,
 			},
 		},
 	}
@@ -399,7 +443,11 @@ func (p *Pty) Resize(ctx context.Context, pid uint32, cols, rows uint32, opts *C
 }
 
 func (p *Pty) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (bool, error) {
-	reqCtx, cancel := requestContext(ctx, p.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, p.requestTimeout(opts))
 	defer cancel()
 
 	req := &process.SendSignalRequest{

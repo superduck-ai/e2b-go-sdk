@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
+
+const rpcTransportRetries = 3
 
 // RpcError represents an error from an envd RPC call.
 type RpcError struct {
@@ -45,6 +48,52 @@ func HandleStreamContextError(err error) error {
 	default:
 		return err
 	}
+}
+
+func RetryRPCTransportError(ctx context.Context, fn func() error) error {
+	return RetryRPCTransportErrorWithBeforeAttempt(ctx, nil, fn)
+}
+
+func RetryRPCTransportErrorWithBeforeAttempt(ctx context.Context, beforeAttempt func() error, fn func() error) error {
+	_, err := retryRPCTransport(ctx, func() (struct{}, error) {
+		if beforeAttempt != nil {
+			if err := beforeAttempt(); err != nil {
+				return struct{}{}, err
+			}
+		}
+		return struct{}{}, fn()
+	})
+	return err
+}
+
+func retryRPCTransport[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
+	for attempt := 0; attempt <= rpcTransportRetries; attempt++ {
+		value, err := fn()
+		if err == nil {
+			return value, nil
+		}
+		if !isRetryableRPCTransportError(err) || ctx == nil || ctx.Err() != nil || attempt == rpcTransportRetries {
+			return value, err
+		}
+	}
+	return zero, nil
+}
+
+func isRetryableRPCTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "transport connection broken")
 }
 
 func ParseConnectEndStreamError(payload []byte) error {

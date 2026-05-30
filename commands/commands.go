@@ -26,6 +26,7 @@ const (
 
 type CommandRequestOpts struct {
 	RequestTimeoutMs *int
+	Signal           context.Context
 }
 
 type CommandStartOpts struct {
@@ -36,8 +37,7 @@ type CommandStartOpts struct {
 	Envs       map[string]string
 	OnStdout   func(data Stdout)
 	OnStderr   func(data Stderr)
-	Stdin      bool
-	StdinOpt   *bool
+	Stdin      *bool
 	TimeoutMs  *int
 }
 
@@ -55,6 +55,13 @@ type ProcessInfo struct {
 	Args []string
 	Envs map[string]string
 	Cwd  string
+}
+
+// commandExecution narrows the single-entry Run surface without exporting a
+// Go-only named union type. It is implemented by *CommandResult and
+// *CommandHandle.
+type commandExecution interface {
+	isCommandExecution()
 }
 
 type connectionConfig struct {
@@ -92,7 +99,7 @@ func NewCommands(cfg any, envdVersion string) *Commands {
 	return &Commands{
 		connectionConfig: resolved,
 		envdVersion:      envdVersion,
-		httpClient:       shared.NewHTTPClient(0, proxy, logger),
+		httpClient:       shared.NewEnvdRPCHTTPClient(0, proxy, logger),
 	}
 }
 
@@ -206,13 +213,31 @@ func requestContext(ctx context.Context, timeoutMs *int) (context.Context, conte
 	return context.WithTimeout(ctx, time.Duration(*timeoutMs)*time.Millisecond)
 }
 
+func requestContextWithSignal(ctx context.Context, signal context.Context, timeoutMs *int) (context.Context, context.CancelFunc) {
+	merged, cancelSignal := shared.MergeContexts(ctx, signal)
+	reqCtx, cancelTimeout := requestContext(merged, timeoutMs)
+	return reqCtx, func() {
+		cancelTimeout()
+		cancelSignal()
+	}
+}
+
+func requestTimeoutStreamContextWithSignal(ctx context.Context, signal context.Context, timeoutMs *int) (context.Context, func(), context.CancelFunc) {
+	merged, cancelSignal := shared.MergeContexts(ctx, signal)
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(merged, timeoutMs)
+	return requestCtx, clearRequestTimeout, func() {
+		cancelRequestTimeout()
+		cancelSignal()
+	}
+}
+
 func (c *Commands) connectUnary(ctx context.Context, path string, reqBody interface{}, respBody interface{}, user string) error {
 	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
 	url := c.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	req, err := newRetryableRequest(ctx, http.MethodPost, url, data)
 	if err != nil {
 		return err
 	}
@@ -220,7 +245,22 @@ func (c *Commands) connectUnary(ctx context.Context, path string, reqBody interf
 	for k, v := range c.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = c.httpClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return err
 	}
@@ -253,7 +293,7 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 		return nil, err
 	}
 	url := c.baseUrl() + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envd.EncodeConnectEnvelope(data)))
+	req, err := newRetryableRequest(ctx, http.MethodPost, url, envd.EncodeConnectEnvelope(data))
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +302,22 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 	for k, v := range c.headers(user) {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.httpClient.Do(req)
+	var resp *http.Response
+	err = envd.RetryRPCTransportErrorWithBeforeAttempt(req.Context(), func() error {
+		if req.GetBody == nil {
+			return nil
+		}
+		body, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		req.Body = body
+		return nil
+	}, func() error {
+		var innerErr error
+		resp, innerErr = c.httpClient.Do(req)
+		return innerErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +334,10 @@ func (c *Commands) connectServerStream(ctx context.Context, path string, reqBody
 		return nil, fmt.Errorf("connect RPC error: %d %s", resp.StatusCode, string(body))
 	}
 	return resp.Body, nil
+}
+
+func newRetryableRequest(ctx context.Context, method, url string, data []byte) (*http.Request, error) {
+	return http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
 }
 
 // readStreamEnvelopes reads Connect protocol envelopes (5-byte header: 1 flag + 4 length, then payload).
@@ -322,7 +381,11 @@ func readStreamEnvelopesWithLogger(reader io.Reader, ch chan<- streamEnvelope, l
 }
 
 func (c *Commands) List(ctx context.Context, opts *CommandRequestOpts) ([]ProcessInfo, error) {
-	reqCtx, cancel := requestContext(ctx, c.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, c.requestTimeout(opts))
 	defer cancel()
 
 	var resp process.ListResponse
@@ -347,7 +410,11 @@ func (c *Commands) List(ctx context.Context, opts *CommandRequestOpts) ([]Proces
 }
 
 func (c *Commands) SendStdin(ctx context.Context, pid uint32, data []byte, opts *CommandRequestOpts) error {
-	reqCtx, cancel := requestContext(ctx, c.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, c.requestTimeout(opts))
 	defer cancel()
 
 	req := &process.SendInputRequest{
@@ -361,7 +428,11 @@ func (c *Commands) closeStdin(ctx context.Context, pid uint32, opts *CommandRequ
 	if !versionGTE(c.envdVersion, envd.EnvdClose) {
 		return fmt.Errorf("Sandbox envd version %s doesn't support closeStdin. Please rebuild your template to pick up the latest sandbox version.", c.envdVersion)
 	}
-	reqCtx, cancel := requestContext(ctx, c.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, c.requestTimeout(opts))
 	defer cancel()
 	req := &process.CloseStdinRequest{Process: process.PidSelector(pid)}
 	return c.connectUnary(reqCtx, "/process.Process/CloseStdin", req, nil, "")
@@ -372,7 +443,11 @@ func (c *Commands) CloseStdin(ctx context.Context, pid uint32, opts *CommandRequ
 }
 
 func (c *Commands) Kill(ctx context.Context, pid uint32, opts *CommandRequestOpts) (bool, error) {
-	reqCtx, cancel := requestContext(ctx, c.requestTimeout(opts))
+	var signal context.Context
+	if opts != nil {
+		signal = opts.Signal
+	}
+	reqCtx, cancel := requestContextWithSignal(ctx, signal, c.requestTimeout(opts))
 	defer cancel()
 
 	req := &process.SendSignalRequest{
@@ -395,7 +470,7 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 	}
 	user := ""
 	req := &process.ConnectRequest{Process: process.PidSelector(pid)}
-	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, c.requestTimeoutFromConnectOpts(opts))
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContextWithSignal(ctx, opts.Signal, c.requestTimeoutFromConnectOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := c.connectServerStream(streamCtx, "/process.Process/Connect", req, user)
 	if err != nil {
@@ -465,7 +540,7 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 					return
 				}
 				c.handleProcessEvent(msg.payload, handle)
-				if handle.GetExitCode() != nil {
+				if handle.hasExitCode() {
 					return
 				}
 			}
@@ -475,19 +550,18 @@ func (c *Commands) Connect(ctx context.Context, pid uint32, opts *CommandConnect
 	return handle, nil
 }
 
-func (c *Commands) Run(ctx context.Context, cmd string, opts *CommandStartOpts) (*CommandResult, error) {
+// Run provides the JS/Python-style single-entry command surface. It returns a
+// foreground CommandResult by default, and returns a CommandHandle when
+// opts.Background is true.
+func (c *Commands) Run(ctx context.Context, cmd string, opts *CommandStartOpts) (commandExecution, error) {
 	if opts != nil && opts.Background {
-		return nil, fmt.Errorf("Commands.Run does not support background execution; use RunBackground instead")
+		return c.start(ctx, cmd, opts)
 	}
 	handle, err := c.start(ctx, cmd, opts)
 	if err != nil {
 		return nil, err
 	}
 	return handle.Wait()
-}
-
-func (c *Commands) RunBackground(ctx context.Context, cmd string, opts *CommandStartOpts) (*CommandHandle, error) {
-	return c.start(ctx, cmd, opts)
 }
 
 func (c *Commands) start(ctx context.Context, cmd string, opts *CommandStartOpts) (*CommandHandle, error) {
@@ -512,7 +586,7 @@ func (c *Commands) start(ctx context.Context, cmd string, opts *CommandStartOpts
 		Stdin: stdinEnabled,
 	}
 
-	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContext(ctx, c.requestTimeoutFromStartOpts(opts))
+	requestCtx, clearRequestTimeout, cancelRequestTimeout := requestTimeoutStreamContextWithSignal(ctx, opts.Signal, c.requestTimeoutFromStartOpts(opts))
 	streamCtx, streamCancel := streamContext(requestCtx, opts.TimeoutMs, defaultProcessConnectionTimeoutMs)
 	body, err := c.connectServerStream(streamCtx, "/process.Process/Start", startReq, user)
 	if err != nil {
@@ -585,7 +659,7 @@ func (c *Commands) start(ctx context.Context, cmd string, opts *CommandStartOpts
 					return
 				}
 				c.handleProcessEvent(msg.payload, handle)
-				if handle.GetExitCode() != nil {
+				if handle.hasExitCode() {
 					return
 				}
 			}
@@ -787,11 +861,8 @@ func resolveCommandStdin(opts *CommandStartOpts) (enabled bool, explicit bool) {
 	if opts == nil {
 		return false, false
 	}
-	if opts.StdinOpt != nil {
-		return *opts.StdinOpt, true
-	}
-	if opts.Stdin {
-		return true, true
+	if opts.Stdin != nil {
+		return *opts.Stdin, true
 	}
 	return false, false
 }

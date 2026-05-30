@@ -12,6 +12,13 @@ const (
 )
 
 const (
+	ReadFormatText   = rootfs.ReadFormatText
+	ReadFormatBytes  = rootfs.ReadFormatBytes
+	ReadFormatStream = rootfs.ReadFormatStream
+	ReadFormatBlob   = rootfs.ReadFormatBlob
+)
+
+const (
 	FilesystemEventChmod  = rootfs.FilesystemEventChmod
 	FilesystemEventCreate = rootfs.FilesystemEventCreate
 	FilesystemEventRemove = rootfs.FilesystemEventRemove
@@ -20,9 +27,11 @@ const (
 )
 
 type FileType = rootfs.FileType
+type Blob = rootfs.Blob
 type WriteInfo = rootfs.WriteInfo
 type EntryInfo = rootfs.EntryInfo
 type Filesystem = rootfs.Filesystem
+type ReadFormat = rootfs.ReadFormat
 type FilesystemRequestOpts = rootfs.FilesystemRequestOpts
 type FilesystemWriteOpts = rootfs.FilesystemWriteOpts
 type FilesystemReadOpts = rootfs.FilesystemReadOpts
@@ -45,6 +54,7 @@ type CommandConnectOpts = rootcmd.CommandConnectOpts
 type CommandStartOpts = rootcmd.CommandStartOpts
 type Commands = rootcmd.Commands
 type Pty = rootcmd.Pty
+type PtySize = rootcmd.PtySize
 type PtyCreateOpts = rootcmd.PtyCreateOpts
 type PtyConnectOpts = rootcmd.PtyConnectOpts
 

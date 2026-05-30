@@ -53,12 +53,21 @@ func TestRootTemplateFunctionSignaturesAreAvailable(t *testing.T) {
 		t.Fatalf("expected BuildInBackground to return *BuildInfo, got %v", got.Out(0))
 	}
 
+	if got := reflect.TypeOf(GetBuildStatus); got.In(1) != reflect.TypeOf((*BuildInfo)(nil)) {
+		t.Fatalf("expected GetBuildStatus to accept *BuildInfo, got %v", got.In(1))
+	}
 	if got := reflect.TypeOf(GetBuildStatus); got.Out(0) != reflect.TypeOf((*TemplateBuildStatusResponse)(nil)) {
 		t.Fatalf("expected GetBuildStatus to return *TemplateBuildStatusResponse, got %v", got.Out(0))
 	}
 
+	if got := reflect.TypeOf(Exists); got.In(2) != reflect.TypeOf((*ConnectionOpts)(nil)) {
+		t.Fatalf("expected Exists to accept *ConnectionOpts, got %v", got.In(2))
+	}
 	if got := reflect.TypeOf(AssignTags); got.Out(0) != reflect.TypeOf((*TemplateTagInfo)(nil)) {
 		t.Fatalf("expected AssignTags to return *TemplateTagInfo, got %v", got.Out(0))
+	}
+	if got := reflect.TypeOf(AssignTags); got.In(3) != reflect.TypeOf((*ConnectionOpts)(nil)) {
+		t.Fatalf("expected AssignTags to accept *ConnectionOpts, got %v", got.In(3))
 	}
 
 	if got := reflect.TypeOf(Exists); got.In(0) != reflect.TypeOf((*context.Context)(nil)).Elem() {

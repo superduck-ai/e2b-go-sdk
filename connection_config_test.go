@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -45,11 +46,77 @@ func TestConnectionConfigGetHostFallsBackToConfigDomainWhenSandboxDomainMissing(
 	}
 }
 
+func TestConnectionConfigGetSandboxUrlUsesStableHostForSupportedDomains(t *testing.T) {
+	supportedDomains := []string{"e2b.app", "e2b.dev", "e2b.pro", "e2b-staging.dev"}
+	config := &ConnectionConfig{}
+
+	for _, sandboxDomain := range supportedDomains {
+		t.Run(sandboxDomain, func(t *testing.T) {
+			want := "https://sandbox." + sandboxDomain
+			if got := config.GetSandboxUrl("sbx-1", sandboxDomain, 49983); got != want {
+				t.Fatalf("expected stable sandbox URL %q, got %q", want, got)
+			}
+		})
+	}
+}
+
+func TestConnectionConfigGetSandboxDirectUrlUsesPerSandboxHostForSupportedDomains(t *testing.T) {
+	supportedDomains := []string{"e2b.app", "e2b.dev", "e2b.pro", "e2b-staging.dev"}
+	config := &ConnectionConfig{}
+
+	for _, sandboxDomain := range supportedDomains {
+		t.Run(sandboxDomain, func(t *testing.T) {
+			want := "https://49983-sbx-1." + sandboxDomain
+			if got := config.GetSandboxDirectUrl("sbx-1", sandboxDomain, 49983); got != want {
+				t.Fatalf("expected direct sandbox URL %q, got %q", want, got)
+			}
+		})
+	}
+}
+
 func TestConnectionConfigGetSandboxUrlFallsBackToConfigDomainWhenSandboxDomainMissing(t *testing.T) {
 	config := &ConnectionConfig{Domain: "e2b.app"}
 
-	if got := config.GetSandboxUrl("sbx-1", "", 49983); got != "https://49983-sbx-1.e2b.app" {
-		t.Fatalf("expected sandbox URL to fall back to config domain, got %q", got)
+	if got := config.GetSandboxUrl("sbx-1", "", 49983); got != "https://sandbox.e2b.app" {
+		t.Fatalf("expected sandbox URL to fall back to stable config domain host, got %q", got)
+	}
+}
+
+func TestConnectionConfigGetSandboxDirectUrlFallsBackToConfigDomainWhenSandboxDomainMissing(t *testing.T) {
+	config := &ConnectionConfig{Domain: "e2b.app"}
+
+	if got := config.GetSandboxDirectUrl("sbx-1", "", 49983); got != "https://49983-sbx-1.e2b.app" {
+		t.Fatalf("expected direct sandbox URL to fall back to config domain, got %q", got)
+	}
+}
+
+func TestConnectionConfigGetSandboxUrlKeepsPerSandboxHostOutsideStableDomains(t *testing.T) {
+	config := &ConnectionConfig{Domain: "e2b.dev"}
+
+	if got := config.GetSandboxUrl("sbx-test", "sandbox.e2b.dev", 49983); got != "https://49983-sbx-test.sandbox.e2b.dev" {
+		t.Fatalf("expected sandbox URL to keep per-sandbox host, got %q", got)
+	}
+}
+
+func TestConnectionConfigGetSandboxUrlsUseExplicitSandboxOverride(t *testing.T) {
+	config := &ConnectionConfig{SandboxUrl: "https://sandbox.custom"}
+
+	if got := config.GetSandboxUrl("sbx-1", "e2b.app", 49983); got != "https://sandbox.custom" {
+		t.Fatalf("expected sandbox URL override to win, got %q", got)
+	}
+	if got := config.GetSandboxDirectUrl("sbx-1", "e2b.app", 49983); got != "https://sandbox.custom" {
+		t.Fatalf("expected direct sandbox URL override to win, got %q", got)
+	}
+}
+
+func TestConnectionConfigGetSandboxUrlsStayLocalhostInDebugMode(t *testing.T) {
+	config := &ConnectionConfig{Debug: true}
+
+	if got := config.GetSandboxUrl("sbx-1", "e2b.app", 49983); got != "http://localhost:49983" {
+		t.Fatalf("expected debug sandbox URL localhost, got %q", got)
+	}
+	if got := config.GetSandboxDirectUrl("sbx-1", "e2b.app", 49983); got != "http://localhost:49983" {
+		t.Fatalf("expected debug direct sandbox URL localhost, got %q", got)
 	}
 }
 
@@ -83,11 +150,28 @@ func TestNewConnectionConfigDefaultsApiUrlLikeJsConstructor(t *testing.T) {
 
 	debugConfig := NewConnectionConfig(&ConnectionOpts{
 		Domain: "example.test",
-		Debug:  true,
+		Debug:  boolRef(true),
 	})
 
 	if debugConfig.ApiUrl != "http://localhost:3000" {
 		t.Fatalf("expected debug API URL to match JS constructor, got %q", debugConfig.ApiUrl)
+	}
+}
+
+func TestNewConnectionConfigMatchesCurrentJsAndPythonRootDebugTruthiness(t *testing.T) {
+	t.Setenv("E2B_API_URL", "")
+	t.Setenv("E2B_DOMAIN", "")
+	t.Setenv("E2B_DEBUG", "true")
+
+	config := NewConnectionConfig(&ConnectionOpts{
+		Debug: boolRef(false),
+	})
+
+	if !config.Debug {
+		t.Fatalf("expected env debug=true to win over explicit false like current JS/Python root constructors, got %#v", config)
+	}
+	if config.ApiUrl != "http://localhost:3000" {
+		t.Fatalf("expected env debug=true to keep localhost API URL like current JS/Python root constructors, got %q", config.ApiUrl)
 	}
 }
 
@@ -120,6 +204,16 @@ func TestNewConnectionConfigApiUrlArgsHavePriorityOverEnv(t *testing.T) {
 
 	if config.ApiUrl != "http://localhost:8080" {
 		t.Fatalf("expected API URL arg to win over env, got %q", config.ApiUrl)
+	}
+}
+
+func TestConnectionOptsDebugMatchesJsAndPythonOptionalShape(t *testing.T) {
+	field, ok := reflect.TypeOf(ConnectionOpts{}).FieldByName("Debug")
+	if !ok {
+		t.Fatal("expected ConnectionOpts to expose Debug")
+	}
+	if field.Type != reflect.TypeOf((*bool)(nil)) {
+		t.Fatalf("expected ConnectionOpts.Debug to be *bool, got %v", field.Type)
 	}
 }
 

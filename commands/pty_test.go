@@ -7,11 +7,20 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/superduck-ai/e2b-go-sdk/envd/process"
 )
+
+func directFieldNames(typ reflect.Type) []string {
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		names = append(names, typ.Field(i).Name)
+	}
+	return names
+}
 
 func TestPtyKillReturnsFalseForGenericNotFoundMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +122,100 @@ func TestPtyOnDataReceivesRawBytes(t *testing.T) {
 	}
 	if result.Stdout == string(raw) {
 		t.Fatal("expected stdout aggregation to sanitize invalid UTF-8, not preserve raw bytes")
+	}
+}
+
+func TestPtyResizeUsesJsAndPythonStyleSizeSurface(t *testing.T) {
+	t.Parallel()
+
+	sizeType := reflect.TypeOf(PtySize{})
+	if got, want := directFieldNames(sizeType), []string{"Cols", "Rows"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected PtySize field shape: got %v want %v", got, want)
+	}
+
+	resize, ok := reflect.TypeOf(&Pty{}).MethodByName("Resize")
+	if !ok {
+		t.Fatal("expected Pty to expose Resize")
+	}
+	if got := resize.Type.NumIn(); got != 5 {
+		t.Fatalf("unexpected Resize arity: got %d want 5", got)
+	}
+	if got := resize.Type.In(3); got != reflect.TypeOf(PtySize{}) {
+		t.Fatalf("expected Resize size parameter to be PtySize, got %v", got)
+	}
+	if got := resize.Type.In(4); got != reflect.TypeOf((*CommandRequestOpts)(nil)) {
+		t.Fatalf("expected Resize opts parameter to be *CommandRequestOpts, got %v", got)
+	}
+}
+
+func TestPtyResizeUsesNestedSizeRequestLikeJsAndPython(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Update" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		ptyReq, ok := req["pty"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected pty request, got %#v", req)
+		}
+		if _, ok := ptyReq["cols"]; ok {
+			t.Fatalf("did not expect legacy top-level pty cols request: %#v", req)
+		}
+		sizeReq, ok := ptyReq["size"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected nested pty size request, got %#v", req)
+		}
+		if sizeReq["cols"] != float64(100) || sizeReq["rows"] != float64(24) {
+			t.Fatalf("unexpected pty size payload: %#v", sizeReq)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	pty := NewPty(testCommandsConfig(server.URL, 0), "1.0.0")
+	if err := pty.Resize(context.Background(), 123, PtySize{Cols: 100, Rows: 24}, nil); err != nil {
+		t.Fatalf("Resize returned error: %v", err)
+	}
+}
+
+func TestPtyConnectUnaryRetriesTransientTransportErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.URL.Path != "/process.Process/SendSignal" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if attempts == 1 {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("expected hijacker support")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("failed to hijack connection: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	pty := NewPty(testCommandsConfig(server.URL, 0), "1.0.0")
+	killed, err := pty.Kill(context.Background(), 123, nil)
+	if err != nil {
+		t.Fatalf("expected retry to recover transient transport error, got %v", err)
+	}
+	if !killed {
+		t.Fatal("expected Kill to report true after retry succeeds")
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
 	}
 }
 
