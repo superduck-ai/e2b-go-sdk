@@ -2,7 +2,7 @@
 
 Go SDK for creating and controlling [E2B](./docs.mdx) sandboxes from Go.
 
-This repository provides the root `e2b` package plus lower-level packages for commands, filesystem access, Git, templates, volumes, and API clients. It also contains the documentation source under [`docs/`](./docs/) and compile-checked doc examples in the root `docs*_test.go` files.
+This repository provides the root `e2b` package plus lower-level packages for commands, filesystem access, Git, templates, volumes, and API clients. It also contains the documentation source under [`docs/`](./docs/) and compile-checked doc examples in [`internal/doctest/`](./internal/doctest/).
 
 ## What you can do
 
@@ -102,7 +102,7 @@ go test ./...
 Run the documentation validation suite only:
 
 ```bash
-go test . -run '^TestDocs' -count=1
+go test ./internal/doctest -run '^TestDocs' -count=1
 ```
 
 Run integration tests against a live E2B account:
@@ -123,7 +123,7 @@ Some expensive stress cases are skipped unless you opt in with additional enviro
 - [`volume/`](./volume/): persistent volume APIs
 - [`api/`](./api/): lower-level control plane client
 - [`docs/`](./docs/): documentation pages
-- `docs*_test.go`: compile-checked documentation examples plus link/asset/snippet audits
+- [`internal/doctest/`](./internal/doctest/): compile-checked documentation examples plus link/asset/snippet audits
 
 ## Documentation
 
@@ -133,4 +133,4 @@ The repository documentation lives in:
 - [`docs/quickstart.mdx`](./docs/quickstart.mdx)
 - [`docs/sdk-reference/go-sdk/sandbox.mdx`](./docs/sdk-reference/go-sdk/sandbox.mdx)
 
-If you change public behavior, update the corresponding doc page and root-level `docs*_test.go` coverage in the same change.
+If you change public behavior, update the corresponding doc page and matching coverage in [`internal/doctest/`](./internal/doctest/) in the same change.
