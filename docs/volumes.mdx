@@ -1,0 +1,52 @@
+---
+title: "Volumes"
+sidebarTitle: "Overview"
+description: "Use persistent E2B volumes from the Go SDK."
+---
+
+# Volumes
+
+Volumes provide persistent storage that survives sandbox lifecycles.
+
+In the Go SDK, volume management is split into:
+
+- package-level control-plane helpers like `CreateVolume(...)` and `ListVolumes(...)`
+- instance methods on `*e2b.Volume` for file and directory operations
+
+When a volume is mounted into a sandbox, files are accessed through the sandbox filesystem at the mount path. The direct volume methods are most useful when the volume is not mounted anywhere.
+
+With the Go SDK you can:
+
+- [manage volumes](/docs/volumes/manage)
+- [mount volumes into sandboxes](/docs/volumes/mount)
+- [read and write files](/docs/volumes/read-write)
+- [inspect metadata](/docs/volumes/info)
+- [upload local data](/docs/volumes/upload)
+- [download data back out](/docs/volumes/download)
+
+## Example
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		VolumeMounts: map[string]any{
+			"/mnt/my-data": volume,
+		},
+	})
+
+	_ = sandbox
+}
+```
+

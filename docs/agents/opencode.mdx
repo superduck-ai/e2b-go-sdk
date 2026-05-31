@@ -1,0 +1,261 @@
+---
+title: "OpenCode"
+description: "Run OpenCode in a secure E2B sandbox from Go."
+icon: "/images/icons/opencode.svg"
+---
+
+# OpenCode
+
+OpenCode can run inside an E2B sandbox with terminal, filesystem, Git, and optionally its own HTTP server mode.
+
+If your E2B account has the prebuilt `opencode` template, create a sandbox from that template and invoke `opencode` with `sandbox.Commands.Run(...)`.
+
+## Run headless
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "opencode", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `opencode run "Create a hello world HTTP server in Go"`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+## Work on a cloned repository
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := 600_000
+	depth := 1
+
+	sandbox, err := e2b.Create(ctx, "opencode", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"),
+		},
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Git.Clone(ctx, "https://github.com/your-org/your-repo.git", &e2b.GitCloneOpts{
+		Path:     "/home/user/repo",
+		Username: "x-access-token",
+		Password: os.Getenv("GITHUB_TOKEN"),
+		Depth:    &depth,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(
+		ctx,
+		`cd /home/user/repo && opencode run "Add error handling to all API endpoints"`,
+		&e2b.CommandStartOpts{
+			OnStdout: func(data e2b.Stdout) {
+				log.Print(data)
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	diffExecution, err := sandbox.Commands.Run(ctx, "cd /home/user/repo && git diff", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	diff := diffExecution.(*e2b.CommandResult)
+
+	log.Println(diff.Stdout)
+}
+```
+
+## Run the OpenCode HTTP server
+
+OpenCode can expose an HTTP API from inside the sandbox. Start it in the background, wait for the health endpoint, and then call the API over the public sandbox host.
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := 10 * 60 * 1000
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	sandbox, err := e2b.Create(ctx, "opencode", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"),
+		},
+		TimeoutMs: &timeoutMs,
+		Lifecycle: &e2b.SandboxLifecycle{
+			OnTimeout: "pause",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	serverExecution, err := sandbox.Commands.Run(ctx, "opencode serve --hostname 0.0.0.0 --port 4096", &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer serverExecution.(*e2b.CommandHandle).Kill()
+
+	baseURL := "https://" + sandbox.GetHost(4096)
+	for {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/global/health", nil)
+		if reqErr != nil {
+			log.Fatal(reqErr)
+		}
+
+		resp, healthErr := client.Do(req)
+		if healthErr == nil {
+			resp.Body.Close()
+			if resp.StatusCode < 500 {
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	sessionReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/session", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sessionResp, err := client.Do(sessionReq)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sessionResp.Body.Close()
+
+	sessionBody, err := io.ReadAll(sessionResp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var session map[string]any
+	if err := json.Unmarshal(sessionBody, &session); err != nil {
+		log.Fatal(err)
+	}
+	sessionID, _ := session["id"].(string)
+
+	payload, err := json.Marshal(map[string]any{
+		"parts": []map[string]string{
+			{
+				"type": "text",
+				"text": "Create a hello world HTTP server in Go",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	messageReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", bytes.NewReader(payload))
+	if err != nil {
+		log.Fatal(err)
+	}
+	messageReq.Header.Set("Content-Type", "application/json")
+
+	messageResp, err := client.Do(messageReq)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer messageResp.Body.Close()
+
+	responseBody, err := io.ReadAll(messageResp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(string(responseBody))
+}
+```
+
+## Build a custom OpenCode template
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromTemplate("opencode").
+		SetEnvs(map[string]string{
+			"OPENCODE_SERVER_PASSWORD": "your-password",
+		}).
+		SetStartCmd(
+			"opencode serve --hostname 0.0.0.0 --port 4096",
+			e2b.WaitForPort(4096),
+		)
+
+	_, err := e2b.Build(context.Background(), template, "my-opencode", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    2,
+			MemoryMB:    2048,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```

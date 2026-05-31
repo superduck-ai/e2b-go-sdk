@@ -1,0 +1,161 @@
+---
+title: "Upload and Download Files"
+description: "Move files between the local machine and a sandbox with the Go SDK."
+---
+
+# Upload and Download Files
+
+Use `sandbox.Files.Write(...)` to upload and `sandbox.Files.Read(...)` to download.
+
+If you need a reusable environment with files already present, you can also use a [custom template](/docs/template/quickstart).
+
+## Upload a file
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	content, err := os.ReadFile("local/file")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/my-file", content, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Upload multiple files
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	fileA, err := os.ReadFile("local/file/a")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fileB, err := os.ReadFile("local/file/b")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/my-file-a", fileA, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Files.Write(ctx, "/home/user/my-file-b", fileB, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The Go SDK also exposes `sandbox.Files.WriteFiles(...)` when you want a batch write API.
+
+## Download a file
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	contentValue, err := sandbox.Files.Read(ctx, "/home/user/my-file", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	content := contentValue.(string)
+
+	if err := os.WriteFile("local/file", []byte(content), 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Download multiple files
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	contentAValue, err := sandbox.Files.Read(ctx, "/home/user/my-file-a", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	contentA := contentAValue.(string)
+
+	contentBValue, err := sandbox.Files.Read(ctx, "/home/user/my-file-b", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	contentB := contentBValue.(string)
+
+	if err := os.WriteFile("local/file/a", []byte(contentA), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile("local/file/b", []byte(contentB), 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
+```

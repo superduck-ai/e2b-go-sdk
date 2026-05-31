@@ -1,0 +1,107 @@
+---
+title: "Archil"
+description: "Mount an Archil disk in a sandbox using the Go SDK."
+icon: "/images/icons/archil.svg"
+---
+
+# Archil
+
+This Go SDK does not expose an Archil-specific client. The integration is still straightforward because Archil is mounted through the normal Linux filesystem layer inside the sandbox.
+
+If you only need E2B-native persistence, use [Volumes](/docs/volumes). Use Archil when you want a shared POSIX mount backed by object storage outside E2B.
+
+## Build a template with the Archil CLI
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var template = e2b.Template(nil).
+	FromBaseImage().
+	RunCmd("curl -fsSL https://archil.com/install | sh", &struct{ User string }{User: "root"})
+```
+
+## Mount the disk at runtime
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "<your-template-id>", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(ctx, "mkdir -p /home/user/archil", &e2b.CommandStartOpts{
+		User: "root",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(
+		ctx,
+		"archil mount <disk-name-or-id> /home/user/archil --region <region>",
+		&e2b.CommandStartOpts{
+			User: "root",
+			Envs: map[string]string{
+				"ARCHIL_MOUNT_TOKEN": "<disk-token>",
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(ctx, "chown user:user /home/user/archil", &e2b.CommandStartOpts{
+		User: "root",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`<disk-name-or-id>` can be either the owner-qualified name or the Archil disk ID. Mount the shared filesystem wherever your tools expect normal POSIX paths.
+
+## Unmount before shutting the sandbox down
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(ctx, "archil unmount /home/user/archil", &e2b.CommandStartOpts{
+		User: "root",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+If you plan to mount the same Archil disk in multiple sandboxes, use the Archil-side shared-disk settings and concurrency model.

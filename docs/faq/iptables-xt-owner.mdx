@@ -1,0 +1,12 @@
+---
+title: "Why does iptables fail with 'xt_owner module missing' in a sandbox?"
+sidebarTitle: iptables xt_owner module
+---
+
+# Why does iptables fail with `xt_owner module missing` in a sandbox?
+
+The `xt_owner` kernel module is not available in the current sandbox kernel. As a result, iptables rules that depend on owner matching can fail with the familiar missing-module warning and exit code `4`.
+
+## Workaround
+
+Use `nftables` instead of iptables for owner-based matching or transparent proxy setups. `nftables` does not depend on the missing `xt_owner` module.

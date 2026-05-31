@@ -1,0 +1,95 @@
+---
+title: "Upload Data to a Volume"
+sidebarTitle: "Upload Data"
+description: "Upload files from the local machine into an E2B volume from Go."
+---
+
+# Upload Data to a Volume
+
+Upload data with `volume.WriteFile(...)`.
+
+Because the Go SDK accepts `string`, `[]byte`, `e2b.Blob`, and `io.Reader`, local file upload usually means opening a file and passing the handle as an `io.Reader`.
+
+## Upload a single file
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, err := e2b.CreateVolume(ctx, "my-volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	file, err := os.Open("/local/path")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	_, err = volume.WriteFile(ctx, "/path/in/volume", file, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Upload a directory or multiple files
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"path/filepath"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, err := e2b.CreateVolume(ctx, "my-volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	directoryPath := "/local/dir"
+	entries, err := os.ReadDir(directoryPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		filePath := filepath.Join(directoryPath, entry.Name())
+		file, err := os.Open(filePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		_, writeErr := volume.WriteFile(ctx, "/upload/"+entry.Name(), file, nil)
+		closeErr := file.Close()
+		if writeErr != nil {
+			log.Fatal(writeErr)
+		}
+		if closeErr != nil {
+			log.Fatal(closeErr)
+		}
+	}
+}
+```
+

@@ -1,0 +1,20 @@
+---
+title: "Why does my custom template fail with 'port 49999 not open'?"
+sidebarTitle: Port 49999 not open
+---
+
+# Why does my custom template fail with `port 49999 not open`?
+
+This FAQ applies to E2B runtimes that expect a code-interpreter service on port `49999`. The Go SDK in this repository does not expose `.runCode`, so if you hit this error you are using a different E2B runtime or template stack against a custom template.
+
+## Cause
+
+The internal service expected on port `49999` did not start. In practice this usually means one of the following:
+
+- the template was not based on the correct code-interpreter image or template
+- the start command that launches the service was missing
+- the ready check never reached the expected health endpoint
+
+## Fix
+
+Use the official code-interpreter base template when you need that service, or make sure your custom template starts the required process and waits for its health endpoint before the build snapshots the environment.

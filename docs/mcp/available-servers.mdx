@@ -1,0 +1,86 @@
+---
+title: "Available servers"
+description: "Use catalog MCP servers from Go."
+---
+
+# Available servers
+
+E2B can start many preconfigured MCP servers from the upstream Docker MCP catalog.
+
+In the Go SDK, these server configurations are intentionally generic:
+
+- runtime configuration uses `e2b.McpServer`
+- `e2b.McpServer` is `map[string]any`
+- template pre-pulls use `AddMcpServer(...)` on `FromTemplate("mcp-gateway")`
+
+That means the Go SDK does not generate a dedicated typed struct for every server in the catalog. Instead, you pass the server name and the required fields directly.
+
+## Start catalog servers at runtime
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	sandbox, err := e2b.Create(context.Background(), "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"browserbase": map[string]any{
+				"apiKey":       "browserbase-api-key",
+				"geminiApiKey": "gemini-api-key",
+				"projectId":    "project-id",
+			},
+			"airtable": map[string]any{
+				"airtableApiKey": "airtable-api-key",
+			},
+			"brave": map[string]any{
+				"apiKey": "brave-api-key",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	mcpURL := sandbox.GetMcpUrl()
+	mcpToken, tokenErr := sandbox.GetMcpToken()
+
+	_ = mcpURL
+	_ = mcpToken
+	_ = tokenErr
+}
+```
+
+## Pre-pull catalog servers into a template
+
+If you want to pre-pull catalog servers during template build, start from the `mcp-gateway` template and use `AddMcpServer(...)`.
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+func main() {
+	template := e2b.Template(nil).
+		FromTemplate("mcp-gateway").
+		AddMcpServer("exa", []string{"brave", "browserbase"})
+
+	_ = template
+}
+```
+
+## How to find server fields
+
+The upstream catalog changes more often than the Go SDK surface, so the most reliable workflow is:
+
+1. find the server name in the catalog
+2. copy the required property names for that server
+3. place them directly in the nested Go map under that server key
+
+For example, if a server expects fields named `apiKey` and `projectId`, pass exactly those keys in the nested `map[string]any`.

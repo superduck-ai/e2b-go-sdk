@@ -1,0 +1,21 @@
+---
+sidebarTitle: Overview
+title: "Supported languages"
+description: "How language selection works in the Go SDK."
+---
+
+# Supported languages
+
+The current Go SDK does not select a language through a `runCode(..., language=...)` parameter.
+
+Instead, you choose a template that has the runtime installed and then execute the matching program explicitly with `sandbox.Commands.Run(...)`.
+
+Common choices are:
+
+- [Python](/docs/code-interpreting/supported-languages/python)
+- [JavaScript and TypeScript](/docs/code-interpreting/supported-languages/javascript)
+- [R](/docs/code-interpreting/supported-languages/r)
+- [Java](/docs/code-interpreting/supported-languages/java)
+- [Bash](/docs/code-interpreting/supported-languages/bash)
+
+If a runtime is not present in your base template, add it during template build with `FromPythonImage(...)`, `FromNodeImage(...)`, `AptInstall(...)`, or `RunCmd(...)`.

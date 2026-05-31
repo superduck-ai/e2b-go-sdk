@@ -1,0 +1,26 @@
+---
+title: "Pre-installed libraries"
+description: "How library availability works for data-analysis templates in the Go SDK."
+---
+
+# Pre-installed libraries
+
+This Go SDK does not lock you to a single notebook image with a fixed Python requirements file.
+
+Instead, library availability depends on the template you choose or build. The usual pattern is:
+
+- start from `FromPythonImage(...)`
+- install the packages you need during template build
+- keep the runtime explicit in version-controlled template code
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var template = e2b.Template(nil).
+	FromPythonImage("3.12").
+	RunCmd("pip install pandas polars matplotlib seaborn scikit-learn", &struct{ User string }{User: "root"})
+```
+
+If you need additional system libraries, add them with `AptInstall(...)` or `RunCmd(...)`.

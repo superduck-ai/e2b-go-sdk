@@ -1,0 +1,100 @@
+---
+title: "Streaming"
+description: "Stream process output from the sandbox with the Go SDK."
+---
+
+# Streaming
+
+The Go SDK streams process output through `sandbox.Commands.Run(...)` callbacks or through `CommandHandle.State()` while a background command is still running.
+
+## Stream stdout and stderr
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(ctx, `python3 - <<'PY'
+import sys
+import time
+
+print("This goes first to stdout")
+time.sleep(1)
+print("This goes later to stderr", file=sys.stderr)
+time.sleep(1)
+print("This goes last")
+PY`, &e2b.CommandStartOpts{
+		OnStdout: func(data e2b.Stdout) {
+			log.Print("stdout: ", data)
+		},
+		OnStderr: func(data e2b.Stderr) {
+			log.Print("stderr: ", data)
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Stream a background process and inspect accumulated state
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `python3 - <<'PY'
+import time
+for i in range(3):
+    print(f"step {i}")
+    time.sleep(1)
+PY`, &e2b.CommandStartOpts{
+		Background: true,
+		OnStdout: func(data e2b.Stdout) {
+			log.Print(data)
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	state := handle.State()
+	log.Println(state.Stdout)
+
+	result, err := handle.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(result.Stdout)
+}
+```

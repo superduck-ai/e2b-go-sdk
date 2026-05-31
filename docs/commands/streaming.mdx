@@ -1,0 +1,81 @@
+---
+title: "Streaming Command Output"
+sidebarTitle: Streaming
+description: "Stream stdout and stderr from sandbox commands in the Go SDK."
+---
+
+# Streaming Command Output
+
+To stream command output while it is produced, pass `OnStdout` and `OnStderr` callbacks to `sandbox.Commands.Run(...)`.
+
+The callback payload types are `e2b.Stdout` and `e2b.Stderr`, both of which are string aliases in Go.
+
+## Stream a foreground command
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	execution, _ := sandbox.Commands.Run(ctx, "echo hello; sleep 1; echo world", &e2b.CommandStartOpts{
+		OnStdout: func(data e2b.Stdout) {
+			_ = data
+		},
+		OnStderr: func(data e2b.Stderr) {
+			_ = data
+		},
+	})
+
+	result := execution.(*e2b.CommandResult)
+	_ = result.Stdout
+	_ = result.Stderr
+}
+```
+
+Foreground commands still return `*e2b.CommandResult` after the process finishes.
+
+## Stream a background command
+
+For background commands, the same callbacks attach to the `CommandHandle`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Connect(ctx, "sbx_123", nil)
+
+	execution, _ := sandbox.Commands.Run(ctx, "echo hello; sleep 10; echo world", &e2b.CommandStartOpts{
+		Background: true,
+		OnStdout: func(data e2b.Stdout) {
+			_ = data
+		},
+		OnStderr: func(data e2b.Stderr) {
+			_ = data
+		},
+	})
+
+	handle := execution.(*e2b.CommandHandle)
+	state := handle.State()
+
+	_ = state.Stdout
+	_ = state.Stderr
+	_, _ = handle.Kill()
+}
+```
+
+Use background mode when you want output callbacks immediately but do not want to block until the command exits.

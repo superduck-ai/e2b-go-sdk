@@ -1,0 +1,310 @@
+---
+title: "Codex"
+description: "Run Codex in a secure E2B sandbox from Go."
+icon: "/images/icons/codex.svg"
+---
+
+# Codex
+
+Codex can run inside a regular E2B sandbox with full terminal, filesystem, and Git access.
+
+If your E2B account has the prebuilt `codex` template, you can create a sandbox from that template directly and invoke the Codex CLI with `sandbox.Commands.Run(...)`.
+
+## Run headless
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "codex", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"CODEX_API_KEY": os.Getenv("CODEX_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(
+		ctx,
+		`codex exec --full-auto --skip-git-repo-check "Create a hello world HTTP server in Go"`,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+## Work on a cloned repository
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := 600_000
+	depth := 1
+
+	sandbox, err := e2b.Create(ctx, "codex", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"CODEX_API_KEY": os.Getenv("CODEX_API_KEY"),
+		},
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Git.Clone(ctx, "https://github.com/your-org/your-repo.git", &e2b.GitCloneOpts{
+		Path:     "/home/user/repo",
+		Username: "x-access-token",
+		Password: os.Getenv("GITHUB_TOKEN"),
+		Depth:    &depth,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(
+		ctx,
+		`codex exec --full-auto --skip-git-repo-check -C /home/user/repo "Add error handling to all API endpoints"`,
+		&e2b.CommandStartOpts{
+			OnStdout: func(data e2b.Stdout) {
+				log.Print(data)
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	diffExecution, err := sandbox.Commands.Run(ctx, "cd /home/user/repo && git diff", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	diff := diffExecution.(*e2b.CommandResult)
+
+	log.Println(diff.Stdout)
+}
+```
+
+## Schema-validated output
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "codex", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"CODEX_API_KEY": os.Getenv("CODEX_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	schema := `{
+  "type": "object",
+  "properties": {
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": {"type": "string"},
+          "line": {"type": "number"},
+          "severity": {"type": "string"},
+          "description": {"type": "string"}
+        },
+        "required": ["file", "severity", "description"]
+      }
+    }
+  },
+  "required": ["issues"]
+}`
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/schema.json", schema, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(
+		ctx,
+		`codex exec --full-auto --skip-git-repo-check --output-schema /home/user/schema.json -C /home/user/repo "Review this codebase for security issues"`,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	var response map[string]any
+	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(response["issues"])
+}
+```
+
+## Streaming events
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"os"
+	"strings"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "codex", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"CODEX_API_KEY": os.Getenv("CODEX_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(
+		ctx,
+		`codex exec --full-auto --skip-git-repo-check --json -C /home/user/repo "Refactor the utils module into separate files"`,
+		&e2b.CommandStartOpts{
+			OnStdout: func(data e2b.Stdout) {
+				for _, line := range strings.Split(string(data), "\n") {
+					if strings.TrimSpace(line) == "" {
+						continue
+					}
+					var event map[string]any
+					_ = json.Unmarshal([]byte(line), &event)
+					log.Println(event["type"])
+				}
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Image input
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := 600_000
+
+	sandbox, err := e2b.Create(ctx, "codex", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"CODEX_API_KEY": os.Getenv("CODEX_API_KEY"),
+		},
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/mockup.png", []byte("image-bytes"), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(
+		ctx,
+		`codex exec --full-auto --skip-git-repo-check --image /home/user/mockup.png -C /home/user/repo "Implement this UI design as a React component"`,
+		&e2b.CommandStartOpts{
+			OnStdout: func(data e2b.Stdout) {
+				log.Print(data)
+			},
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Build a custom Codex template
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).FromTemplate("codex")
+
+	_, err := e2b.Build(context.Background(), template, "my-codex", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    2,
+			MemoryMB:    2048,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```

@@ -1,0 +1,35 @@
+---
+title: "OpenAI Agents SDK"
+description: "How this Go SDK relates to the OpenAI Agents SDK integration."
+icon: "/images/icons/openai-agents-sdk.svg"
+---
+
+# OpenAI Agents SDK
+
+The upstream E2B integration documented for the OpenAI Agents SDK is based on the Python Agents SDK extension, not the Go SDK in this repository.
+
+## Current Go status
+
+This Go SDK does not currently expose a native `SandboxAgent`, `RunConfig`, or `E2BSandboxClient` integration layer for the OpenAI Agents SDK.
+
+What it does provide is the lower-level sandbox orchestration you can use from Go:
+
+- create and connect sandboxes
+- read and write files
+- run commands
+- expose services on sandbox ports
+- manage lifecycle, network, and templates
+
+## Recommended architecture
+
+If your system is primarily written in Go, the usual split is:
+
+1. use this Go SDK to provision and manage E2B sandboxes
+2. let your agent runtime or another service talk to the sandbox through commands, files, or exposed HTTP endpoints
+3. collect results back in your Go service
+
+## When to use the official Agents SDK integration
+
+If you specifically need the native OpenAI Agents SDK sandbox extension described upstream, use the official integration in the SDK ecosystem where it is currently supported.
+
+For this Go SDK, treat sandboxes as the execution layer rather than as a first-class Agents SDK backend.

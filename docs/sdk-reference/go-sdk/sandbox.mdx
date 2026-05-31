@@ -1,0 +1,295 @@
+---
+sidebarTitle: "Sandbox"
+title: "Go SDK Sandbox"
+description: "Create, connect, inspect, and manage E2B sandboxes from Go."
+---
+
+# Sandbox
+
+`Sandbox` is the primary runtime handle in the Go SDK. A connected sandbox exposes four module clients:
+
+- `Files *Filesystem`
+- `Commands *Commands`
+- `Pty *Pty`
+- `Git *Git`
+
+Every networked call takes a `context.Context`. Most methods accept `nil` options when you want the default behavior.
+
+## Create a sandbox
+
+Use `Create(ctx, template, opts)` to start a sandbox and return a connected `*Sandbox`.
+
+- Pass `""` for `template` to use `opts.Template` or the default `base` template.
+- Use `SandboxOpts` to configure metadata, env vars, lifecycle, network, secure mode, volume mounts, MCP, and startup timeout.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	timeoutMs := 10 * 60 * 1000
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		TimeoutMs: &timeoutMs,
+		Metadata: map[string]string{
+			"service": "docs-example",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Printf("sandbox=%s domain=%s\n", sandbox.SandboxID, sandbox.SandboxDomain)
+}
+```
+
+## Connect to an existing sandbox
+
+Use `Connect(ctx, sandboxID, opts)` when you already know the sandbox ID. If the sandbox is paused, the control plane will resume it during connect.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(sandbox.SandboxID)
+}
+```
+
+If you already have a connected handle, `sandbox.Connect(ctx, opts)` reconnects the same instance in place.
+
+## Inspect and manage a sandbox
+
+Use instance methods when you already hold a `*Sandbox`.
+
+| Method | Purpose |
+| ------ | ------- |
+| `GetInfo(ctx, nil)` | fetch `SandboxInfo` for the current sandbox |
+| `IsRunning(ctx, nil)` | check whether the sandbox runtime is reachable |
+| `SetTimeout(ctx, timeoutMs, nil)` | extend or reduce the sandbox lifetime |
+| `Pause(ctx, nil)` | pause the sandbox; returns `false` when it was already paused |
+| `Kill(ctx, nil)` | terminate the sandbox; missing sandboxes are treated as already gone |
+| `GetMetrics(ctx, opts)` | read CPU, memory, and disk metrics |
+| `UpdateNetwork(ctx, network, nil)` | update egress and internet access rules |
+
+`SandboxInfo` includes the current `SandboxID`, `TemplateID`, `State`, `Metadata`, `StartedAt`, `EndAt`, and the resolved `Network`, `Lifecycle`, and `VolumeMounts` state.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	info, err := sandbox.GetInfo(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	running, err := sandbox.IsRunning(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	timeoutMs := int((30 * time.Minute) / time.Millisecond)
+	if err := sandbox.SetTimeout(ctx, timeoutMs, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	metrics, err := sandbox.GetMetrics(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("state=%s running=%v metrics=%d\n", info.State, running, len(metrics))
+}
+```
+
+## List sandboxes
+
+Use `List(opts)` for package-level listing. The paginator exposes `NextItems()` and `NextItemsContext(ctx, opts...)`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{Limit: 20})
+
+	items, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, item := range items {
+		log.Printf("%s %s\n", item.SandboxID, item.State)
+	}
+
+	_, _ = paginator.NextItemsContext(context.Background())
+}
+```
+
+`SandboxListOpts.Query` can be used to filter by metadata and state before fetching a page.
+
+## Create and reuse snapshots
+
+`CreateSnapshot` pauses the sandbox while the snapshot is created. The returned `SnapshotID` can be passed back to `Create(...)` to boot a new sandbox from that captured state.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	snapshot, err := sandbox.CreateSnapshot(ctx, &e2b.CreateSnapshotOpts{
+		Name: "docs-snapshot",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	restored, err := e2b.Create(ctx, snapshot.SnapshotID, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer restored.Kill(context.Background(), nil)
+
+	snapshots, err := sandbox.ListSnapshots(nil).NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = e2b.DeleteSnapshot(ctx, snapshot.SnapshotID, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("restored=%s snapshots=%d\n", restored.SandboxID, len(snapshots))
+}
+```
+
+For package-level snapshot listing, use `ListSnapshots(&SnapshotListOpts{...})`.
+
+## Expose services and move files
+
+`GetHost(port)` returns the public host for an HTTP or WebSocket service running inside the sandbox. The returned value is a host name, so prepend `https://` or `wss://` in your client.
+
+When public traffic is restricted, send `sandbox.TrafficAccessToken` in the `e2b-traffic-access-token` header.
+
+`UploadUrl(path, opts)` and `DownloadUrl(path, opts)` return direct file URLs. On secured sandboxes they include signatures when required.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	serviceURL := "https://" + sandbox.GetHost(3000)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if sandbox.TrafficAccessToken != "" {
+		req.Header.Set("e2b-traffic-access-token", sandbox.TrafficAccessToken)
+	}
+
+	downloadURL, err := sandbox.DownloadUrl("/tmp/result.json", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	uploadURL, err := sandbox.UploadUrl("/tmp/input.json", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(req.URL.String(), downloadURL, uploadURL)
+}
+```
+
+If you create a sandbox with `SandboxOpts.Mcp`, use `GetMcpUrl()` and `GetMcpToken()` to connect an MCP client.
+
+## Package-level helpers
+
+The root package also exposes sandbox helpers for working by ID instead of through a connected instance:
+
+| Function | Use case |
+| -------- | -------- |
+| `Create(ctx, template, opts)` | create a sandbox and return a connected handle |
+| `Connect(ctx, sandboxID, opts)` | reconnect to a running or paused sandbox |
+| `List(opts)` | paginate sandboxes |
+| `GetInfo(ctx, sandboxID, opts)` | fetch `SandboxInfo` without reconnecting |
+| `GetFullInfo(ctx, sandboxID, opts)` | fetch `SandboxFullInfo`, including connection fields |
+| `GetMetrics(ctx, sandboxID, opts)` | fetch metrics by sandbox ID |
+| `Pause(ctx, sandboxID, opts)` | pause by sandbox ID |
+| `SetTimeout(ctx, sandboxID, timeoutMs, opts)` | update the timeout by sandbox ID |
+| `UpdateNetwork(ctx, sandboxID, network, opts)` | update network rules by sandbox ID |
+| `Kill(ctx, sandboxID, opts)` | terminate a sandbox by sandbox ID |
+| `CreateSnapshot(ctx, sandboxID, opts)` | create a snapshot by sandbox ID |
+| `ListSnapshots(opts)` | paginate snapshots globally or by sandbox ID |
+| `DeleteSnapshot(ctx, snapshotID, opts)` | delete a snapshot |
+
+`BetaCreate` and `BetaPause` still exist for compatibility, but new code should use `Create` and `Pause`.

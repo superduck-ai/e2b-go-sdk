@@ -1,0 +1,83 @@
+---
+title: "Shutdown running sandboxes"
+description: "Kill specific sandboxes or bulk shutdown matching sandboxes from Go."
+---
+
+# Shutdown running sandboxes
+
+Use `e2b.Kill(...)` when you already know the sandbox ID, or combine `e2b.List(...)` with `e2b.Kill(...)` for bulk shutdown flows.
+
+## Kill one or more sandboxes by ID
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	ids := []string{"sbx_1", "sbx_2", "sbx_3"}
+	for _, sandboxID := range ids {
+		killed, err := e2b.Kill(ctx, sandboxID, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println(sandboxID, killed)
+	}
+}
+```
+
+## Kill all sandboxes that match a filter
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			Metadata: map[string]string{
+				"key": "value",
+			},
+			State: []e2b.SandboxState{
+				e2b.SandboxState("running"),
+				e2b.SandboxState("paused"),
+			},
+		},
+	})
+
+	for paginator.HasNext {
+		page, err := paginator.NextItems()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for _, sandbox := range page {
+			killed, err := e2b.Kill(ctx, sandbox.SandboxID, nil)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println(sandbox.SandboxID, killed)
+		}
+	}
+}
+```
+
+If you want to preserve the filesystem and resume later, use `Pause(...)` instead of `Kill(...)`.

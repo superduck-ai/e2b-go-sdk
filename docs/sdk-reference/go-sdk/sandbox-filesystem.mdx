@@ -1,0 +1,284 @@
+---
+sidebarTitle: "Filesystem"
+title: "Go SDK Sandbox Filesystem"
+description: "Read, write, inspect, and watch sandbox files through sandbox.Files."
+---
+
+# Filesystem
+
+`sandbox.Files` is the Go SDK client for the sandbox filesystem.
+
+It covers:
+
+- single-file reads through `Read(...)`
+- single and batch writes through `Write(...)` and `WriteFiles(...)`
+- path inspection and directory traversal
+- directory watches through `WatchDir(...)`
+
+## Core types
+
+| Type | Purpose |
+| ---- | ------- |
+| `Filesystem` | the client stored on `sandbox.Files` |
+| `WriteInfo` | result of a successful write |
+| `EntryInfo` | filesystem metadata returned by `GetInfo`, `List`, and `Rename` |
+| `WriteEntry` | one `{Path, Data}` item for `WriteFiles` |
+| `FilesystemRequestOpts` | shared request options like `RequestTimeoutMs`, `Signal`, and `User` |
+| `FilesystemReadOpts` | read-specific options: `Gzip` and `Format` |
+| `FilesystemWriteOpts` | write-specific options: `Gzip` and `UseOctetStream` |
+| `FilesystemListOpts` | list-specific options, including `Depth` |
+| `WatchOpts` | watch options such as `Recursive`, `TimeoutMs`, and `OnExit` |
+
+Relative paths are resolved from the selected sandbox user. By default that is `/home/user` on current templates.
+
+## Read files
+
+`Read(ctx, path, opts)` is the primary read API.
+
+- default return type: `string`
+- `Format: e2b.ReadFormatBytes`: returns `[]byte`
+- `Format: e2b.ReadFormatBlob`: returns `e2b.Blob`
+- `Format: e2b.ReadFormatStream`: returns `io.ReadCloser`
+
+Missing files return `*e2b.FileNotFoundError` and still satisfy the deprecated `*e2b.NotFoundError` compatibility path.
+
+```go
+package main
+
+import (
+	"context"
+	"io"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	textValue, err := sandbox.Files.Read(ctx, "/tmp/app.txt", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	text := textValue.(string)
+
+	bytesValue, err := sandbox.Files.Read(ctx, "/tmp/app.txt", &e2b.FilesystemReadOpts{
+		Format: e2b.ReadFormatBytes,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	data := bytesValue.([]byte)
+
+	streamValue, err := sandbox.Files.Read(ctx, "/tmp/app.txt", &e2b.FilesystemReadOpts{
+		Format: e2b.ReadFormatStream,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	stream := streamValue.(io.ReadCloser)
+	defer stream.Close()
+
+	_, _ = io.ReadAll(stream)
+	log.Println(text, len(data))
+}
+```
+
+Set `FilesystemReadOpts.Gzip = true` when you want gzip-compressed transfer for reads.
+
+## Write files
+
+`Write(ctx, path, data, opts)` accepts Go-native input shapes:
+
+- `string`
+- `[]byte`
+- `e2b.Blob`
+- `io.Reader`
+
+`WriteFiles(ctx, files, opts)` writes multiple `WriteEntry` values in one call. Parent directories are created automatically when needed.
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	blob := e2b.Blob([]byte("blob payload"))
+
+	_, err = sandbox.Files.Write(ctx, "/tmp/notes.txt", "hello from go", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Files.Write(ctx, "/tmp/data.bin", []byte("bytes payload"), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Files.Write(ctx, "/tmp/blob.txt", blob, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	infos, err := sandbox.Files.WriteFiles(ctx, []e2b.WriteEntry{
+		{Path: "/tmp/batch/one.txt", Data: "one"},
+		{Path: "/tmp/batch/two.bin", Data: bytes.NewReader([]byte("two"))},
+	}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(infos))
+}
+```
+
+`FilesystemWriteOpts.Gzip` compresses upload bodies. `UseOctetStream` explicitly switches uploads to `application/octet-stream` on envd versions that support it; the default remains multipart uploads.
+
+## Inspect and change paths
+
+Use these methods for metadata and path management:
+
+| Method | Behavior |
+| ------ | -------- |
+| `Exists(ctx, path, nil)` | returns `true` or `false` without raising a not-found error |
+| `GetInfo(ctx, path, nil)` | returns `EntryInfo` including mode, owner, permissions, and optional `SymlinkTarget` |
+| `List(ctx, path, opts)` | lists directory contents; default depth is `1` |
+| `MakeDir(ctx, path, nil)` | creates the directory tree and returns `false` if it already exists |
+| `Rename(ctx, oldPath, newPath, nil)` | moves a file or directory and returns the new `EntryInfo` |
+| `Remove(ctx, path, nil)` | removes a file or directory; missing paths are treated as already removed |
+
+`FilesystemListOpts.Depth` uses `*int`. Omitted depth defaults to `1`; explicit `0` is invalid.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	created, err := sandbox.Files.MakeDir(ctx, "/tmp/project/data", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	exists, err := sandbox.Files.Exists(ctx, "/tmp/project/data", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	depth := 2
+	entries, err := sandbox.Files.List(ctx, "/tmp/project", &e2b.FilesystemListOpts{
+		Depth: &depth,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	info, err := sandbox.Files.GetInfo(ctx, "/tmp/project", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	renamed, err := sandbox.Files.Rename(ctx, "/tmp/project/data", "/tmp/project/assets", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Files.Remove(ctx, "/tmp/project/assets", nil); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(created, exists, len(entries), info.Path, renamed.Path)
+}
+```
+
+## Watch directories
+
+`WatchDir(ctx, path, onEvent, opts)` streams filesystem events and returns a `*WatchHandle`.
+
+- call `handle.Stop()` to stop the watch
+- set `Recursive: true` to watch nested directories
+- set `TimeoutMs` to control the watch lifetime
+- use `OnExit` to observe stream termination
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	watchTimeoutMs := 30_000
+	handle, err := sandbox.Files.WatchDir(ctx, "/tmp/project", func(event e2b.FilesystemEvent) {
+		log.Printf("%s %s\n", event.Type, event.Name)
+	}, &e2b.WatchOpts{
+		Recursive: true,
+		TimeoutMs: &watchTimeoutMs,
+		OnExit: func(err error) {
+			if err != nil {
+				log.Printf("watch exited with error: %v", err)
+			}
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Stop()
+}
+```
+
+The event payload is:
+
+| Field | Meaning |
+| ----- | ------- |
+| `FilesystemEvent.Name` | relative or nested path reported by envd |
+| `FilesystemEvent.Type` | one of `FilesystemEventCreate`, `FilesystemEventWrite`, `FilesystemEventRename`, `FilesystemEventRemove`, or `FilesystemEventChmod` |
+
+## Methods summary
+
+| Method | Signature summary |
+| ------ | ----------------- |
+| `Read` | `Read(ctx, path, *FilesystemReadOpts) (any, error)` |
+| `Write` | `Write(ctx, path, data, *FilesystemWriteOpts) (*WriteInfo, error)` |
+| `WriteFiles` | `WriteFiles(ctx, []WriteEntry, *FilesystemWriteOpts) ([]WriteInfo, error)` |
+| `Exists` | `Exists(ctx, path, *FilesystemRequestOpts) (bool, error)` |
+| `GetInfo` | `GetInfo(ctx, path, *FilesystemRequestOpts) (*EntryInfo, error)` |
+| `List` | `List(ctx, path, *FilesystemListOpts) ([]EntryInfo, error)` |
+| `MakeDir` | `MakeDir(ctx, path, *FilesystemRequestOpts) (bool, error)` |
+| `Rename` | `Rename(ctx, oldPath, newPath, *FilesystemRequestOpts) (*EntryInfo, error)` |
+| `Remove` | `Remove(ctx, path, *FilesystemRequestOpts) error` |
+| `WatchDir` | `WatchDir(ctx, path, onEvent, *WatchOpts) (*WatchHandle, error)` |

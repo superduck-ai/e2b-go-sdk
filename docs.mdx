@@ -1,0 +1,52 @@
+---
+title: "E2B Documentation"
+sidebarTitle: Home
+icon: house
+description: "Build and run secure sandboxes from Go."
+---
+
+# E2B for Go
+
+E2B provides isolated Linux sandboxes for agents, developer tools, and backend workloads. This repository documents the Go SDK surface for creating sandboxes, running commands, managing files, and building reusable templates.
+
+Start a sandbox and run a command in a few lines:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `echo "Hello from E2B Sandbox!"`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Core building blocks
+
+- [Sandbox](/docs/sandbox) for creating, connecting to, and managing running environments
+- [Template quickstart](/docs/template/quickstart) for defining reusable runtime images
+- [SDK reference](/docs/sdk-reference/go-sdk/sandbox) for the exported Go API surface
+
+## Where to start
+
+- [Quickstart](/docs/quickstart) for first sandbox workflows
+- [Use cases](/docs/use-cases/coding-agents) for end-to-end patterns
+- [Commands](/docs/commands) and [Filesystem](/docs/filesystem) for the core runtime APIs

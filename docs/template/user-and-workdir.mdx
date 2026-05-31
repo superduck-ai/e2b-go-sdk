@@ -1,0 +1,143 @@
+---
+title: "User and Workdir"
+description: "Control the default sandbox user and working directory from Go templates."
+---
+
+# User and Workdir
+
+Current E2B templates default to the `user` account with `/home/user` as the working directory. This differs from plain Docker defaults, which usually start as `root` in `/`.
+
+## Go-specific behavior
+
+- `SetUser(...)` and `SetWorkdir(...)` are template builder steps on `*e2b.TemplateBase`
+- the last values you set become the default execution user and working directory for sandboxes created from that template
+- `RunCmd(..., &struct{ User string }{...})` changes only that build step; use `SetUser(...)` if you want to change the built sandbox default
+- after the sandbox exists, one-off runtime overrides use `sandbox.Commands.Run(ctx, cmd, &e2b.CommandStartOpts{User: ..., Cwd: ...})`
+
+## Default sandbox user and workdir
+
+Without any template customization, sandbox commands run as `user` in `/home/user`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	whoamiExec, _ := sandbox.Commands.Run(ctx, "whoami", nil)
+	pwdExec, _ := sandbox.Commands.Run(ctx, "pwd", nil)
+
+	whoami := whoamiExec.(*e2b.CommandResult)
+	pwd := pwdExec.(*e2b.CommandResult)
+
+	_ = whoami.Stdout
+	_ = pwd.Stdout
+}
+```
+
+## Custom user and workdir in a template
+
+Use `SetUser(...)` and `SetWorkdir(...)` to persist new defaults into the built template.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd("whoami").
+		RunCmd("pwd").
+		SetUser("guest").
+		SetWorkdir("/home/guest").
+		RunCmd("whoami").
+		RunCmd("pwd")
+
+	_, _ = e2b.Build(ctx, template, "custom-user-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+
+	sandbox, _ := e2b.Create(ctx, "custom-user-template", nil)
+
+	whoamiExec, _ := sandbox.Commands.Run(ctx, "whoami", nil)
+	pwdExec, _ := sandbox.Commands.Run(ctx, "pwd", nil)
+
+	whoami := whoamiExec.(*e2b.CommandResult)
+	pwd := pwdExec.(*e2b.CommandResult)
+
+	_ = whoami.Stdout
+	_ = pwd.Stdout
+}
+```
+
+If you only need elevated privileges during the build, keep that override on the individual step:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd("apt-get update", &struct{ User string }{User: "root"}).
+		RunCmd("apt-get install -y curl", &struct{ User string }{User: "root"}).
+		SetUser("user").
+		SetWorkdir("/home/user")
+
+	_ = template
+}
+```
+
+## Override user or workdir at runtime
+
+After a sandbox is running, you can still override user or working directory for a single command without changing the template defaults.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Connect(ctx, "sbx_123", nil)
+
+	asRootExec, _ := sandbox.Commands.Run(ctx, "whoami", &e2b.CommandStartOpts{
+		User: "root",
+	})
+	inTmpExec, _ := sandbox.Commands.Run(ctx, "pwd", &e2b.CommandStartOpts{
+		Cwd: "/tmp",
+	})
+
+	asRoot := asRootExec.(*e2b.CommandResult)
+	inTmp := inTmpExec.(*e2b.CommandResult)
+
+	_ = asRoot.Stdout
+	_ = inTmp.Stdout
+}
+```
+
+For the full template builder surface, see the [Go SDK Template reference](/docs/sdk-reference/go-sdk/template). For runtime command options, see the [Go SDK Sandbox Commands reference](/docs/sdk-reference/go-sdk/sandbox-commands).

@@ -1,0 +1,102 @@
+---
+title: "List sandboxes"
+description: "List sandboxes from Go with the paginator-based SDK surface."
+---
+
+# List sandboxes
+
+Use `e2b.List(...)` to iterate over sandboxes from Go.
+
+For the lower-level paginator details, see [List Sandboxes](/docs/sandbox/list).
+
+## Basic listing
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(nil)
+
+	page, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, sandbox := range page {
+		log.Println(sandbox.SandboxID, sandbox.State)
+	}
+}
+```
+
+## Filter by state or metadata
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			Metadata: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+			State: []e2b.SandboxState{
+				e2b.SandboxState("running"),
+				e2b.SandboxState("paused"),
+			},
+		},
+		Limit: 10,
+	})
+
+	page, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(page))
+}
+```
+
+## Encode the results as JSON
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(nil)
+
+	page, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	payload, err := json.MarshalIndent(page, "", "  ")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(string(payload))
+}
+```

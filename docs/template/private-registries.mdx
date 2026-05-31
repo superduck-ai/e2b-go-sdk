@@ -1,0 +1,127 @@
+---
+title: "Private Registries"
+description: "Use private container registries as the base image source in Go templates."
+---
+
+# Private Registries
+
+If your base image lives in a private registry, provide credentials directly on the relevant `From*Registry(...)` helper.
+
+## Go-specific behavior
+
+- general registry credentials use `&e2b.RegistryCredentials{Username, Password}`
+- AWS ECR uses `&e2b.AWSRegistryCredentials{AccessKeyID, SecretAccessKey, SessionToken, Region}`
+- GCP Artifact Registry uses `&e2b.GCPRegistryCredentials{ServiceAccountJSON: ...}`
+- `GCPRegistryCredentials.ServiceAccountJSON` accepts either a file path or an inline object
+- when `ServiceAccountJSON` is a file path, it is resolved relative to `TemplateOptions.FileContextPath`
+
+## General registry
+
+Use `FromImage(...)` with `RegistryCredentials`.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).FromImage("ubuntu:22.04", &e2b.RegistryCredentials{
+		Username: "user",
+		Password: "pass",
+	})
+
+	_ = template
+}
+```
+
+## GCP Artifact Registry
+
+Use `FromGCPRegistry(...)` with `GCPRegistryCredentials`.
+
+From a file path:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(&e2b.TemplateOptions{
+		FileContextPath: ".",
+	}).FromGCPRegistry("ubuntu:22.04", &e2b.GCPRegistryCredentials{
+		ServiceAccountJSON: "./service_account.json",
+	})
+
+	_ = template
+}
+```
+
+From an inline object:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).FromGCPRegistry("ubuntu:22.04", &e2b.GCPRegistryCredentials{
+		ServiceAccountJSON: map[string]string{
+			"project_id":     "123",
+			"private_key_id": "456",
+		},
+	})
+
+	_ = template
+}
+```
+
+## AWS ECR
+
+Use `FromAWSRegistry(...)` with AWS credentials.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).FromAWSRegistry("ubuntu:22.04", &e2b.AWSRegistryCredentials{
+		AccessKeyID:     "123",
+		SecretAccessKey: "456",
+		Region:          "us-west-1",
+	})
+
+	_ = template
+}
+```
+
+If you need temporary AWS credentials, set `SessionToken` as well.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).FromAWSRegistry("ubuntu:22.04", &e2b.AWSRegistryCredentials{
+		AccessKeyID:     "123",
+		SecretAccessKey: "456",
+		SessionToken:    "temporary-session-token",
+		Region:          "us-west-1",
+	})
+
+	_ = template
+}
+```
+
+For the surrounding base-image APIs, see [Base Image](/docs/template/base-image) and the [Go SDK Template reference](/docs/sdk-reference/go-sdk/template).

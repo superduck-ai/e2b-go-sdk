@@ -1,0 +1,21 @@
+---
+title: "E2B CLI"
+sidebarTitle: Installation
+description: "How CLI workflows map to the current Go SDK."
+---
+
+# E2B CLI
+
+The E2B CLI is a separate command-line tool. This Go SDK repository does not bundle or install that binary.
+
+If you are reading the CLI section while working in Go, the closest equivalents are:
+
+- `e2b sandbox create ...` -> `e2b.Create(...)`
+- `e2b sandbox connect ...` -> `e2b.Connect(...)`
+- `e2b sandbox exec ...` -> `sandbox.Commands.Run(...)`
+- `e2b sandbox list` -> `e2b.List(...)`
+- `e2b sandbox kill ...` -> `e2b.Kill(...)` or `sandbox.Kill(...)`
+
+Authentication is handled through environment variables or explicit `ConnectionOpts` instead of a browser-login flow embedded in the SDK.
+
+See the pages in this section for the Go equivalents of the common CLI tasks.

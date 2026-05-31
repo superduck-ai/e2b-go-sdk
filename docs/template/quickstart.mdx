@@ -1,0 +1,174 @@
+---
+title: "Quickstart"
+description: "Start building custom sandbox templates with the Go SDK."
+---
+
+# Quickstart
+
+E2B templates let you define custom sandboxes in Go. You can choose the base image, environment variables, copied files, build commands, and a [start command](/docs/template/start-ready-command) that is captured into the resulting snapshot.
+
+This gives you sandboxes that can start with your filesystem and long-running processes already prepared.
+
+There are two ways to get started:
+
+- use the E2B CLI
+- create the template manually with the Go SDK
+
+## CLI
+
+You can use the E2B CLI to initialize a new template project.
+
+1. Install the latest E2B CLI.
+2. Run `e2b template init`.
+3. Follow the prompts.
+4. Inspect the generated files and `README.md`.
+
+## Manual
+
+### Install the packages
+
+Inside your Go module:
+
+```bash
+go get github.com/superduck-ai/e2b-go-sdk
+go get github.com/joho/godotenv
+```
+
+Create a `.env` file:
+
+```bash
+E2B_API_KEY=e2b_***
+```
+
+### Create a template file
+
+Create `template.go`:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(nil).
+	FromBaseImage().
+	SetEnvs(map[string]string{
+		"HELLO": "Hello, World!",
+	}).
+	SetStartCmd("echo $HELLO", e2b.WaitForTimeout(5_000))
+```
+
+### Create a development build script
+
+Create `build_dev.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/joho/godotenv"
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_ = godotenv.Load()
+
+	_, err := e2b.Build(context.Background(), template, "template-tag-dev", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    1,
+			MemoryMB:    1024,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+### Create a production build script
+
+Create `build_prod.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/joho/godotenv"
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_ = godotenv.Load()
+
+	_, err := e2b.Build(context.Background(), template, "template-tag", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    1,
+			MemoryMB:    1024,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+### Build the template
+
+Build the development template:
+
+```bash
+go run build_dev.go template.go
+```
+
+Build the production template:
+
+```bash
+go run build_prod.go template.go
+```
+
+## Create a sandbox from the template
+
+Create `create_sandbox.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/joho/godotenv"
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_ = godotenv.Load()
+	ctx := context.Background()
+
+	devSandbox, err := e2b.Create(ctx, "template-tag-dev", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	prodSandbox, err := e2b.Create(ctx, "template-tag", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_ = devSandbox
+	_ = prodSandbox
+}
+```
+
+The template name is the identifier you use later with `Create(...)`.
+
+For more detail on builder methods, see [Defining Template](/docs/template/defining-template). For build status and logs, see [Build](/docs/template/build) and [Logging](/docs/template/logging).

@@ -1,0 +1,181 @@
+---
+title: "GitHub Actions CI/CD"
+description: "Run PR review, tests, and validation inside E2B sandboxes from Go."
+icon: "gears"
+---
+
+# GitHub Actions CI/CD
+
+E2B sandboxes are a good fit for CI jobs that need to clone repositories, run untrusted pull-request code, and report results back to GitHub without exposing your runner.
+
+## GitHub Actions workflow
+
+Store `E2B_API_KEY`, `GITHUB_TOKEN`, and any LLM provider key you use as repository secrets.
+
+```yaml
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run review
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: go run ./review.go
+```
+
+## Review script
+
+This example keeps the untrusted repository, test execution, and diff generation inside the sandbox. The `reviewDiff(...)` function is a placeholder for your LLM client.
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func reviewDiff(ctx context.Context, diff string) (string, error) {
+	return fmt.Sprintf("Review placeholder for diff with %d bytes", len(diff)), nil
+}
+
+func postPRComment(ctx context.Context, repo string, prNumber int, token string, body string) error {
+	payload, err := json.Marshal(map[string]string{
+		"body": body,
+	})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, prNumber),
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("github comment failed: %s", resp.Status)
+	}
+
+	return nil
+}
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := int((5 * time.Minute) / time.Millisecond)
+	depth := 1
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoURL := "https://github.com/" + os.Getenv("PR_REPO") + ".git"
+	repoPath := "/home/user/repo"
+
+	_, err = sandbox.Git.Clone(ctx, repoURL, &e2b.GitCloneOpts{
+		Path:     repoPath,
+		Branch:   os.Getenv("PR_BRANCH"),
+		Depth:    &depth,
+		Username: "x-access-token",
+		Password: os.Getenv("GITHUB_TOKEN"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	diffExecution, err := sandbox.Commands.Run(ctx, "cd /home/user/repo && git diff origin/"+os.Getenv("PR_BASE_BRANCH")+"...HEAD", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	diffResult := diffExecution.(*e2b.CommandResult)
+
+	review, err := reviewDiff(ctx, diffResult.Stdout)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(ctx, "cd /home/user/repo && go test ./...", &e2b.CommandStartOpts{
+		OnStdout: func(data e2b.Stdout) {
+			log.Print(data)
+		},
+		OnStderr: func(data e2b.Stderr) {
+			log.Print(data)
+		},
+	})
+	if err != nil {
+		var exitErr *e2b.CommandExitError
+		if errors.As(err, &exitErr) {
+			log.Fatalf("tests failed with exit code %d", exitErr.ExitCode)
+		}
+		log.Fatal(err)
+	}
+
+	prNumber, err := strconv.Atoi(os.Getenv("PR_NUMBER"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := postPRComment(ctx, os.Getenv("GITHUB_REPOSITORY"), prNumber, os.Getenv("GITHUB_TOKEN"), "## AI Code Review\n\n"+review); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Flow
+
+1. Create a sandbox for the pull request.
+2. Clone the PR branch with the GitHub token.
+3. Generate a diff and send it to your LLM.
+4. Run the test suite inside the sandbox.
+5. Post the review result back to GitHub.

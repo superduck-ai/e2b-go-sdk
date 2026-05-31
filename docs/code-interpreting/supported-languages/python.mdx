@@ -1,0 +1,39 @@
+---
+sidebarTitle: Python
+title: "Run Python code"
+description: "Run Python code in a sandbox from Go."
+---
+
+# Run Python code
+
+Use a Python-based template and execute Python through the normal process API.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(nil).FromPythonImage("3.12")
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `python3 -c 'print("Hello, world!")'`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```

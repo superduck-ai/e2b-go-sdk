@@ -1,0 +1,12 @@
+<svg width="240" height="300" viewBox="0 0 240 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  .oc-inner { fill: #B0B0B0; }
+  .oc-outer { fill: #131010; }
+  @media (prefers-color-scheme: dark) {
+    .oc-inner { fill: #4B4646; }
+    .oc-outer { fill: #F1ECEC; }
+  }
+</style>
+<path class="oc-inner" d="M180 240H60V120H180V240Z"/>
+<path class="oc-outer" fill-rule="evenodd" clip-rule="evenodd" d="M180 60H60V240H180V60ZM240 300H0V0H240V300Z"/>
+</svg>

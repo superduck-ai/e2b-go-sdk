@@ -1,0 +1,186 @@
+---
+title: "Template Names"
+description: "Choose stable template names in Go and check whether a name is already taken."
+---
+
+# Template Names
+
+Template names are the human-readable identifiers you use to build templates and create sandboxes from them.
+
+## Go-specific behavior
+
+- `Build(...)` and `BuildInBackground(...)` take the template name as a positional `name string`
+- `Create(ctx, name, nil)` uses the same name string to start a sandbox from a built template
+- `BuildOptions.BasicBuildOptions.Alias` is only a legacy fallback when `name == ""`
+- `BuildInfo.Name` and `BuildInfo.Alias` currently mirror the created template name
+- `Exists(...)` is the preferred availability check; `AliasExists(...)` is deprecated
+
+## Build a named template
+
+A name is assigned when you build the template. After that, you can use the same name with `Create(...)`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromPythonImage("3.12")
+
+	buildInfo, _ := e2b.Build(ctx, template, "my-python-env", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 2,
+			MemoryMB: 2048,
+		},
+	})
+	sandbox, _ := e2b.Create(ctx, "my-python-env", nil)
+
+	if buildInfo != nil {
+		_ = buildInfo.Name
+		_ = buildInfo.Alias
+		_ = buildInfo.TemplateID
+		_ = buildInfo.BuildID
+	}
+	_ = sandbox
+}
+```
+
+## Team-local naming
+
+Template names are scoped to your team.
+
+- your template named `my-app` is stored as `your-team-slug/my-app`
+- within your team, you can usually reference it simply as `my-app`
+- other teams can have their own `my-app` without conflict
+- public templates should generally be referenced using the namespaced form `team-slug/template-name`
+
+Existing public templates may still be reachable without the team slug, but new public references should prefer the fully namespaced form.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	teamLocal, _ := e2b.Create(ctx, "my-app", nil)
+	publicTemplate, _ := e2b.Create(ctx, "acme/my-app", nil)
+
+	_ = teamLocal
+	_ = publicTemplate
+}
+```
+
+## Common naming patterns
+
+### Development and production environments
+
+Use different names for different environments.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	dev, _ := e2b.Build(ctx, template, "myapp-dev", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 1,
+			MemoryMB: 1024,
+		},
+	})
+	prod, _ := e2b.Build(ctx, template, "myapp-prod", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 4,
+			MemoryMB: 4096,
+		},
+	})
+
+	_ = dev
+	_ = prod
+}
+```
+
+### Multiple template variants
+
+Create variants of the same template with names that reflect their intended size or behavior.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	small, _ := e2b.Build(ctx, template, "myapp-small", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 1,
+			MemoryMB: 512,
+		},
+	})
+	large, _ := e2b.Build(ctx, template, "myapp-large", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 8,
+			MemoryMB: 8192,
+		},
+	})
+
+	_ = small
+	_ = large
+}
+```
+
+When the template definition is otherwise the same, E2B can reuse shared build layers across these variants.
+
+## Check name availability
+
+Use `Exists(...)` to check whether a name is already taken in your team.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	exists, _ := e2b.Exists(ctx, "my-template", nil)
+	_ = exists
+}
+```
+
+## Best practices
+
+- use descriptive names that match the template's purpose
+- use [tags](/docs/template/tags) for versioning instead of embedding versions in the name
+- keep naming conventions consistent across your team
+- prefer the explicit `name` argument over the legacy `Alias` fallback
+
+For the full template build surface, see the [Go SDK Template reference](/docs/sdk-reference/go-sdk/template).

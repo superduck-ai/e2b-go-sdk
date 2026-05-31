@@ -1,0 +1,38 @@
+---
+title: "Filesystem"
+sidebarTitle: Overview
+description: "Work with the sandbox filesystem through sandbox.Files in the Go SDK."
+---
+
+# Filesystem
+
+Each sandbox has its own isolated filesystem.
+
+In the Go SDK, filesystem operations live on `sandbox.Files`.
+
+With it, you can:
+
+- [Read and write files](/docs/filesystem/read-write)
+- [Inspect file and directory metadata](/docs/filesystem/info)
+- [Watch directories for changes](/docs/filesystem/watch)
+- [Upload data](/docs/filesystem/upload)
+- [Download data](/docs/filesystem/download)
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	entries, _ := sandbox.Files.List(ctx, "/", nil)
+	_ = entries
+}
+```
+

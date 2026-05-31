@@ -1,0 +1,248 @@
+---
+title: "OpenClaw Telegram"
+description: "Connect OpenClaw to Telegram in an E2B sandbox from Go."
+icon: "paper-plane"
+---
+
+# OpenClaw Telegram
+
+OpenClaw can use Telegram as a chat channel. In E2B, run the OpenClaw gateway inside a sandbox, attach your bot token, and approve pairing requests from Go code.
+
+## Prerequisites
+
+- A Telegram bot token from `@BotFather`
+- An API key for the model provider you configure inside OpenClaw
+- Your E2B API key configured locally
+
+## Quick start
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	port := 18789
+	token := os.Getenv("OPENCLAW_APP_TOKEN")
+	if token == "" {
+		token = "my-openclaw-token"
+	}
+	timeoutMs := 3600_000
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY":    os.Getenv("OPENAI_API_KEY"),
+			"TELEGRAM_BOT_TOKEN": os.Getenv("TELEGRAM_BOT_TOKEN"),
+		},
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set agents.defaults.model.primary openai/gpt-5.2", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set plugins.entries.telegram.enabled true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	addChannelCmd := fmt.Sprintf(
+		"openclaw channels add --channel telegram --token %s",
+		os.Getenv("TELEGRAM_BOT_TOKEN"),
+	)
+	if _, err := sandbox.Commands.Run(ctx, addChannelCmd, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.allowInsecureAuth true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.dangerouslyDisableDeviceAuth true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	startCmd := fmt.Sprintf(
+		"openclaw gateway --allow-unconfigured --bind lan --auth token --token %s --port %d",
+		token,
+		port,
+	)
+	execution, err := sandbox.Commands.Run(ctx, startCmd, &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	gateway := execution.(*e2b.CommandHandle)
+	defer gateway.Kill()
+
+	probeCmd := fmt.Sprintf(`bash -lc 'ss -ltn | grep -q ":%d " && echo ready || echo waiting'`, port)
+	for i := 0; i < 45; i++ {
+		probeExecution, err := sandbox.Commands.Run(ctx, probeCmd, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		probe := probeExecution.(*e2b.CommandResult)
+		if strings.TrimSpace(probe.Stdout) == "ready" {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+}
+```
+
+For Telegram, you do not need to open the gateway URL in a browser. The gateway process acts as the long-running channel runtime.
+
+## Approve a pairing code
+
+After a Telegram user messages the bot, approve the pairing code that OpenClaw reports back.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	pairingCode := "XXXXXXXX"
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY":    os.Getenv("OPENAI_API_KEY"),
+			"TELEGRAM_BOT_TOKEN": os.Getenv("TELEGRAM_BOT_TOKEN"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	approveCmd := fmt.Sprintf(
+		"openclaw pairing approve --channel telegram %s",
+		pairingCode,
+	)
+	if _, err := sandbox.Commands.Run(ctx, approveCmd, nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Verify channel status
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY":    os.Getenv("OPENAI_API_KEY"),
+			"TELEGRAM_BOT_TOKEN": os.Getenv("TELEGRAM_BOT_TOKEN"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	channelsExecution, err := sandbox.Commands.Run(ctx, "openclaw channels list --json", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	statusExecution, err := sandbox.Commands.Run(ctx, "openclaw channels status --json --probe", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	pairingExecution, err := sandbox.Commands.Run(ctx, "openclaw pairing list --json --channel telegram", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var channels any
+	if err := json.Unmarshal([]byte(channelsExecution.(*e2b.CommandResult).Stdout), &channels); err != nil {
+		log.Fatal(err)
+	}
+	var status any
+	if err := json.Unmarshal([]byte(statusExecution.(*e2b.CommandResult).Stdout), &status); err != nil {
+		log.Fatal(err)
+	}
+	var pairing any
+	if err := json.Unmarshal([]byte(pairingExecution.(*e2b.CommandResult).Stdout), &pairing); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(channels, status, pairing)
+}
+```
+
+## Read channel logs
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY":    os.Getenv("OPENAI_API_KEY"),
+			"TELEGRAM_BOT_TOKEN": os.Getenv("TELEGRAM_BOT_TOKEN"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "openclaw channels logs --channel telegram --lines 200", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Related guides
+
+- [OpenClaw](/docs/agents/openclaw)
+- [OpenClaw gateway](/docs/agents/openclaw/openclaw-gateway)

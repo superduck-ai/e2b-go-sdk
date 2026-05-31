@@ -1,0 +1,117 @@
+---
+title: "Quickstart"
+description: "Start an MCP-enabled sandbox and retrieve the gateway URL and token from Go."
+---
+
+# MCP Quickstart
+
+The Go SDK gives you the pieces needed to connect an external MCP client:
+
+- create a sandbox with `SandboxOpts.Mcp`
+- read the gateway endpoint with `GetMcpUrl()`
+- read the token with `GetMcpToken()`
+
+The current Go repository does not ship an MCP client implementation, so this guide focuses on the E2B side of the connection.
+
+## From outside the sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"browserbase": map[string]any{
+				"apiKey":       "browserbase-api-key",
+				"geminiApiKey": "gemini-api-key",
+				"projectId":    "project-id",
+			},
+			"exa": map[string]any{
+				"apiKey": "exa-api-key",
+			},
+			"notion": map[string]any{
+				"internalIntegrationToken": "notion-api-key",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	mcpURL := sandbox.GetMcpUrl()
+	mcpToken, err := sandbox.GetMcpToken()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("mcp url:", mcpURL)
+	log.Println("mcp token:", mcpToken)
+}
+```
+
+Pass the token as a bearer token in the `Authorization` header of your MCP HTTP client.
+
+## From inside the sandbox
+
+Inside the sandbox, the gateway is available on:
+
+```text
+http://localhost:50005/mcp
+```
+
+You still need the same MCP token.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"exa": map[string]any{
+				"apiKey": "exa-api-key",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	mcpToken, err := sandbox.GetMcpToken()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "echo http://localhost:50005/mcp", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout, mcpToken)
+}
+```
+
+## Debugging
+
+If MCP is not enabled for the sandbox, `GetMcpToken()` will fail when the gateway token file is missing. That is usually a sign that you need to create the sandbox with `SandboxOpts.Mcp` or use an MCP-enabled template.
+

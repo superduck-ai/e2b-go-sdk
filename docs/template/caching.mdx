@@ -1,0 +1,158 @@
+---
+title: "Caching"
+description: "Understand layer caching and cache invalidation in Go template builds."
+---
+
+# Caching
+
+Template caching in E2B is conceptually similar to Docker layer caching. Each template builder step creates a new layer, and matching layers can be reused across builds instead of rebuilt from scratch.
+
+## Go-specific behavior
+
+- `template.SkipCache()` invalidates caching from the next template instruction onward
+- `BuildOptions.BasicBuildOptions.SkipCache` skips cache usage for the whole build request
+- `Copy(..., &struct{ ForceUpload bool }{ForceUpload: true})` forces the source files to be uploaded again instead of reusing the existing file-upload cache
+- if a copy source is already present and `ForceUpload` is `false`, the current Go SDK skips the upload and reuses the cached source archive
+- if you call `SkipCache()` before selecting the base image, the current Go serializer treats that as forcing the whole template
+
+## Layer caching
+
+Builder calls such as `Copy(...)`, `RunCmd(...)`, and `SetEnvs(...)` create ordered template layers. When the instruction and its inputs match a previously built layer, E2B can reuse it.
+
+This is especially useful for large templates with expensive install steps.
+
+## Invalidate cache from the next instruction
+
+Use `SkipCache()` when you want the next instruction and all following instructions to rebuild.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		SkipCache().
+		RunCmd(`echo "Hello, World!"`)
+
+	_ = template
+}
+```
+
+This pattern is the Go equivalent of partial cache invalidation.
+
+## Invalidate the whole build
+
+Use `BuildOptions.BasicBuildOptions.SkipCache` when you want the entire build request to bypass cached layers.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	_, _ = e2b.Build(ctx, template, "my-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			SkipCache: true,
+		},
+	})
+}
+```
+
+This is different from `template.SkipCache()`: it applies to the whole build request, not just the next template step.
+
+## File upload caching
+
+For `Copy(...)` steps, the Go SDK computes a content-based `filesHash` and checks whether those files were already uploaded for the build.
+
+If the files are already cached and `ForceUpload` is not set, the current SDK skips the upload and reuses the existing file archive.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		Copy("config.json", "/app/config.json", nil)
+
+	_ = template
+}
+```
+
+To invalidate both the affected template step and the file-upload reuse for that copy source, set `ForceUpload`.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		Copy("config.json", "/app/config.json", &struct{ ForceUpload bool }{
+			ForceUpload: true,
+		})
+
+	_ = template
+}
+```
+
+## Reuse the same template definition across variants
+
+Caching helps when you build several template variants from the same definition, such as different CPU or memory configurations.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd("go build ./...")
+
+	_, _ = e2b.Build(ctx, template, "my-template-2cpu-2gb", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 2,
+			MemoryMB: 2048,
+		},
+	})
+
+	_, _ = e2b.Build(ctx, template, "my-template-1cpu-4gb", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount: 1,
+			MemoryMB: 4096,
+		},
+	})
+}
+```
+
+## Optimize build times
+
+- keep frequently changing `Copy(...)` steps toward the end of the template
+- keep expensive install steps early when they rarely change
+- use `ForceUpload` only when you actually need to invalidate the copy-source upload cache
+- use `BuildOptions.SkipCache` sparingly, because it disables reuse for the whole build
+
+For the builder APIs behind these cache behaviors, see [Defining Template](/docs/template/defining-template) and the [Go SDK Template reference](/docs/sdk-reference/go-sdk/template).

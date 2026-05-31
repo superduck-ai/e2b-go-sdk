@@ -1,0 +1,196 @@
+---
+title: "Sandbox Snapshots"
+sidebarTitle: "Snapshots"
+description: "Create, list, restore, and delete sandbox snapshots in Go."
+---
+
+# Sandbox Snapshots
+
+Snapshots capture the current filesystem and memory state of a running sandbox.
+
+Use them when you want to:
+
+- checkpoint a sandbox
+- branch multiple sandboxes from the same runtime state
+- restore a known point-in-time environment later
+
+Snapshot creation briefly pauses the sandbox while the snapshot is taken, so reconnect long-lived streams if your application depends on them.
+
+## Create a snapshot
+
+Use `sandbox.CreateSnapshot(...)` when you already have a connected `*e2b.Sandbox`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	snapshot, err := sandbox.CreateSnapshot(ctx, &e2b.CreateSnapshotOpts{
+		Name: "docs-snapshot",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(snapshot.SnapshotID, snapshot.Names)
+}
+```
+
+You can also create a snapshot by sandbox ID:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	snapshot, err := e2b.CreateSnapshot(ctx, "sbx_123", &e2b.CreateSnapshotOpts{
+		Name: "docs-snapshot",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(snapshot.SnapshotID)
+}
+```
+
+## Create a sandbox from a snapshot
+
+Pass the `SnapshotID` to `e2b.Create(...)`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	snapshot, err := sandbox.CreateSnapshot(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	restored, err := e2b.Create(ctx, snapshot.SnapshotID, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer restored.Kill(context.Background(), nil)
+
+	log.Println(restored.SandboxID)
+}
+```
+
+## List snapshots
+
+Use the package-level paginator to list all snapshots, or `sandbox.ListSnapshots(nil)` to list snapshots for one sandbox.
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.ListSnapshots(&e2b.SnapshotListOpts{
+		Limit: 50,
+	})
+
+	var snapshots []e2b.SnapshotInfo
+	for paginator.HasNext {
+		items, err := paginator.NextItems()
+		if err != nil {
+			log.Fatal(err)
+		}
+		snapshots = append(snapshots, items...)
+	}
+
+	log.Println(len(snapshots))
+}
+```
+
+To filter by sandbox, set `SnapshotListOpts.SandboxID`:
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.ListSnapshots(&e2b.SnapshotListOpts{
+		SandboxID: "sbx_123",
+		Limit:     20,
+	})
+
+	snapshots, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(snapshots))
+}
+```
+
+## Delete a snapshot
+
+`e2b.DeleteSnapshot(...)` returns `true` when the snapshot was deleted and `false` when it was already gone.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	deleted, err := e2b.DeleteSnapshot(ctx, "snap_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(deleted)
+}
+```
+

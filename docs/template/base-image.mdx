@@ -1,0 +1,162 @@
+---
+title: "Base Image"
+description: "Choose a base image or existing template when building Go templates."
+---
+
+# Base Image
+
+Every Go template starts from either a Docker image or another E2B template.
+
+In the Go SDK, `e2b.Template(nil)` already starts from the default E2B base image, `e2bdev/base`.
+
+## Create a template
+
+`TemplateOptions` controls how local files are resolved while you build the template definition.
+
+- `FileContextPath` is the base directory for local file inputs such as `Copy(...)` and `FromDockerfile("Dockerfile")`
+- `FileIgnorePatterns` adds extra ignore patterns when local files are hashed or uploaded
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(&e2b.TemplateOptions{
+		FileContextPath:    ".",
+		FileIgnorePatterns: []string{".git", "node_modules"},
+	})
+
+	_ = template
+}
+```
+
+## Use a predefined base image
+
+The root package exposes convenience helpers for the common image families.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	defaultBase := e2b.Template(nil)
+	explicitBase := e2b.Template(nil).FromBaseImage()
+	ubuntu := e2b.Template(nil).FromUbuntuImage("22.04")
+	debian := e2b.Template(nil).FromDebianImage("stable-slim")
+	python := e2b.Template(nil).FromPythonImage("3.13")
+	node := e2b.Template(nil).FromNodeImage("lts")
+	bun := e2b.Template(nil).FromBunImage("1.3")
+
+	_, _, _, _, _, _, _ = defaultBase, explicitBase, ubuntu, debian, python, node, bun
+}
+```
+
+Default helper versions in the current Go SDK:
+
+- `Template(nil)` -> `e2bdev/base`
+- `FromBaseImage()` -> `e2bdev/base`
+- `FromDebianImage()` -> `debian:stable`
+- `FromUbuntuImage()` -> `ubuntu:latest`
+- `FromPythonImage()` -> `python:3`
+- `FromNodeImage()` -> `node:lts`
+- `FromBunImage()` -> `oven/bun:latest`
+
+## Use a custom image or existing template
+
+Use `FromImage(...)` for arbitrary Docker images, or `FromTemplate(...)` to build on top of an existing E2B template.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	fromImage := e2b.Template(nil).FromImage("custom-image:latest")
+
+	fromPrivate := e2b.Template(nil).FromImage("ghcr.io/acme/private:latest", &e2b.RegistryCredentials{
+		Username: "user",
+		Password: "token",
+	})
+
+	fromAWS := e2b.Template(nil).FromAWSRegistry(
+		"123456789.dkr.ecr.us-west-2.amazonaws.com/app:latest",
+		&e2b.AWSRegistryCredentials{
+			AccessKeyID:     "AKIA...",
+			SecretAccessKey: "...",
+			Region:          "us-west-2",
+		},
+	)
+
+	fromGCP := e2b.Template(&e2b.TemplateOptions{FileContextPath: "."}).FromGCPRegistry(
+		"gcr.io/myproject/app:latest",
+		&e2b.GCPRegistryCredentials{ServiceAccountJSON: "service-account.json"},
+	)
+
+	fromTemplate := e2b.Template(nil).FromTemplate("my-template")
+	fromNamespacedTemplate := e2b.Template(nil).FromTemplate("acme/other-template")
+
+	_, _, _, _, _, _ = fromImage, fromPrivate, fromAWS, fromGCP, fromTemplate, fromNamespacedTemplate
+}
+```
+
+For registry authentication details, see [Private Registries](/docs/template/private-registries).
+
+## Parse an existing Dockerfile
+
+`FromDockerfile(...)` accepts either:
+
+- raw Dockerfile content
+- a file path such as `"Dockerfile"`, resolved from `TemplateOptions.FileContextPath`
+
+If `FileContextPath` is omitted, relative Dockerfile paths are resolved from the caller directory.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	inline := e2b.Template(nil).FromDockerfile(`FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y curl
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+ENV PORT=3000
+USER appuser`)
+
+	fromPath := e2b.Template(&e2b.TemplateOptions{
+		FileContextPath: ".",
+	}).FromDockerfile("Dockerfile")
+
+	inline.SetStartCmd("npm start", e2b.WaitForTimeout(5_000))
+
+	_ = inline
+	_ = fromPath
+}
+```
+
+Current parser behavior in the Go SDK:
+
+- `FROM` selects the base image
+- `RUN` becomes `RunCmd(...)`
+- `COPY` and `ADD` become `Copy(...)`
+- `WORKDIR` becomes `SetWorkdir(...)`
+- `USER` becomes `SetUser(...)`
+- `ENV` and `ARG` become `SetEnvs(...)`
+- `CMD` and `ENTRYPOINT` become `SetStartCmd(...)` with `WaitForTimeout(20_000)` as the ready command
+- `EXPOSE` and `VOLUME` are ignored
+- multi-stage Dockerfiles are rejected
+
+If the Dockerfile does not set a final `USER` or `WORKDIR`, the current Go parser finishes with E2B defaults: `user` and `/home/user`. If the Dockerfile already sets them, those custom values are preserved.
+
+For the full template builder surface, see the [Go SDK Template reference](/docs/sdk-reference/go-sdk/template).

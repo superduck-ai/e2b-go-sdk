@@ -1,0 +1,88 @@
+---
+title: "Connect to sandbox"
+description: "Connect to a running sandbox and open an interactive terminal from Go."
+---
+
+# Connect to sandbox
+
+The closest Go SDK equivalent to `e2b sandbox connect <sandbox-id>` is:
+
+1. reconnect to the sandbox with `e2b.Connect(...)`
+2. create or reconnect to a PTY session for interactive terminal I/O
+
+## Connect to a running sandbox and start a PTY
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	ptyTimeoutMs := 0
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols:      120,
+		Rows:      36,
+		TimeoutMs: &ptyTimeoutMs,
+		OnData: func(data e2b.PtyOutput) {
+			log.Print(string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Pty.SendInput(ctx, terminal.Pid, []byte("pwd\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Disconnecting the PTY does not kill the sandbox.
+
+## Reconnect to an existing PTY session
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	terminal, err := sandbox.Pty.Connect(ctx, 1234, &e2b.PtyConnectOpts{
+		OnData: func(data e2b.PtyOutput) {
+			log.Print(string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer terminal.Disconnect()
+
+	if err := sandbox.Pty.SendInput(ctx, terminal.Pid, []byte("ls -la\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```

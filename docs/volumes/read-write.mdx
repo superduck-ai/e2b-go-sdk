@@ -1,0 +1,177 @@
+---
+title: "Read and Write Files"
+sidebarTitle: "Read and Write"
+description: "Read files and manage directory contents in an E2B volume from Go."
+---
+
+# Read and Write Files
+
+Volume file operations are instance methods on `*e2b.Volume`.
+
+## Read files
+
+`ReadFile(ctx, path, opts)` is the single-entry read API.
+
+By default it returns a `string`. You can switch formats through `VolumeReadOpts.Format`.
+
+```go
+package main
+
+import (
+	"context"
+	"io"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	textValue, _ := volume.ReadFile(ctx, "/path/to/file", nil)
+	fileContent := textValue.(string)
+
+	bytesValue, _ := volume.ReadFile(ctx, "/path/to/file", &e2b.VolumeReadOpts{
+		Format: e2b.ReadFileFormatBytes,
+	})
+	fileBytes := bytesValue.([]byte)
+
+	blobValue, _ := volume.ReadFile(ctx, "/path/to/file", &e2b.VolumeReadOpts{
+		Format: e2b.ReadFileFormatBlob,
+	})
+	fileBlob := blobValue.(e2b.Blob)
+
+	streamValue, _ := volume.ReadFile(ctx, "/path/to/file", &e2b.VolumeReadOpts{
+		Format: e2b.ReadFileFormatStream,
+	})
+	stream := streamValue.(io.ReadCloser)
+	defer stream.Close()
+
+	_ = fileContent
+	_ = fileBytes
+	_ = fileBlob
+}
+```
+
+Supported formats:
+
+- `e2b.ReadFileFormatText`
+- `e2b.ReadFileFormatBytes`
+- `e2b.ReadFileFormatBlob`
+- `e2b.ReadFileFormatStream`
+
+## Write files
+
+`WriteFile(ctx, path, data, opts)` accepts:
+
+- `string`
+- `[]byte`
+- `e2b.Blob`
+- `io.Reader`
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	_, _ = volume.WriteFile(ctx, "/path/to/file.txt", "file content", nil)
+	_, _ = volume.WriteFile(ctx, "/path/to/file.bin", []byte("file content"), nil)
+	_, _ = volume.WriteFile(ctx, "/path/to/blob.txt", e2b.Blob([]byte("blob content")), nil)
+	_, _ = volume.WriteFile(ctx, "/path/to/stream.txt", bytes.NewReader([]byte("file content")), nil)
+}
+```
+
+`VolumeWriteOptions` can also set `UID`, `GID`, `Mode`, and `Force`.
+
+## Create directories
+
+Use `MakeDir(ctx, path, opts)`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	_, _ = volume.MakeDir(ctx, "/path/to/dir", nil)
+
+	force := true
+	_, _ = volume.MakeDir(ctx, "/path/to/nested/dir", &e2b.VolumeWriteOptions{
+		Force: &force,
+	})
+}
+```
+
+## List directory contents
+
+Use `List(ctx, path, opts)` to fetch `[]e2b.VolumeEntryStat`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	depth := 2
+	entries, err := volume.List(ctx, "/path/to/dir", &e2b.VolumeListOpts{
+		Depth: &depth,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(entries)
+}
+```
+
+## Remove files or directories
+
+Use `Remove(ctx, path, opts)`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, _ := e2b.CreateVolume(ctx, "my-volume", nil)
+
+	if err := volume.Remove(ctx, "/path/to/file", nil); err != nil {
+		log.Fatal(err)
+	}
+	if err := volume.Remove(ctx, "/path/to/dir", nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+

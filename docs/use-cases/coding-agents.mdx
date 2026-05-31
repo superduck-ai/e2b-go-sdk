@@ -1,0 +1,137 @@
+---
+title: "Coding Agents"
+description: "Run coding agents inside secure E2B sandboxes from Go."
+icon: "robot"
+---
+
+# Coding Agents
+
+Coding agents work best when they have a full Linux environment with terminal, filesystem, and Git access, but they should not run directly on your laptop or CI runner.
+
+E2B sandboxes give each agent an isolated workspace where it can:
+
+- clone repositories
+- edit files
+- run tests
+- generate diffs or structured artifacts
+
+In Go, this usually means combining:
+
+- `e2b.Create(...)`
+- `sandbox.Git.Clone(...)`
+- `sandbox.Commands.Run(...)`
+- `sandbox.Files.Read(...)`
+
+## Run an agent in a sandbox
+
+Install the agent in a template first, then create sandboxes from that template tag.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := int((10 * time.Minute) / time.Millisecond)
+	depth := 1
+
+	sandbox, err := e2b.Create(ctx, "agent-template", &e2b.SandboxOpts{
+		TimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Git.Clone(ctx, "https://github.com/org/repo.git", &e2b.GitCloneOpts{
+		Path:  "/workspace",
+		Depth: &depth,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, `cd /workspace && agent-binary --task "fix the failing tests"`, &e2b.CommandStartOpts{
+		Background: true,
+		OnStdout: func(data e2b.Stdout) {
+			log.Print(data)
+		},
+		OnStderr: func(data e2b.Stderr) {
+			log.Print(data)
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	result, err := handle.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(result.ExitCode)
+}
+```
+
+Replace `agent-binary` with the CLI installed in your template, for example `codex`, `claude`, or another agent wrapper.
+
+## Pull the results back out
+
+After the agent finishes, you can inspect the Git state, collect a diff, or read a structured output file.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	status, err := sandbox.Git.Status(ctx, "/workspace", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	diffExecution, err := sandbox.Commands.Run(ctx, "cd /workspace && git diff --stat", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	diff := diffExecution.(*e2b.CommandResult)
+
+	artifactValue, err := sandbox.Files.Read(ctx, "/workspace/agent-output.json", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	artifact := artifactValue.(string)
+
+	log.Println(status.CurrentBranch, status.FileStatus)
+	log.Println(diff.Stdout)
+	log.Println(artifact)
+}
+```
+
+## Typical flow
+
+1. Build or choose a template with the agent binary and its dependencies.
+2. Create a sandbox for each task or thread.
+3. Let the agent work through `sandbox.Commands.Run(...)`.
+4. Collect diffs, logs, or files.
+5. Pause the sandbox for follow-up work or kill it when finished.

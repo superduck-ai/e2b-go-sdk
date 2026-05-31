@@ -1,0 +1,99 @@
+---
+title: "Sandbox Metadata"
+sidebarTitle: "Metadata"
+description: "Attach and query sandbox metadata from the Go SDK."
+---
+
+# Sandbox Metadata
+
+Metadata is a `map[string]string` attached to a sandbox at creation time.
+
+Common uses:
+
+- associate a sandbox with a user or session
+- mark environment or application ownership
+- find the same sandbox later with [List](/docs/sandbox/list) and [Connect](/docs/sandbox/connect)
+
+## Set metadata when creating a sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Metadata: map[string]string{
+			"userID": "123",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			Metadata: map[string]string{
+				"userID": "123",
+			},
+		},
+	})
+
+	items, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(items) == 0 {
+		return
+	}
+
+	log.Println(items[0].Metadata)
+}
+```
+
+## Filter sandboxes by metadata
+
+Metadata filters are exact matches on the key-value pairs you provide.
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			Metadata: map[string]string{
+				"userID": "123",
+				"env":    "dev",
+			},
+		},
+	})
+
+	sandboxes, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(sandboxes))
+}
+```
+

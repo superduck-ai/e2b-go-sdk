@@ -1,0 +1,76 @@
+---
+title: "Authentication in CLI"
+sidebarTitle: Authentication
+description: "Authenticate Go SDK requests with environment variables or explicit connection options."
+---
+
+# Authentication
+
+The browser-based `e2b auth login` flow belongs to the CLI, not this Go SDK.
+
+In Go, authenticate either by exporting environment variables before you run your program, or by passing `ConnectionOpts` explicitly.
+
+## Use environment variables
+
+Export the same values the CLI uses:
+
+```bash
+export E2B_API_KEY=your_api_key_here
+export E2B_ACCESS_TOKEN=your_access_token_here
+```
+
+Then the Go SDK picks them up automatically.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	sandbox, err := e2b.Create(context.Background(), "base", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Println(sandbox.SandboxID)
+}
+```
+
+## Pass credentials explicitly
+
+Use this when you do not want to rely on process-wide environment variables.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	sandbox, err := e2b.Create(context.Background(), "base", &e2b.SandboxOpts{
+		ConnectionOpts: e2b.ConnectionOpts{
+			ApiKey:      os.Getenv("E2B_API_KEY"),
+			AccessToken: os.Getenv("E2B_ACCESS_TOKEN"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Println(sandbox.SandboxID)
+}
+```
+
+For more detail on keys and tokens, see [API Key](/docs/api-key).

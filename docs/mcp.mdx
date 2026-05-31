@@ -1,0 +1,107 @@
+---
+title: "Overview"
+description: "Use the MCP gateway built into E2B sandboxes from the Go SDK."
+---
+
+# MCP Overview
+
+The Go SDK can start an MCP gateway inside a sandbox and expose it through:
+
+- `SandboxOpts.Mcp`
+- `sandbox.GetMcpUrl()`
+- `sandbox.GetMcpToken()`
+
+At template-build time, the Go SDK also supports pre-pulling MCP server images with:
+
+- `Template(nil).FromTemplate("mcp-gateway")`
+- `AddMcpServer(...)`
+
+The runtime MCP configuration is passed as a generic `map[string]any`, so the current Go SDK does not try to statically type every available server schema.
+
+## Start a sandbox with MCP servers
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"browserbase": map[string]any{
+				"apiKey":       "browserbase-api-key",
+				"geminiApiKey": "gemini-api-key",
+				"projectId":    "project-id",
+			},
+			"exa": map[string]any{
+				"apiKey": "exa-api-key",
+			},
+			"airtable": map[string]any{
+				"airtableApiKey": "airtable-api-key",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	mcpURL := sandbox.GetMcpUrl()
+	mcpToken, err := sandbox.GetMcpToken()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(mcpURL, mcpToken)
+}
+```
+
+## Connect an MCP-aware client
+
+`GetMcpUrl()` returns the public MCP HTTP endpoint and `GetMcpToken()` returns the bearer token expected by the gateway.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"exa": map[string]any{
+				"apiKey": "exa-api-key",
+			},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	mcpURL := sandbox.GetMcpUrl()
+	mcpToken, err := sandbox.GetMcpToken()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_ = mcpURL
+	_ = mcpToken
+}
+```
+
+For faster cold starts, see [Custom Templates](/docs/mcp/custom-templates). For end-to-end client examples, see [Quickstart](/docs/mcp/quickstart) and [Examples](/docs/mcp/examples).
+

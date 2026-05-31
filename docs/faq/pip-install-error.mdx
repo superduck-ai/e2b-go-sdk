@@ -1,0 +1,52 @@
+---
+title: "Why does pip install fail when building a template?"
+sidebarTitle: pip install fails during build
+---
+
+# Why does `pip install` fail when building a template?
+
+Large Python packages can fail during template builds for two common reasons:
+
+- `MemoryError` while pip tries to cache large wheels
+- `OSError: [Errno 28] No space left on device` because `/tmp` fills up
+
+This usually happens because the build environment uses a RAM-backed `/tmp`.
+
+## Solution 1: Redirect pip temp files to disk
+
+Set `TMPDIR` to a disk-backed path and disable pip caching.
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd("TMPDIR=/var/tmp pip install --no-cache-dir torch sentence-transformers")
+
+	_ = template
+}
+```
+
+## Solution 2: Install CPU-only PyTorch
+
+E2B sandboxes do not provide GPUs, so you can often avoid CUDA downloads entirely.
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu").
+		RunCmd(`echo "torch" > /tmp/constraints.txt && pip install --no-cache-dir -c /tmp/constraints.txt sentence-transformers`)
+
+	_ = template
+}
+```
+
+The constraints-file step prevents later installs from replacing the CPU-only torch build with a CUDA variant.

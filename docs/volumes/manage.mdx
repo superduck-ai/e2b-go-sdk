@@ -1,0 +1,143 @@
+---
+title: "Managing Volumes"
+description: "Create, connect, list, inspect, and destroy volumes from Go."
+---
+
+# Managing Volumes
+
+The Go SDK uses package-level helpers for the volume control plane:
+
+- `CreateVolume(ctx, name, opts)`
+- `ConnectVolume(ctx, volumeID, opts)`
+- `ListVolumes(ctx, opts)`
+- `GetVolumeInfo(ctx, volumeID, opts)`
+- `DestroyVolume(ctx, volumeID, opts)`
+
+## Create a volume
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	volume, err := e2b.CreateVolume(ctx, "my-volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(volume.VolumeID)
+	log.Println(volume.Name)
+}
+```
+
+The returned `*e2b.Volume` also includes a `Token` used by the content API.
+
+## Connect to an existing volume
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	volume, err := e2b.ConnectVolume(ctx, "vol-123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(volume.VolumeID)
+	log.Println(volume.Name)
+}
+```
+
+## List volumes
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	volumes, err := e2b.ListVolumes(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(volumes)
+}
+```
+
+## Get volume info
+
+`GetVolumeInfo(...)` returns `*e2b.VolumeAndToken`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	info, err := e2b.GetVolumeInfo(ctx, "vol-123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(info.VolumeID, info.Name, info.Token)
+}
+```
+
+## Destroy a volume
+
+`DestroyVolume(...)` returns `false` when the volume was already missing.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	destroyed, err := e2b.DestroyVolume(ctx, "vol-123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(destroyed)
+}
+```
+

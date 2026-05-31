@@ -1,0 +1,102 @@
+---
+title: "Analyze data with AI"
+sidebarTitle: Overview
+description: "Run LLM-generated analysis scripts in a sandbox from Go."
+---
+
+# Analyze data with AI
+
+The current Go SDK in this repository does not expose notebook-style `runCode(...)` or typed code-interpreter result objects.
+
+Instead, the Go workflow is:
+
+1. build or choose a template with the runtime and libraries you need
+2. upload the dataset and analysis script into the sandbox
+3. run the script with `sandbox.Commands.Run(...)`
+4. read structured outputs or generated files back through `sandbox.Files`
+
+For LLM tool-calling, see [Connect LLMs to E2B](/docs/quickstart/connect-llms).
+
+## Build a Python data-analysis template
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var template = e2b.Template(nil).
+	FromPythonImage("3.12").
+	RunCmd("pip install pandas matplotlib seaborn", &struct{ User string }{User: "root"})
+```
+
+## Upload the dataset, run the analysis, and read the artifacts
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "python-data", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/dataset.csv", "year,value\n2022,3.1\n2023,4.2\n", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	script := `import json
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_csv("/home/user/dataset.csv")
+
+summary = {
+    "rows": int(len(df)),
+    "average": float(df["value"].mean()),
+}
+
+with open("/home/user/result.json", "w", encoding="utf-8") as f:
+    json.dump(summary, f)
+
+plt.plot(df["year"], df["value"])
+plt.savefig("/home/user/chart.png")
+`
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/analyze.py", script, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "python3 /home/user/analyze.py", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+
+	resultJSON, err := sandbox.Files.Read(ctx, "/home/user/result.json", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	chartBytes, err := sandbox.Files.Read(ctx, "/home/user/chart.png", &e2b.FilesystemReadOpts{
+		Format: e2b.ReadFormatBytes,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(resultJSON.(string))
+	log.Println(len(chartBytes.([]byte)))
+}
+```

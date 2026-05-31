@@ -1,0 +1,77 @@
+---
+title: "Download Data from a Volume"
+sidebarTitle: "Download Data"
+description: "Read files from a volume and write them to the local filesystem from Go."
+---
+
+# Download Data from a Volume
+
+Download data with `volume.ReadFile(...)`.
+
+For local writes, use the returned value in the format you need and then write it with the standard library.
+
+## Download a file as bytes
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, err := e2b.CreateVolume(ctx, "my-volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	value, err := volume.ReadFile(ctx, "/path/in/volume", &e2b.VolumeReadOpts{
+		Format: e2b.ReadFileFormatBytes,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	content := value.([]byte)
+	if err := os.WriteFile("/local/path", content, 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Download a file as text
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	volume, err := e2b.CreateVolume(ctx, "my-volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	value, err := volume.ReadFile(ctx, "/path/in/volume", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	content := value.(string)
+	if err := os.WriteFile("/local/path.txt", []byte(content), 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
+```

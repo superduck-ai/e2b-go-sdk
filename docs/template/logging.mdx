@@ -1,0 +1,212 @@
+---
+title: "Logging"
+description: "How to observe template build logs from the Go SDK."
+---
+
+# Logging
+
+Template builds can emit structured logs through `Build(...)` and `BuildInBackground(...)`.
+
+In Go, logging is configured with `BuildOptions.BasicBuildOptions.OnBuildLogs`.
+
+## Go-specific behavior
+
+Compared with the JS/Python docs:
+
+- `OnBuildLogs` is part of `BasicBuildOptions`, which is embedded inside `BuildOptions`
+- `DefaultBuildLogger()` does not accept options
+- the current default logger always filters out debug messages
+- build callbacks receive `*e2b.LogEntry`
+- if `OnBuildLogs` is `nil`, the Go SDK stays silent and does not install a default logger for you
+- the root `e2b` package re-exports `LogEntryLevel`, but not named `LogLevel*` constants, so compare against typed string values such as `e2b.LogEntryLevel("warn")`
+
+## Default logger
+
+Use `DefaultBuildLogger()` when you want a simple logger that prints info, warn, and error lines.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	template := e2b.Template(nil).
+		FromPythonImage("3.12").
+		RunCmd(`echo "hello"`)
+
+	_, _ = e2b.Build(ctx, template, "my-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+}
+```
+
+Current default behavior:
+
+- debug entries are ignored
+- ANSI escape sequences are removed from messages
+- trailing newlines are trimmed
+- output is printed as `[level] message`
+
+If you need a configurable minimum log level, provide your own `BuildLogger`.
+
+## Custom logger
+
+You can fully control how build logs are handled by assigning your own `BuildLogger`.
+
+Simple logging:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	logger := e2b.BuildLogger(func(entry *e2b.LogEntry) {
+		log.Println(entry.String())
+	})
+
+	_, _ = e2b.Build(ctx, template, "my-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: logger,
+		},
+	})
+}
+```
+
+Custom formatting:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	logger := e2b.BuildLogger(func(entry *e2b.LogEntry) {
+		ts := entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+		fmt.Printf("[%s] %s: %s\n", ts, strings.ToUpper(string(entry.Level)), entry.Message)
+	})
+
+	_, _ = e2b.BuildInBackground(ctx, template, "my-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: logger,
+		},
+	})
+}
+```
+
+Filter warnings and errors:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	logger := e2b.BuildLogger(func(entry *e2b.LogEntry) {
+		switch entry.Level {
+		case e2b.LogEntryLevel("error"), e2b.LogEntryLevel("warn"):
+			log.Printf("important: %s\n", entry.String())
+		}
+	})
+
+	_, _ = e2b.Build(ctx, template, "my-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: logger,
+		},
+	})
+}
+```
+
+## Structured log entries
+
+The callback receives structured `*e2b.LogEntry` values.
+
+```go
+package main
+
+import (
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	entry := &e2b.LogEntry{
+		Timestamp: time.Now(),
+		Level:     e2b.LogEntryLevel("info"),
+		Message:   "Uploaded 'src'",
+	}
+
+	_ = entry.Timestamp
+	_ = entry.Level
+	_ = entry.Message
+	_ = entry.String()
+}
+```
+
+Current build flows can emit:
+
+- SDK lifecycle messages such as `Build started`, `Waiting for logs...`, and `Build finished`
+- upload progress messages such as `Uploaded 'src'`
+- control-plane build logs returned during status polling
+
+## LogEntryStart and LogEntryEnd
+
+The Go SDK exports `NewLogEntryStart(...)` and `NewLogEntryEnd(...)`, which create debug-level wrapper values for your own logging code:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	start := e2b.NewLogEntryStart("Build started")
+	end := e2b.NewLogEntryEnd("Build finished")
+
+	_ = start.Timestamp
+	_ = start.Level
+	_ = start.Message
+	_ = end.Timestamp
+	_ = end.Level
+	_ = end.Message
+}
+```
+
+Current Go template build callbacks do not emit these specialized wrapper types automatically. They emit ordinary `*e2b.LogEntry` values, including debug-level lifecycle messages when `OnBuildLogs` is set.
+
+For the exact exported types and helpers, see the [Go SDK Template Logger reference](/docs/sdk-reference/go-sdk/template-logger).

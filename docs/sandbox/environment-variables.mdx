@@ -1,0 +1,124 @@
+---
+title: "Environment Variables"
+description: "Set sandbox-wide and per-command environment variables with the Go SDK."
+---
+
+# Environment Variables
+
+The Go SDK exposes environment variables in two places:
+
+- sandbox-wide variables through `SandboxOpts.Envs`
+- per-command variables through `CommandStartOpts.Envs`
+
+The current Go SDK does not expose `runCode(...)`; use `sandbox.Commands.Run(...)` for process execution.
+
+## Runtime variables inside the sandbox
+
+Commands running in the sandbox can read runtime variables such as:
+
+- `E2B_SANDBOX`
+- `E2B_SANDBOX_ID`
+- `E2B_TEAM_ID`
+- `E2B_TEMPLATE_ID`
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "printenv E2B_SANDBOX_ID", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result := execution.(*e2b.CommandResult)
+	log.Println(result.Stdout)
+}
+```
+
+## Set sandbox-wide environment variables
+
+Pass `SandboxOpts.Envs` when creating the sandbox.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"MY_VAR": "my_value",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "printenv MY_VAR", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result := execution.(*e2b.CommandResult)
+	log.Println(result.Stdout)
+}
+```
+
+## Set environment variables for one command
+
+Use `CommandStartOpts.Envs` to scope variables to a single command.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "printenv MY_VAR", &e2b.CommandStartOpts{
+		Envs: map[string]string{
+			"MY_VAR": "123",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result := execution.(*e2b.CommandResult)
+	log.Println(result.Stdout)
+}
+```
+

@@ -1,0 +1,124 @@
+---
+title: "Execute commands in sandbox"
+description: "Run foreground or background commands in a sandbox with the Go SDK."
+---
+
+# Execute commands in sandbox
+
+Use `sandbox.Commands.Run(...)` for non-interactive command execution.
+
+## Run a foreground command
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "echo hello", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Stream data into stdin
+
+This is the closest Go SDK equivalent to piping data into `e2b sandbox exec`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	stdin := true
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "cat", &e2b.CommandStartOpts{
+		Background: true,
+		Stdin:      &stdin,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	defer handle.Kill()
+
+	if err := sandbox.Commands.SendStdin(ctx, handle.Pid, []byte("foo\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+	if err := sandbox.Commands.CloseStdin(ctx, handle.Pid, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	result, err := handle.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(result.Stdout)
+}
+```
+
+## Run in background, with cwd, user, and env vars
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "node app.js", &e2b.CommandStartOpts{
+		Background: true,
+		Cwd:        "/home/user",
+		User:       "root",
+		Envs: map[string]string{
+			"NODE_ENV": "production",
+			"DEBUG":    "true",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	log.Println(handle.Pid)
+}
+```

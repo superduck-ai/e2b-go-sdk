@@ -1,0 +1,147 @@
+---
+sidebarTitle: "ReadyCmd"
+title: "Go SDK Template ReadyCmd"
+description: "Use ReadyCmd helpers to control when a template-based sandbox is considered ready."
+---
+
+# ReadyCmd
+
+`ReadyCmd` is the Go SDK helper used by template start-up readiness checks.
+
+It is used with:
+
+- `(*e2b.TemplateBase).SetStartCmd(startCommand, readyCommand...)`
+- `(*e2b.TemplateBase).SetReadyCmd(readyCommand)`
+
+The root `e2b` package exports:
+
+- `type ReadyCmd`
+- `(*ReadyCmd).GetCmd() string`
+- `WaitForPort(...)`
+- `WaitForURL(...)`
+- `WaitForProcess(...)`
+- `WaitForFile(...)`
+- `WaitForTimeout(...)`
+
+## Go-specific behavior
+
+Unlike the JS/Python docs, the Go SDK does not expose a separate `NewReadyCmd(...)` helper. In Go you usually either:
+
+- use one of the `WaitFor*` helpers, or
+- construct `&e2b.ReadyCmd{Command: "..."}` directly
+
+`SetReadyCmd(...)` accepts either a raw `string` or `*e2b.ReadyCmd`.
+
+## Construct and inspect a ready command
+
+```go
+package main
+
+import (
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	cmd := &e2b.ReadyCmd{
+		Command: "curl -fsS http://127.0.0.1:8000/health",
+	}
+
+	fmt.Println(cmd.GetCmd())
+}
+```
+
+`GetCmd()` returns the shell command string that will be serialized into the template payload.
+
+## Helper functions
+
+The helper functions return `*e2b.ReadyCmd` values:
+
+| Helper | Current command shape |
+| ------ | --------------------- |
+| `WaitForPort(8000)` | `ss -tuln | grep :8000` |
+| `WaitForURL("http://localhost:3000/health")` | `curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health | grep -q "200"` |
+| `WaitForProcess("nginx")` | `pgrep nginx > /dev/null` |
+| `WaitForFile("/tmp/ready")` | `[ -f /tmp/ready ]` |
+| `WaitForTimeout(2500)` | `sleep 2` |
+
+```go
+package main
+
+import (
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	port := e2b.WaitForPort(8000)
+	url := e2b.WaitForURL("http://localhost:3000/health")
+	url201 := e2b.WaitForURL("http://localhost:3000/health", 201)
+	process := e2b.WaitForProcess("nginx")
+	file := e2b.WaitForFile("/tmp/ready")
+	timeout := e2b.WaitForTimeout(500)
+
+	fmt.Println(port.GetCmd())
+	fmt.Println(url.GetCmd())
+	fmt.Println(url201.GetCmd())
+	fmt.Println(process.GetCmd())
+	fmt.Println(file.GetCmd())
+	fmt.Println(timeout.GetCmd())
+}
+```
+
+Notes:
+
+- `WaitForURL(...)` defaults to HTTP status `200`
+- `WaitForTimeout(timeoutMs)` takes milliseconds
+- `WaitForTimeout(...)` floors to whole seconds and uses a minimum of one second, so `WaitForTimeout(500)` becomes `sleep 1`
+
+## Use ReadyCmd in a template
+
+`SetStartCmd(...)` stores both the start command and the optional ready command. `SetReadyCmd(...)` can later replace or set the ready command on its own.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	portReady := e2b.WaitForPort(8000)
+
+	template := e2b.Template(nil).
+		FromPythonImage("3.12").
+		SetStartCmd("python -m http.server 8000", portReady).
+		SetReadyCmd("curl -fsS http://127.0.0.1:8000/")
+
+	_ = template
+}
+```
+
+You can also use these helpers in specialized template flows:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	backgroundBuild := e2b.Template(nil).
+		FromUbuntuImage("22.04").
+		SetStartCmd(`echo "Hello"`, e2b.WaitForTimeout(10_000))
+
+	devcontainer := e2b.Template(nil).
+		FromTemplate("devcontainer").
+		BetaSetDevContainerStart("/workspace")
+
+	_ = backgroundBuild
+	_ = devcontainer
+}
+```
+
+`BetaSetDevContainerStart(...)` internally configures a file-based ready check with `WaitForFile("/devcontainer.up")`.

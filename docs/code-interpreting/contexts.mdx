@@ -1,0 +1,124 @@
+---
+title: "Code contexts"
+description: "How to model separate execution contexts with the Go SDK."
+---
+
+# Code contexts
+
+The current Go SDK does not expose `createCodeContext()` or a dedicated code-context API.
+
+In practice, the closest Go equivalents are:
+
+- separate sandboxes when you need isolated state
+- separate working directories or environment variables for process-level isolation inside one sandbox
+- separate PTY sessions for interactive long-lived work
+
+## Use separate sandboxes for isolated state
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	analysisSandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer analysisSandbox.Kill(context.Background(), nil)
+
+	reportSandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reportSandbox.Kill(context.Background(), nil)
+
+	analysisExec, _ := analysisSandbox.Commands.Run(ctx, `python3 -c "print('analysis context')"`, nil)
+	reportExec, _ := reportSandbox.Commands.Run(ctx, `python3 -c "print('report context')"`, nil)
+
+	log.Println(analysisExec.(*e2b.CommandResult).Stdout)
+	log.Println(reportExec.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Use different working directories or env vars inside one sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "python-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, _ = sandbox.Files.MakeDir(ctx, "/home/user/context-a", nil)
+	_, _ = sandbox.Files.MakeDir(ctx, "/home/user/context-b", nil)
+
+	contextA, _ := sandbox.Commands.Run(ctx, "pwd && printenv CONTEXT_NAME", &e2b.CommandStartOpts{
+		Cwd:  "/home/user/context-a",
+		Envs: map[string]string{"CONTEXT_NAME": "analysis"},
+	})
+	contextB, _ := sandbox.Commands.Run(ctx, "pwd && printenv CONTEXT_NAME", &e2b.CommandStartOpts{
+		Cwd:  "/home/user/context-b",
+		Envs: map[string]string{"CONTEXT_NAME": "report"},
+	})
+
+	log.Println(contextA.(*e2b.CommandResult).Stdout)
+	log.Println(contextB.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Use PTY sessions for interactive contexts
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	ptyTimeoutMs := 0
+
+	sandbox, err := e2b.Create(ctx, "base", nil)
+	if err != nil {
+		return
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	first, _ := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols:      100,
+		Rows:      30,
+		TimeoutMs: &ptyTimeoutMs,
+	})
+	second, _ := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols:      100,
+		Rows:      30,
+		TimeoutMs: &ptyTimeoutMs,
+	})
+
+	_, _ = first.Kill()
+	_, _ = second.Kill()
+}
+```

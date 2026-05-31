@@ -1,0 +1,154 @@
+---
+title: "Docker"
+description: "Build templates with Docker or Docker Compose installed."
+---
+
+# Docker
+
+Use this pattern when the sandbox itself needs to run Docker containers.
+
+## Docker template
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var dockerTemplate = e2b.Template(nil).
+	FromUbuntuImage("24.04").
+	RunCmd("curl -fsSL https://get.docker.com | sh", &struct{ User string }{User: "root"}).
+	RunCmd("usermod -aG docker user", &struct{ User string }{User: "root"}).
+	RunCmd("docker run --rm hello-world", &struct{ User string }{User: "root"})
+```
+
+## Build the Docker template
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	buildInfo, err := e2b.Build(context.Background(), dockerTemplate, "docker", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    2,
+			MemoryMB:    2048,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(buildInfo.TemplateID)
+}
+```
+
+## Run Docker inside the sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "docker", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `docker run --rm alpine echo "Hello from Alpine!"`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```
+
+## Docker Compose template
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var composeTemplate = e2b.Template(nil).
+	FromUbuntuImage("24.04").
+	RunCmd([]string{
+		"set -euxo pipefail",
+		"apt-get update",
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io",
+		"usermod -aG docker user",
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || true",
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2 || true",
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose || true",
+		"docker compose version || docker-compose --version",
+	}, &struct{ User string }{User: "root"})
+```
+
+## Run Docker Compose inside the sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "docker-compose", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/tmp/docker-compose-test/compose.yaml", `services:
+  hello:
+    image: busybox:1.36
+    command: ["sh", "-lc", "echo docker-compose-ok"]
+`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, `
+set -euxo pipefail
+cd /tmp/docker-compose-test
+
+if docker compose version >/dev/null 2>&1; then
+  docker compose up --abort-on-container-exit --remove-orphans
+  docker compose down --remove-orphans -v
+elif docker-compose --version >/dev/null 2>&1; then
+  docker-compose up --abort-on-container-exit --remove-orphans
+  docker-compose down --remove-orphans -v
+else
+  echo "No compose command available"
+  exit 127
+fi
+`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```

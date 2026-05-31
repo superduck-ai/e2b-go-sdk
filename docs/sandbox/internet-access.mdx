@@ -1,0 +1,233 @@
+---
+title: "Internet Access"
+description: "Control outbound networking and public service access in a Go sandbox."
+---
+
+# Internet Access
+
+The Go SDK exposes sandbox networking through:
+
+- `SandboxOpts.AllowInternetAccess`
+- `SandboxOpts.Network`
+- `sandbox.UpdateNetwork(...)`
+- `sandbox.GetHost(port)`
+- `sandbox.TrafficAccessToken`
+
+By default, new sandboxes allow outbound internet access.
+
+## Toggle internet access at creation time
+
+`AllowInternetAccess` is a `*bool`, so pass a local variable when you want to override the default.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	allowInternet := true
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		AllowInternetAccess: &allowInternet,
+	})
+	defer sandbox.Kill(context.Background(), nil)
+
+	allowInternet = false
+	isolatedSandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		AllowInternetAccess: &allowInternet,
+	})
+	defer isolatedSandbox.Kill(context.Background(), nil)
+}
+```
+
+## Use allow and deny lists
+
+For finer control, use `SandboxOpts.Network`.
+
+`AllowOut` and `DenyOut` accept CIDRs, IPs, and supported host rules. The `ALL_TRAFFIC` constant is available as a shortcut for `0.0.0.0/0`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Network: &e2b.SandboxNetworkOpts{
+			DenyOut:  []string{e2b.ALL_TRAFFIC},
+			AllowOut: []string{"1.1.1.1", "8.8.8.0/24"},
+		},
+	})
+	defer sandbox.Kill(context.Background(), nil)
+
+	restrictedSandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Network: &e2b.SandboxNetworkOpts{
+			DenyOut: []string{"8.8.8.8"},
+		},
+	})
+	defer restrictedSandbox.Kill(context.Background(), nil)
+}
+```
+
+## Selector callbacks and per-host transforms
+
+In Go, `AllowOut` and `DenyOut` can also be selector callbacks with `SandboxNetworkSelectorContext`.
+
+Use that when you want to derive allowed hosts from `Network.Rules`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Network: &e2b.SandboxNetworkOpts{
+			DenyOut: func(ctx e2b.SandboxNetworkSelectorContext) []string {
+				return []string{ctx.AllTraffic}
+			},
+			AllowOut: func(ctx e2b.SandboxNetworkSelectorContext) []string {
+				hosts := make([]string, 0, len(ctx.Rules))
+				for host := range ctx.Rules {
+					hosts = append(hosts, host)
+				}
+				return hosts
+			},
+			Rules: e2b.SandboxNetworkRules{
+				"api.example.com": []e2b.SandboxNetworkRule{
+					{
+						Transform: &e2b.SandboxNetworkTransform{
+							Headers: map[string]string{
+								"X-Trace": "on",
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	defer sandbox.Kill(context.Background(), nil)
+}
+```
+
+## Update network rules on a running sandbox
+
+Use `sandbox.UpdateNetwork(...)` to replace the current egress configuration without recreating the sandbox.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{
+		DenyOut: []string{"8.8.8.8"},
+	}, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{
+		DenyOut:  []string{e2b.ALL_TRAFFIC},
+		AllowOut: []string{"api.example.com"},
+	}, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	allowInternet := false
+	if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{
+		AllowInternetAccess: &allowInternet,
+	}, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.UpdateNetwork(ctx, e2b.SandboxNetworkUpdate{}, nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`UpdateNetwork(...)` replaces the current egress config rather than merging with it. The create-only fields `AllowPublicTraffic` and `MaskRequestHost` stay on `SandboxNetworkOpts`.
+
+## Public URLs for services inside the sandbox
+
+Use `sandbox.GetHost(port)` to expose an HTTP or WebSocket service running in the sandbox.
+
+When `AllowPublicTraffic` is `false`, include `sandbox.TrafficAccessToken` in the `e2b-traffic-access-token` header.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	allowPublicTraffic := false
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Network: &e2b.SandboxNetworkOpts{
+			AllowPublicTraffic: &allowPublicTraffic,
+			MaskRequestHost:    "custom-host.example.com:${PORT}",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "python3 -m http.server 3000", &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	defer handle.Kill()
+
+	url := "https://" + sandbox.GetHost(3000)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if sandbox.TrafficAccessToken != "" {
+		req.Header.Set("e2b-traffic-access-token", sandbox.TrafficAccessToken)
+	}
+
+	log.Println(req.URL.String())
+}
+```

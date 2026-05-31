@@ -1,0 +1,79 @@
+---
+title: "Watch Directory for Changes"
+sidebarTitle: Watch Directory for Changes
+description: "Watch sandbox directories for filesystem events in the Go SDK."
+---
+
+# Watch Directory for Changes
+
+Use `sandbox.Files.WatchDir(ctx, path, onEvent, opts)` to watch a directory and receive filesystem events through a callback.
+
+## Watch a directory
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	handle, _ := sandbox.Files.WatchDir(ctx, "/home/user", func(event e2b.FilesystemEvent) {
+		_ = event.Name
+		_ = event.Type
+	}, nil)
+	if handle != nil {
+		defer handle.Stop()
+	}
+
+	_, _ = sandbox.Files.Write(ctx, "/home/user/my-file", "hello", nil)
+}
+```
+
+## Recursive watching
+
+Enable recursive watching with `WatchOpts.Recursive`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	timeoutMs := 30_000
+	handle, _ := sandbox.Files.WatchDir(ctx, "/home/user", func(event e2b.FilesystemEvent) {
+		_ = event.Name
+		_ = event.Type
+	}, &e2b.WatchOpts{
+		Recursive: true,
+		TimeoutMs: &timeoutMs,
+		OnExit: func(err error) {
+			_ = err
+		},
+	})
+	if handle != nil {
+		defer handle.Stop()
+	}
+
+	_, _ = sandbox.Files.Write(ctx, "/home/user/my-folder/my-file", "hello", nil)
+
+	_ = e2b.FilesystemEventCreate
+	_ = e2b.FilesystemEventWrite
+	_ = e2b.FilesystemEventRename
+	_ = e2b.FilesystemEventRemove
+	_ = e2b.FilesystemEventChmod
+}
+```
+

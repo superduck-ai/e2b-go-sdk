@@ -1,0 +1,94 @@
+---
+title: "Sandbox Metrics"
+sidebarTitle: "Metrics"
+description: "Read CPU, memory, and disk metrics for a sandbox from Go."
+---
+
+# Sandbox Metrics
+
+Use `sandbox.GetMetrics(ctx, opts)` or `e2b.GetMetrics(ctx, sandboxID, opts)` to read resource metrics for a sandbox.
+
+Each metric point includes:
+
+- `Timestamp`
+- `CpuUsedPct`
+- `CpuCount`
+- `MemUsed`
+- `MemTotal`
+- `MemCache`
+- `DiskUsed`
+- `DiskTotal`
+
+A newly created sandbox can return an empty slice until the first metric point is available.
+
+## Get metrics from a connected sandbox
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	start := time.Now().Add(-10 * time.Minute)
+	end := time.Now()
+
+	metrics, err := sandbox.GetMetrics(ctx, &e2b.SandboxMetricsOpts{
+		Start: &start,
+		End:   &end,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(metrics) == 0 {
+		return
+	}
+
+	metric := metrics[0]
+	log.Println(metric.Timestamp, metric.CpuUsedPct, metric.MemUsed, metric.DiskUsed)
+}
+```
+
+## Get metrics by sandbox ID
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	start := time.Now().Add(-5 * time.Minute)
+	end := time.Now()
+
+	metrics, err := e2b.GetMetrics(ctx, "sbx_123", &e2b.SandboxMetricsOpts{
+		Start: &start,
+		End:   &end,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(metrics))
+}
+```
+

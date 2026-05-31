@@ -1,0 +1,91 @@
+---
+title: "Claude Code"
+description: "Build a template with Claude Code preinstalled."
+---
+
+# Claude Code
+
+This page shows how to build a template with the Claude Code CLI preinstalled.
+
+For day-to-day usage inside a sandbox, see [Agents: Claude Code](/docs/agents/claude-code).
+
+## Template definition
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var template = e2b.Template(nil).
+	FromNodeImage("24").
+	AptInstall([]string{"curl", "git", "ripgrep"}, nil).
+	RunCmd("npm install -g @anthropic-ai/claude-code@latest", &struct{ User string }{User: "root"})
+```
+
+## Build
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	buildInfo, err := e2b.Build(context.Background(), template, "claude-code", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    1,
+			MemoryMB:    1024,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(buildInfo.TemplateID)
+}
+```
+
+## Create a sandbox and run Claude Code
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	timeoutMs := 0
+
+	sandbox, err := e2b.Create(ctx, "claude-code", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(
+		ctx,
+		`claude --dangerously-skip-permissions -p "Create a hello world index.html"`,
+		&e2b.CommandStartOpts{TimeoutMs: &timeoutMs},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```

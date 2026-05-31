@@ -1,0 +1,17 @@
+---
+title: "Do paused sandboxes count toward the concurrency limit?"
+sidebarTitle: Paused sandboxes & concurrency
+---
+
+# Do paused sandboxes count toward the concurrency limit?
+
+No. Only running sandboxes count toward concurrency limits.
+
+Paused sandboxes:
+
+- do not count toward concurrency
+- are not billed while paused
+- can remain paused indefinitely
+- are removed only when you explicitly kill them
+
+For Go workflows, that usually means pausing sandboxes when you want to preserve state and calling `sandbox.Kill(ctx, nil)` or `e2b.Kill(ctx, sandboxID, nil)` only when you want to delete them.

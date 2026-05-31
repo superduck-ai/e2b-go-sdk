@@ -1,0 +1,45 @@
+---
+title: "OTel telemetry export"
+sidebarTitle: OTel telemetry export
+description: "Export E2B telemetry to an OTLP HTTP endpoint."
+---
+
+# OTel telemetry export
+
+E2B can export OpenTelemetry telemetry to an OTLP HTTP endpoint so you can forward sandbox metrics and logs into your existing observability stack.
+
+This guide is product-level documentation rather than a Go SDK API surface. There are no dedicated Go helpers to configure telemetry export from the SDK itself.
+
+## Exported telemetry
+
+Exported telemetry mirrors the metrics and logs visible in the E2B dashboard.
+
+- Metrics are emitted under the `e2b.*` namespace.
+- Logs include `service_name: e2b`.
+- Delivery uses OTLP over HTTP with protobuf payloads.
+
+Metrics include sandbox resource usage such as CPU and memory. Logs include lifecycle events and other sandbox activity that can be correlated with the rest of your infrastructure telemetry.
+
+## Setup
+
+When enabling telemetry export, provide E2B with:
+
+- the OTLP HTTP endpoint URL
+- any required authentication, such as static headers or bearer tokens
+
+For BYOC deployments, telemetry can be routed from the BYOC environment into your own collector or backend.
+
+## Delivery behavior
+
+Telemetry delivery is best effort. If the destination is unavailable or rejects payloads, some metrics or logs may be delayed or dropped.
+
+## Confirm telemetry delivery
+
+After export is enabled:
+
+1. Start one or more sandboxes.
+2. Wait a few minutes for telemetry to arrive.
+3. Confirm that metrics appear under `e2b.*`.
+4. Confirm that logs include `service_name: e2b`.
+
+If telemetry does not appear, verify the endpoint URL, credentials, and any network requirements such as private connectivity or allowlists.

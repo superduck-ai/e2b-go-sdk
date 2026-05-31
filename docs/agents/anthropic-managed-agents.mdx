@@ -1,0 +1,198 @@
+---
+title: "Anthropic Managed Agents"
+description: "Use E2B as the webhook router and worker runtime for Anthropic Managed Agents."
+icon: "/images/icons/claude-code.svg"
+---
+
+# Anthropic Managed Agents
+
+The Go SDK can provision and inspect the E2B side of a self-hosted Anthropic Managed Agents environment.
+
+This repository does not ship a native Anthropic Managed Agents Go client, so the Anthropic session lifecycle still belongs to Anthropic's control plane or client of your choice. The examples here focus on the E2B webhook router sandbox, configuration files, health checks, and worker sandbox inspection.
+
+## Start the webhook sandbox
+
+The public `E2B/claude-managed-agents-webhooks` template starts a router on port `8000`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	autoResume := true
+
+	sandbox, err := e2b.Create(ctx, "E2B/claude-managed-agents-webhooks", &e2b.SandboxOpts{
+		Lifecycle: &e2b.SandboxLifecycle{
+			OnTimeout:  "pause",
+			AutoResume: &autoResume,
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	writeConfig := func(path, value string) {
+		if _, err := sandbox.Files.Write(ctx, path, value+"\n", nil); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	writeConfig("/opt/anthropic-managed-agents-js/config/e2b-api-key", os.Getenv("E2B_API_KEY"))
+	writeConfig("/opt/anthropic-managed-agents-js/config/anthropic-api-key", os.Getenv("ANTHROPIC_API_KEY"))
+	writeConfig("/opt/anthropic-managed-agents-js/config/anthropic-environment-id", os.Getenv("ANTHROPIC_ENVIRONMENT_ID"))
+	writeConfig("/opt/anthropic-managed-agents-js/config/anthropic-environment-key", os.Getenv("ANTHROPIC_ENVIRONMENT_KEY"))
+
+	log.Printf("Webhook URL: https://%s/webhook\n", sandbox.GetHost(8000))
+}
+```
+
+At this point, `/health` can succeed before `/webhook` is ready. The webhook endpoint itself stays incomplete until you write the Anthropic webhook signing key into the same sandbox.
+
+## Write the webhook signing key
+
+After registering the webhook in Anthropic, connect back to the same router sandbox and write the signing key file.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	router, err := e2b.Connect(ctx, "sbx_router_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = router.Files.Write(
+		ctx,
+		"/opt/anthropic-managed-agents-js/config/anthropic-webhook-signing-key",
+		os.Getenv("ANTHROPIC_WEBHOOK_SIGNING_KEY")+"\n",
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Inspect router health and assignments
+
+Use the router sandbox to check `/health`, read the router logs, and inspect the session-to-sandbox assignment store.
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	router, err := e2b.Connect(ctx, "sbx_router_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+router.GetHost(8000)+"/health", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var health map[string]any
+	if err := json.Unmarshal(body, &health); err != nil {
+		log.Fatal(err)
+	}
+
+	logsExecution, err := router.Commands.Run(ctx, "tail -200 /opt/anthropic-managed-agents-js/webhook.log || true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	assignmentsExecution, err := router.Commands.Run(ctx, "cat /opt/anthropic-managed-agents-js/.managed-agent-sandbox-store.json || true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var assignments map[string]any
+	if err := json.Unmarshal([]byte(assignmentsExecution.(*e2b.CommandResult).Stdout), &assignments); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("health:", health)
+	log.Println("router logs:", logsExecution.(*e2b.CommandResult).Stdout)
+	log.Println("assignments:", assignments)
+}
+```
+
+## Inspect the assigned worker sandbox
+
+Once you know the worker sandbox ID from the assignment store, reconnect to it and inspect `worker.log`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	worker, err := e2b.Connect(ctx, "sbx_worker_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := worker.Commands.Run(ctx, "tail -200 /opt/anthropic-managed-agents-js/worker.log || true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+## Related guides
+
+- [Connect to a running sandbox](/docs/sandbox/connect)
+- [Sandbox persistence](/docs/sandbox/persistence)
+- [SSH access](/docs/sandbox/ssh-access)

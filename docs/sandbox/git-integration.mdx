@@ -1,0 +1,224 @@
+---
+title: "Git Integration"
+description: "Clone repositories, configure credentials, and manage branches from a Go sandbox."
+---
+
+# Git Integration
+
+Use `sandbox.Git` for common Git operations inside the sandbox.
+
+The Go SDK exposes:
+
+- authentication helpers
+- clone/push/pull with inline credentials
+- user configuration
+- status and branch inspection
+- branch management
+
+## Pass credentials inline
+
+For authenticated HTTP(S) remotes, pass `Username` and `Password` directly in `GitPushOpts`, `GitPullOpts`, or `GitCloneOpts`.
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoPath := "/home/user/repo"
+
+	_, _ = sandbox.Git.Push(ctx, repoPath, &e2b.GitPushOpts{
+		Username: os.Getenv("GIT_USERNAME"),
+		Password: os.Getenv("GIT_TOKEN"),
+	})
+
+	_, _ = sandbox.Git.Pull(ctx, repoPath, &e2b.GitPullOpts{
+		Username: os.Getenv("GIT_USERNAME"),
+		Password: os.Getenv("GIT_TOKEN"),
+	})
+}
+```
+
+When you pass a password or token, the current Go SDK requires a username too.
+
+## Authenticate once with the credential helper
+
+`DangerouslyAuthenticate(...)` stores credentials inside the sandbox so later HTTPS Git commands can reuse them.
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, _ = sandbox.Git.DangerouslyAuthenticate(ctx, &e2b.GitDangerouslyAuthenticateOpts{
+		Username: os.Getenv("GIT_USERNAME"),
+		Password: os.Getenv("GIT_TOKEN"),
+	})
+
+	_, _ = sandbox.Git.DangerouslyAuthenticate(ctx, &e2b.GitDangerouslyAuthenticateOpts{
+		Username: os.Getenv("GIT_USERNAME"),
+		Password: os.Getenv("GIT_TOKEN"),
+		Host:     "git.example.com",
+		Protocol: "https",
+	})
+
+	_, _ = sandbox.Git.Clone(ctx, "https://git.example.com/org/repo.git", &e2b.GitCloneOpts{
+		Path: "/home/user/repo",
+	})
+	_, _ = sandbox.Git.Push(ctx, "/home/user/repo", nil)
+}
+```
+
+This stores credentials on disk inside the sandbox, so only use it when that tradeoff is acceptable.
+
+## Clone a repository
+
+`GitCloneOpts.Depth` is a `*int` in Go.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoURL := "https://git.example.com/org/repo.git"
+	repoPath := "/home/user/repo"
+	depth := 1
+
+	_, _ = sandbox.Git.Clone(ctx, repoURL, &e2b.GitCloneOpts{
+		Path: repoPath,
+	})
+	_, _ = sandbox.Git.Clone(ctx, repoURL, &e2b.GitCloneOpts{
+		Path:   repoPath,
+		Branch: "main",
+	})
+	_, _ = sandbox.Git.Clone(ctx, repoURL, &e2b.GitCloneOpts{
+		Path:  repoPath,
+		Depth: &depth,
+	})
+	_, _ = sandbox.Git.Clone(ctx, repoURL, &e2b.GitCloneOpts{
+		Path:                        repoPath,
+		Username:                    "username",
+		Password:                    "token",
+		DangerouslyStoreCredentials: true,
+	})
+}
+```
+
+## Configure Git identity
+
+Use `ConfigureUser(...)` globally or per repository. For local config, set `GitConfigOpts.Scope` to `e2b.GitConfigScope("local")`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoPath := "/home/user/repo"
+
+	_, _ = sandbox.Git.ConfigureUser(ctx, "E2B Bot", "bot@example.com", nil)
+
+	_, _ = sandbox.Git.ConfigureUser(ctx, "E2B Bot", "bot@example.com", &e2b.GitConfigOpts{
+		Scope: e2b.GitConfigScope("local"),
+		Path:  repoPath,
+	})
+}
+```
+
+## Inspect status and branches
+
+`Status(...)` returns parsed Git status information and `Branches(...)` returns the current branch plus the branch list.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoPath := "/home/user/repo"
+
+	status, err := sandbox.Git.Status(ctx, repoPath, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	branches, err := sandbox.Git.Branches(ctx, repoPath, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(status.CurrentBranch, status.Ahead, status.Behind, status.FileStatus)
+	log.Println(branches.CurrentBranch, branches.Branches)
+}
+```
+
+## Create and manage branches
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+	defer sandbox.Kill(context.Background(), nil)
+
+	repoPath := "/home/user/repo"
+
+	_, _ = sandbox.Git.CreateBranch(ctx, repoPath, "feature/new-docs", nil)
+	_, _ = sandbox.Git.CheckoutBranch(ctx, repoPath, "main", nil)
+	_, _ = sandbox.Git.DeleteBranch(ctx, repoPath, "feature/old-docs", nil)
+	_, _ = sandbox.Git.DeleteBranch(ctx, repoPath, "feature/stale-docs", &e2b.GitDeleteBranchOpts{
+		Force: true,
+	})
+}
+```

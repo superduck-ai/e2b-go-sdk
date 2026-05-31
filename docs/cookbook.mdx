@@ -1,0 +1,28 @@
+---
+title: "Cookbook"
+description: "How the upstream E2B cookbook relates to this Go SDK repository."
+icon: "brackets-curly"
+---
+
+# Cookbook
+
+The upstream E2B cookbook lives in a separate repository and contains end-to-end examples across multiple languages, frameworks, and deployment setups.
+
+This Go SDK repository does not vendor those applications directly. Instead, it exposes the lower-level building blocks that those examples typically compose:
+
+- sandbox lifecycle with `e2b.Create(...)`, `e2b.Connect(...)`, and `sandbox.Pause(...)`
+- process execution with `sandbox.Commands.Run(...)` and `sandbox.Pty.Create(...)`
+- filesystem access with `sandbox.Files`
+- Git operations with `sandbox.Git`
+- template construction with `e2b.Template(...)`
+
+Use the cookbook when you want architecture references or multi-service example projects. Then translate the E2B-specific parts to the current Go SDK surface documented in this repo.
+
+Good starting points here are:
+
+- [Agents](/docs/agents/codex)
+- [Template examples](/docs/template/examples/nextjs)
+- [Coding agents](/docs/use-cases/coding-agents)
+- [MCP](/docs/mcp)
+
+If a cookbook example depends on a higher-level integration that does not exist in this Go SDK, document that gap explicitly in your application rather than copying the upstream API shape verbatim.

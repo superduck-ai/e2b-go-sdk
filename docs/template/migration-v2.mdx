@@ -1,0 +1,103 @@
+---
+title: "V2 Migration Guide"
+description: "Migrate legacy template definitions to the current Go SDK workflow."
+---
+
+# V2 Migration Guide
+
+There are three practical ways to migrate an existing legacy template definition to the current Go SDK workflow:
+
+- use the migration command
+- parse your existing Dockerfile with `FromDockerfile(...)`
+- keep building a Docker image yourself and reference it with `FromImage(...)`
+
+The default E2B template user is `user`, with `/home/user` as the working directory. This differs from plain Docker defaults, and the migration paths below account for that behavior.
+
+## Migration command
+
+The recommended path is the E2B CLI migration flow.
+
+1. Install the latest E2B CLI.
+2. Go to the folder that contains your legacy `e2b.toml` and `e2b.Dockerfile`.
+3. Run `e2b template migrate`.
+4. Follow the prompts.
+
+Current generated Go output is typically:
+
+- `template.go`
+- `build_dev.go`
+- `build_prod.go`
+
+## Use `FromDockerfile(...)`
+
+If you want to keep the Dockerfile as the source of truth, parse it into the Go template builder.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var dockerfileContent = `
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y curl
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=production
+ENTRYPOINT ["npm", "start"]
+`
+
+var template = e2b.Template(nil).FromDockerfile(dockerfileContent)
+```
+
+You can also parse a Dockerfile from disk:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(&e2b.TemplateOptions{
+	FileContextPath: ".",
+}).FromDockerfile("Dockerfile")
+```
+
+Current compatible instructions in the Go parser:
+
+- `FROM`
+- `RUN`
+- `COPY`
+- `ADD`
+- `WORKDIR`
+- `USER`
+- `ENV`
+- `ARG`
+- `CMD`
+- `ENTRYPOINT`
+
+Multi-stage Dockerfiles are not supported.
+
+After the template definition is in place, build it the same way as shown in [Quickstart](/docs/template/quickstart).
+
+## Use `FromImage(...)`
+
+If you already build and publish your own Docker image, use that image directly as the template base.
+
+Build the image for `linux/amd64`, push it to your registry, then reference the tag from Go:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(nil).FromImage("image-tag")
+```
+
+If the image is in a private registry, provide credentials as shown in [Private Registries](/docs/template/private-registries).
+
+For more detail on Dockerfile parsing and image-based templates, see [Base Image](/docs/template/base-image).

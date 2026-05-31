@@ -1,0 +1,45 @@
+---
+title: "How It Works"
+description: "Understand the template build process and snapshot model behind E2B sandboxes."
+---
+
+# How It Works
+
+When you build a sandbox template, E2B creates a container from the template definition, provisions it, runs the template steps, and then snapshots the resulting sandbox state.
+
+In broad terms:
+
+1. E2B starts from the selected base image or base template.
+2. Builder steps such as `Copy(...)`, `RunCmd(...)`, and `SetEnvs(...)` are applied.
+3. If you configured a start command, E2B runs it inside the build sandbox.
+4. E2B waits for readiness. Without a custom ready command, the default is effectively immediate unless the Dockerfile parser supplied `WaitForTimeout(20_000)` for `CMD` or `ENTRYPOINT`.
+5. E2B snapshots the sandbox so future `Create(...)` calls can boot from that captured state.
+
+That snapshot is what E2B refers to as a template.
+
+## Snapshot model
+
+A template snapshot captures the sandbox filesystem together with the running processes needed for the template state.
+
+This is what allows later sandboxes to start from an already-prepared environment rather than rebuilding the template each time.
+
+## Default user and workdir
+
+Templates default to the `user` account and `/home/user` working directory. For the Go SDK behavior and override patterns, see [User and Workdir](/docs/template/user-and-workdir).
+
+## Caching
+
+Template builds reuse matching layers and uploaded copy sources when possible. For the Go cache controls, see [Caching](/docs/template/caching).
+
+## Kernel
+
+E2B sandboxes run on an LTS 6.1 Linux kernel. The exact kernel version available inside a sandbox depends on when the template was built:
+
+| Template build date | Kernel version |
+| --- | --- |
+| On or after 2025-11-27 | 6.1.158 |
+| Before 2025-11-27 | 6.1.102 |
+
+Kernel versions are fixed at template build time. To use a newer kernel, rebuild the template.
+
+Kernel configuration files are published in the `e2b-dev/fc-kernels` repository.

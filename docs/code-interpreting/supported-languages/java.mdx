@@ -1,0 +1,50 @@
+---
+title: "Run Java code"
+sidebarTitle: Java
+description: "Run Java code in a sandbox from Go."
+---
+
+# Run Java code
+
+Build or choose a template with a JDK installed, then compile and run Java normally.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(nil).
+	FromUbuntuImage("24.04").
+	AptInstall([]string{"openjdk-21-jdk"}, &struct{ User string }{User: "root"})
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "java-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/Main.java", `public class Main {
+  public static void main(String[] args) {
+    System.out.println("Hello, world!");
+  }
+}`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "cd /home/user && javac Main.java && java Main", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```

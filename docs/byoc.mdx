@@ -1,0 +1,64 @@
+---
+title: "BYOC (Bring Your Own Cloud)"
+sidebarTitle: Bring Your Own Cloud
+description: "Run E2B sandboxes inside your own cloud environment."
+---
+
+# BYOC (Bring Your Own Cloud)
+
+BYOC lets you deploy E2B sandboxes into your own cloud infrastructure inside your VPC.
+
+Today this offering is available for AWS and Google Cloud environments. Azure is not documented here yet.
+
+## Architecture
+
+In a BYOC deployment:
+
+- sandbox templates, snapshots, and runtime logs stay inside your BYOC VPC
+- sandbox traffic and template build traffic flow directly between the client and your BYOC environment
+- anonymized system metrics are still sent to E2B Cloud for observability and cluster management
+
+Common terms:
+
+- `BYOC VPC`: your cloud network where E2B runs
+- `E2B Cloud`: the managed control plane
+- `OAuth provider`: your identity system used for access and control-plane integration
+
+## Cluster components
+
+A typical BYOC cluster includes:
+
+- an orchestrator layer that manages sandbox lifecycle
+- an edge controller that routes traffic and exposes cluster-management APIs
+- monitoring components for logs and anonymized metrics
+- storage for templates, snapshots, logs, and container images
+
+## Onboarding
+
+BYOC onboarding is handled with E2B directly.
+
+Expect to provide:
+
+- the target cloud account and region
+- the IAM role or equivalent permissions needed to provision resources
+- any quota increases required for the environment
+
+Provisioning is typically done with Terraform configuration and prepared machine images. Once the cluster is running, E2B can attach a team to that environment so you can use the SDK and CLI against it the same way you would use the hosted platform.
+
+## FAQ
+
+### How is the cluster monitored?
+
+The platform forwards anonymized infrastructure metrics such as CPU and memory usage to the E2B control plane for observability and alerting.
+
+### Can the cluster scale horizontally?
+
+Yes. Additional orchestrators and edge controllers can be added. The exact autoscaling behavior depends on the current cluster version and deployment plan.
+
+### Can sandbox traffic stay private?
+
+Yes. Load balancers can be configured for private access, and VPC peering can be used so sandbox traffic remains inside private networking boundaries.
+
+### How is control-plane traffic secured?
+
+Traffic between E2B Cloud and your BYOC environment is encrypted with TLS. Private connectivity options can also be used when the deployment requires them.

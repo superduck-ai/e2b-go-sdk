@@ -1,0 +1,188 @@
+---
+title: "Start & Ready Commands"
+description: "Control long-running processes and snapshot readiness when building Go templates."
+---
+
+# Start & Ready Commands
+
+In the Go SDK, template start and ready commands are configured on `*e2b.TemplateBase`:
+
+- `SetStartCmd(startCommand, readyCommand...)`
+- `SetReadyCmd(readyCommand)`
+
+These commands belong to the template build, not the normal sandbox runtime API.
+
+## Start command
+
+The start command is captured as part of the template build flow. It is intended for long-running processes that should already be present in the template snapshot, such as:
+
+- web servers
+- seeded databases
+- background daemons
+
+If you need a command to run each time you create or connect to a sandbox, use `sandbox.Commands.Run(...)` after the sandbox exists instead of `SetStartCmd(...)`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		return
+	}
+
+	_, _ = sandbox.Commands.Run(ctx, "printenv APP_ENV", nil)
+}
+```
+
+If the process needs environment variables during template build, set them on the template with `SetEnvs(...)`.
+
+## Ready command
+
+The ready command controls when the build can continue to snapshotting. In practice, use it to wait for a process, port, file, URL, or fixed delay before the template is finalized.
+
+In Go, the ready command can be:
+
+- a raw `string`
+- `*e2b.ReadyCmd` from one of the `WaitFor*` helpers
+
+## Use `SetStartCmd(...)`
+
+Use `SetStartCmd(...)` when you want to define both:
+
+- the long-running process started during template build
+- the condition that marks it ready
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromUbuntuImage("22.04").
+		SetEnvs(map[string]string{
+			"APP_ENV": "production",
+		}).
+		AptInstall([]string{"curl", "python3"}, nil).
+		SetStartCmd("python3 -m http.server 8000", e2b.WaitForPort(8000))
+
+	_ = template
+}
+```
+
+You can also supply a custom shell command instead of a helper:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromNodeImage().
+		SetStartCmd("npm start", "curl -fsS http://localhost:3000/health")
+
+	_ = template
+}
+```
+
+Common patterns:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil)
+
+	template.SetStartCmd("npx next --turbo", e2b.WaitForURL("http://localhost:3000"))
+	template.SetStartCmd("python -m http.server 8000", e2b.WaitForPort(8000))
+	template.SetStartCmd("/start_command.sh", e2b.WaitForPort(6080))
+}
+```
+
+## Use `SetReadyCmd(...)`
+
+Use `SetReadyCmd(...)` when you do not need to define a start command, but you still want to delay snapshotting until the system reaches a desired state.
+
+This is useful when earlier build steps already start a background process.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromUbuntuImage("22.04").
+		RunCmd("apt-get install -y nginx && service nginx start", &struct{ User string }{User: "root"}).
+		SetReadyCmd(e2b.WaitForPort(80))
+
+	_ = template
+}
+```
+
+More examples:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil)
+
+	template.SetReadyCmd(e2b.WaitForFile("/tmp/ready"))
+	template.SetReadyCmd(e2b.WaitForTimeout(10_000))
+	template.SetReadyCmd("curl -fsS http://localhost:8080/health")
+}
+```
+
+## Ready command helpers
+
+The helper functions can be used with both `SetStartCmd(...)` and `SetReadyCmd(...)`:
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_ = e2b.WaitForPort(3000)
+	_ = e2b.WaitForURL("http://localhost:3000/health")
+	_ = e2b.WaitForURL("http://localhost:3000/health", 200)
+	_ = e2b.WaitForProcess("node")
+	_ = e2b.WaitForFile("/tmp/ready")
+	_ = e2b.WaitForTimeout(10_000)
+}
+```
+
+Important Go details:
+
+- `WaitForURL(...)` defaults to status `200`
+- `WaitForTimeout(...)` accepts milliseconds
+- `WaitForTimeout(500)` becomes a one-second wait because the current Go SDK floors to whole seconds and enforces a minimum of one second
+
+For the exact helper surface, see the [Go SDK Template ReadyCmd reference](/docs/sdk-reference/go-sdk/template-readycmd).

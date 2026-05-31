@@ -1,0 +1,80 @@
+---
+title: "Run JavaScript and TypeScript code"
+sidebarTitle: "JavaScript and TypeScript"
+description: "Run Node.js, JavaScript, and TypeScript code in a sandbox from Go."
+---
+
+# Run JavaScript and TypeScript code
+
+Use a Node-based template for JavaScript and, if you need TypeScript execution helpers, install a tool such as `tsx` during template build.
+
+## JavaScript
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "node-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `node -e "console.log('Hello, world!')"`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```
+
+## TypeScript
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+var template = e2b.Template(nil).
+	FromNodeImage("24").
+	RunCmd("npm install -g tsx", &struct{ User string }{User: "root"})
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "ts-runtime", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/script.ts", `const message: string = "Hello, world!"
+console.log(message)
+`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "cd /home/user && npx tsx script.ts", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(execution.(*e2b.CommandResult).Stdout)
+}
+```

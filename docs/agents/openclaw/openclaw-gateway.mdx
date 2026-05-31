@@ -1,0 +1,308 @@
+---
+title: "OpenClaw Gateway"
+description: "Start the OpenClaw gateway in an E2B sandbox from Go."
+icon: "globe"
+---
+
+# OpenClaw Gateway
+
+This guide starts the OpenClaw gateway inside an E2B sandbox and exposes it through the public sandbox host returned by `sandbox.GetHost(...)`.
+
+## Quick start
+
+Create a long-lived sandbox, set a default model, start the gateway in the background, and print the public URL.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	port := 18789
+	token := os.Getenv("OPENCLAW_APP_TOKEN")
+	if token == "" {
+		token = "my-gateway-token"
+	}
+	timeoutMs := 3600_000
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY": os.Getenv("OPENAI_API_KEY"),
+		},
+		TimeoutMs: &timeoutMs,
+		Lifecycle: &e2b.SandboxLifecycle{
+			OnTimeout: "pause",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set agents.defaults.model.primary openai/gpt-5.2", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.allowInsecureAuth true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.dangerouslyDisableDeviceAuth true", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	startCmd := fmt.Sprintf(
+		"openclaw gateway --allow-unconfigured --bind lan --auth token --token %s --port %d",
+		token,
+		port,
+	)
+	execution, err := sandbox.Commands.Run(ctx, startCmd, &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	gateway := execution.(*e2b.CommandHandle)
+	defer gateway.Kill()
+
+	probeCmd := fmt.Sprintf(`bash -lc 'ss -ltn | grep -q ":%d " && echo ready || echo waiting'`, port)
+	for i := 0; i < 45; i++ {
+		probeExecution, err := sandbox.Commands.Run(ctx, probeCmd, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		probe := probeExecution.(*e2b.CommandResult)
+		if strings.TrimSpace(probe.Stdout) == "ready" {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	url := fmt.Sprintf("https://%s/?token=%s", sandbox.GetHost(port), token)
+	log.Println("Gateway:", url)
+}
+```
+
+Open the printed `Gateway` URL in your browser.
+
+## Approve a browser device in secure mode
+
+If you turn device approval back on, poll pending device requests and approve the browser after it opens the gateway URL.
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	port := 18789
+	token := os.Getenv("OPENCLAW_APP_TOKEN")
+	if token == "" {
+		token = "my-gateway-token"
+	}
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY": os.Getenv("OPENAI_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	for i := 0; i < 30; i++ {
+		listCmd := fmt.Sprintf(
+			"openclaw devices list --json --url ws://127.0.0.1:%d --token %s",
+			port,
+			token,
+		)
+		listExecution, err := sandbox.Commands.Run(ctx, listCmd, nil)
+		if err == nil {
+			list := listExecution.(*e2b.CommandResult)
+
+			var payload struct {
+				Pending []struct {
+					RequestID string `json:"requestId"`
+				} `json:"pending"`
+			}
+			if unmarshalErr := json.Unmarshal([]byte(list.Stdout), &payload); unmarshalErr == nil && len(payload.Pending) > 0 {
+				approveCmd := fmt.Sprintf(
+					"openclaw devices approve %s --token %s --url ws://127.0.0.1:%d",
+					payload.Pending[0].RequestID,
+					token,
+					port,
+				)
+				if _, approveErr := sandbox.Commands.Run(ctx, approveCmd, nil); approveErr != nil {
+					log.Fatal(approveErr)
+				}
+				log.Println("Device approved:", payload.Pending[0].RequestID)
+				return
+			}
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+```
+
+## Restart the gateway
+
+Use this when the gateway is already running and you want a clean restart after changing config or env vars.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	port := 18789
+	token := os.Getenv("OPENCLAW_APP_TOKEN")
+	if token == "" {
+		token = "my-gateway-token"
+	}
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY": os.Getenv("OPENAI_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	killCmd := `bash -lc 'for p in "[o]penclaw gateway" "[o]penclaw-gateway"; do for pid in $(pgrep -f "$p" || true); do kill "$pid" >/dev/null 2>&1 || true; done; done'`
+	if _, err := sandbox.Commands.Run(ctx, killCmd, nil); err != nil {
+		log.Fatal(err)
+	}
+	time.Sleep(time.Second)
+
+	startCmd := fmt.Sprintf(
+		"openclaw gateway --allow-unconfigured --bind lan --auth token --token %s --port %d",
+		token,
+		port,
+	)
+	execution, err := sandbox.Commands.Run(ctx, startCmd, &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	gateway := execution.(*e2b.CommandHandle)
+	defer gateway.Kill()
+
+	probeCmd := fmt.Sprintf(`bash -lc 'ss -ltn | grep -q ":%d " && echo ready || echo waiting'`, port)
+	for i := 0; i < 45; i++ {
+		probeExecution, err := sandbox.Commands.Run(ctx, probeCmd, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		probe := probeExecution.(*e2b.CommandResult)
+		if strings.TrimSpace(probe.Stdout) == "ready" {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+}
+```
+
+## Turn insecure flags back off
+
+After initial testing, re-enable secure device approval and start the gateway again.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	port := 18789
+	token := os.Getenv("OPENCLAW_APP_TOKEN")
+	if token == "" {
+		token = "my-gateway-token"
+	}
+
+	sandbox, err := e2b.Create(ctx, "openclaw", &e2b.SandboxOpts{
+		Envs: map[string]string{
+			"OPENAI_API_KEY": os.Getenv("OPENAI_API_KEY"),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.allowInsecureAuth false", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = sandbox.Commands.Run(ctx, "openclaw config set gateway.controlUi.dangerouslyDisableDeviceAuth false", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	killCmd := `bash -lc 'for p in "[o]penclaw gateway" "[o]penclaw-gateway"; do for pid in $(pgrep -f "$p" || true); do kill "$pid" >/dev/null 2>&1 || true; done; done'`
+	if _, err := sandbox.Commands.Run(ctx, killCmd, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	startCmd := fmt.Sprintf(
+		"openclaw gateway --allow-unconfigured --bind lan --auth token --token %s --port %d",
+		token,
+		port,
+	)
+	execution, err := sandbox.Commands.Run(ctx, startCmd, &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer execution.(*e2b.CommandHandle).Kill()
+}
+```
+
+## Related guides
+
+- [OpenClaw](/docs/agents/openclaw)
+- [OpenClaw Telegram](/docs/agents/openclaw/openclaw-telegram)
+- [Sandbox persistence](/docs/sandbox/persistence)

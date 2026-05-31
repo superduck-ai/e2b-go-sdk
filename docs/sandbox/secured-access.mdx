@@ -1,0 +1,149 @@
+---
+title: "Secured Access"
+sidebarTitle: "Secured Access"
+description: "Use secure sandboxes, traffic tokens, and signed file URLs in the Go SDK."
+---
+
+# Secured Access
+
+The current Go SDK creates sandboxes with secure access enabled by default.
+
+In practice that means:
+
+- SDK calls to the sandbox controller are authenticated automatically
+- older custom templates may need to be rebuilt to work with the current secure flow
+- direct HTTP traffic and file transfer helpers use exported Go SDK surfaces such as `GetHost`, `TrafficAccessToken`, `UploadUrl`, and `DownloadUrl`
+
+## Default secure behavior and compatibility mode
+
+`SandboxOpts.Secure` is optional. If you omit it, the current SDK defaults to secure sandboxes.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	secureSandbox, _ := e2b.Create(ctx, "", nil)
+	defer secureSandbox.Kill(context.Background(), nil)
+
+	secure := false
+	legacySandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Secure: &secure,
+	})
+	defer legacySandbox.Kill(context.Background(), nil)
+}
+```
+
+If an older custom template fails with secure access enabled, rebuild the template first. Setting `Secure` to `false` is only a temporary compatibility path.
+
+## Access a service with a traffic token
+
+When public traffic is restricted, use `sandbox.TrafficAccessToken` with requests sent to `https://` + `sandbox.GetHost(port)`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	secure := true
+	allowPublicTraffic := false
+
+	sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Secure: &secure,
+		Network: &e2b.SandboxNetworkOpts{
+			AllowPublicTraffic: &allowPublicTraffic,
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	url := "https://" + sandbox.GetHost(3000)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if sandbox.TrafficAccessToken != "" {
+		req.Header.Set("e2b-traffic-access-token", sandbox.TrafficAccessToken)
+	}
+
+	log.Println(req.URL.String())
+}
+```
+
+## Generate signed upload and download URLs
+
+Use `UploadUrl(...)` and `DownloadUrl(...)` for direct file transfers.
+
+`UseSignatureExpiration` is only valid on secured sandboxes.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	expirationSeconds := 60
+
+	downloadURL, err := sandbox.DownloadUrl("hello.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{
+		UseSignatureExpiration: &expirationSeconds,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	uploadURL, err := sandbox.UploadUrl("uploaded.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{
+		UseSignatureExpiration: &expirationSeconds,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rootDownloadURL, err := sandbox.DownloadUrl("root-only.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{
+		UseSignatureExpiration: &expirationSeconds,
+		User:                   "root",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(downloadURL, uploadURL, rootDownloadURL)
+}
+```

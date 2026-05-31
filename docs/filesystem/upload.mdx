@@ -1,0 +1,77 @@
+---
+title: "Upload Data to Sandbox"
+sidebarTitle: Upload Data
+description: "Upload file contents directly or through signed URLs in the Go SDK."
+---
+
+# Upload Data to Sandbox
+
+You can upload data to a sandbox either by writing file contents directly through `sandbox.Files.Write(...)` or by generating a signed upload URL on a secured sandbox.
+
+## Upload a single file
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	content, _ := os.ReadFile("/local/path")
+	_, _ = sandbox.Files.Write(ctx, "/path/in/sandbox", content, nil)
+}
+```
+
+## Upload with a pre-signed URL
+
+For browsers or other unauthorized environments, create a secured sandbox and then ask it for an upload URL.
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"mime/multipart"
+	"net/http"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	secure := true
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Secure: &secure,
+	})
+
+	expirationMs := 10_000
+	publicUploadURL, _ := sandbox.UploadUrl("demo.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{
+		UseSignatureExpiration: &expirationMs,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("file", "demo.txt")
+	_, _ = part.Write([]byte("file content"))
+	_ = writer.Close()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, publicUploadURL, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	_, _ = http.DefaultClient.Do(req)
+}
+```
+
+You can also set `User: "root"` when you want the signed upload to target the root filesystem instead of the default sandbox user.
+

@@ -1,0 +1,77 @@
+---
+title: "Run Your First Sandbox"
+description: "Start a sandbox, run a command, and inspect the filesystem from Go."
+---
+
+# Run Your First Sandbox
+
+This quickstart uses the current Go SDK runtime surface:
+
+- `e2b.Create(...)`
+- `sandbox.Commands.Run(...)`
+- `sandbox.Files.List(...)`
+
+The current Go SDK does not expose `runCode(...)`, so this guide uses the command and filesystem APIs directly.
+
+## 1. Set your API key
+
+Create a `.env` file:
+
+```bash
+E2B_API_KEY=e2b_***
+```
+
+## 2. Install the packages
+
+Inside your Go module:
+
+```bash
+go get github.com/superduck-ai/e2b-go-sdk
+go get github.com/joho/godotenv
+```
+
+## 3. Start a sandbox and use it
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/joho/godotenv"
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_ = godotenv.Load()
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, `python3 -c "print('hello world')"`, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	entries, err := sandbox.Files.List(ctx, "/", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(result.Stdout)
+	log.Println(entries)
+}
+```
+
+## 4. Run it
+
+```bash
+go run main.go
+```
+

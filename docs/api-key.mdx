@@ -1,0 +1,41 @@
+---
+title: "API key"
+icon: "key"
+description: "Authenticate the Go SDK with E2B."
+---
+
+# API key
+
+The recommended way to authenticate the Go SDK is to set `E2B_API_KEY` in the environment.
+
+```bash
+export E2B_API_KEY=e2b_***
+```
+
+If you do not want to rely on environment variables, you can pass the key directly through `ConnectionOpts`, which is embedded in `SandboxOpts`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_, _ = e2b.Create(context.Background(), "", &e2b.SandboxOpts{
+		ConnectionOpts: e2b.ConnectionOpts{
+			ApiKey: "YOUR_API_KEY",
+		},
+	})
+}
+```
+
+## Where to find your API key
+
+You can create or copy API keys from the E2B dashboard.
+
+## Access token
+
+`E2B_ACCESS_TOKEN` is mainly used for CLI authentication and is not required for normal Go SDK usage. In most Go applications, `E2B_API_KEY` is the credential you want.

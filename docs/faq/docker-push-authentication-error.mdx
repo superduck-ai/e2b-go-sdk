@@ -1,0 +1,18 @@
+---
+title: "Why does my template build fail with a Docker push authentication error?"
+sidebarTitle: Docker push authentication error
+---
+
+# Why does my template build fail with a Docker push authentication error?
+
+This issue happens in local Docker and CLI-based template build flows, not in the Go SDK runtime APIs themselves.
+
+When Docker pushes through E2B's local registry proxy, it may skip credentials unless that proxy is marked as an insecure registry.
+
+## Fix
+
+- On macOS or Windows with Docker Desktop, add `host.docker.internal:49984` to `insecure-registries`.
+- On Linux Docker daemons, add `localhost:49984` to `insecure-registries`.
+- Restart Docker after updating the configuration.
+
+Once Docker routes through the local proxy correctly, the proxy can handle the authentication on your behalf.

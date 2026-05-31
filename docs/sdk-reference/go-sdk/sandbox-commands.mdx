@@ -1,0 +1,335 @@
+---
+sidebarTitle: "Commands"
+title: "Go SDK Sandbox Commands"
+description: "Run commands, reconnect to processes, and work with PTYs through sandbox.Commands and sandbox.Pty."
+---
+
+# Commands
+
+This page covers three related Go SDK surfaces:
+
+- `sandbox.Commands` for non-interactive process execution
+- `sandbox.Pty` for interactive shell sessions
+- `CommandHandle` for background commands and PTYs
+
+## Commands overview
+
+`sandbox.Commands` exposes:
+
+| Method | Purpose |
+| ------ | ------- |
+| `Run(ctx, cmd, opts)` | start a command in foreground or background |
+| `List(ctx, opts)` | list running commands and PTY sessions |
+| `Connect(ctx, pid, opts)` | reconnect to a running command |
+| `SendStdin(ctx, pid, data, opts)` | write bytes to command stdin |
+| `CloseStdin(ctx, pid, opts)` | close stdin on newer envd versions |
+| `Kill(ctx, pid, opts)` | send `SIGKILL` to the process |
+
+The main Go-specific behavior is `Run(...)`:
+
+- when `opts == nil` or `opts.Background == false`, it returns `*e2b.CommandResult`
+- when `opts.Background == true`, it returns `*e2b.CommandHandle`
+
+That means callers typically do a type assertion after `Run(...)`.
+
+## Run commands
+
+`CommandStartOpts` covers `Background`, `Cwd`, `User`, `Envs`, `OnStdout`, `OnStderr`, `Stdin`, `TimeoutMs`, `RequestTimeoutMs`, and `Signal`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "echo hello", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result := execution.(*e2b.CommandResult)
+	log.Printf("exit=%d stdout=%q\n", result.ExitCode, result.Stdout)
+}
+```
+
+Background execution:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "sleep 30", &e2b.CommandStartOpts{
+		Background: true,
+		Stdin:      func() *bool { v := true; return &v }(),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	defer handle.Kill()
+
+	if err := sandbox.Commands.SendStdin(ctx, handle.Pid, []byte("hello\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+
+	state := handle.State()
+	log.Printf("pid=%d stdout=%q\n", handle.Pid, state.Stdout)
+}
+```
+
+Non-zero exits return `*e2b.CommandExitError` from `handle.Wait()` or from foreground `Run(...)`.
+
+## Reconnect, list, stdin, and kill
+
+Use `List(...)` to discover running processes and `Connect(...)` to reattach to one.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	processes, err := sandbox.Commands.List(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(processes) == 0 {
+		return
+	}
+
+	handle, err := sandbox.Commands.Connect(ctx, processes[0].Pid, &e2b.CommandConnectOpts{
+		OnStdout: func(data e2b.Stdout) {
+			log.Printf("stdout chunk: %q\n", data)
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Disconnect()
+
+	_ = sandbox.Commands.CloseStdin(ctx, handle.Pid, nil)
+	killed, err := sandbox.Commands.Kill(ctx, handle.Pid, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(killed)
+}
+```
+
+`ProcessInfo` includes:
+
+- `Pid`
+- `Tag`
+- `Cmd`
+- `Args`
+- `Envs`
+- `Cwd`
+
+## CommandHandle
+
+`CommandHandle` is returned by:
+
+- background `Commands.Run(...)`
+- `Commands.Connect(...)`
+- `Pty.Create(...)`
+- `Pty.Connect(...)`
+
+Available methods and fields:
+
+| Member | Purpose |
+| ------ | ------- |
+| `Pid` | process ID |
+| `Wait()` | wait for process completion and return `*CommandResult` |
+| `Kill()` | kill the process |
+| `Disconnect()` | stop streaming without killing the process |
+| `State()` | inspect accumulated stdout/stderr and the current exit snapshot |
+
+`State()` returns a snapshot value with readable fields like `Stdout`, `Stderr`, `ExitCode`, and `Error`. The concrete type name is not exported, but you can use the returned value directly.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	execution, err := sandbox.Commands.Run(ctx, "echo hi && sleep 1", &e2b.CommandStartOpts{
+		Background: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle := execution.(*e2b.CommandHandle)
+	state := handle.State()
+	log.Printf("stdout-so-far=%q exit=%v\n", state.Stdout, state.ExitCode)
+
+	result, err := handle.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("final stdout=%q\n", result.Stdout)
+}
+```
+
+## PTY sessions
+
+Use `sandbox.Pty` for interactive terminals. The PTY API is separate from `Commands`, but it reuses `CommandHandle`.
+
+| Method | Purpose |
+| ------ | ------- |
+| `Create(ctx, opts)` | create a new PTY session |
+| `Connect(ctx, pid, opts)` | reconnect to a PTY |
+| `SendInput(ctx, pid, data, opts)` | send raw PTY bytes |
+| `Resize(ctx, pid, size, opts)` | resize the PTY |
+| `Kill(ctx, pid, opts)` | kill the PTY process |
+
+`PtySize` is the Go size object used by `Resize(...)`:
+
+```go
+type PtySize struct {
+	Cols uint32
+	Rows uint32
+}
+```
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	handle, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+		Cwd:  "/tmp",
+		Envs: map[string]string{"FOO": "bar"},
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("pty chunk: %q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Kill()
+
+	if err := sandbox.Pty.Resize(ctx, handle.Pid, e2b.PtySize{Cols: 100, Rows: 30}, nil); err != nil {
+		log.Fatal(err)
+	}
+	if err := sandbox.Pty.SendInput(ctx, handle.Pid, []byte("echo $FOO\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`PtyCreateOpts` and `PtyConnectOpts` also support `TimeoutMs`, `RequestTimeoutMs`, and `Signal`.
+
+## Option shapes
+
+`CommandRequestOpts`
+
+- `RequestTimeoutMs *int`
+- `Signal context.Context`
+
+`CommandStartOpts`
+
+- embedded `CommandRequestOpts`
+- `Background bool`
+- `Cwd string`
+- `User string`
+- `Envs map[string]string`
+- `OnStdout func(e2b.Stdout)`
+- `OnStderr func(e2b.Stderr)`
+- `Stdin *bool`
+- `TimeoutMs *int`
+
+`CommandConnectOpts`
+
+- embedded `CommandRequestOpts`
+- `OnStdout func(e2b.Stdout)`
+- `OnStderr func(e2b.Stderr)`
+- `TimeoutMs *int`
+
+`PtyCreateOpts`
+
+- `Cols uint32`
+- `Rows uint32`
+- `OnData func(e2b.PtyOutput)`
+- `TimeoutMs *int`
+- `User string`
+- `Envs map[string]string`
+- `Cwd string`
+- `Signal context.Context`
+- `RequestTimeoutMs *int`
+
+`PtyConnectOpts`
+
+- `OnData func(e2b.PtyOutput)`
+- `TimeoutMs *int`
+- `Signal context.Context`
+- `RequestTimeoutMs *int`
+
+## Notes for JS/Python users
+
+- Go does not expose overloads, so `Run(...)` uses runtime return branching instead of typed overload signatures.
+- Command stdin and PTY input both use `[]byte`.
+- PTY output callbacks receive raw bytes as `e2b.PtyOutput`.
+- `CloseStdin(...)` exists in Go even though it is not surfaced in the current JS/Python SDK reference page.

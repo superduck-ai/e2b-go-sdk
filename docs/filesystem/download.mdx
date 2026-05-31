@@ -1,0 +1,73 @@
+---
+title: "Download Data from Sandbox"
+sidebarTitle: Download Data
+description: "Download file contents directly or through signed URLs in the Go SDK."
+---
+
+# Download Data from Sandbox
+
+You can download data from a sandbox either by reading the file directly through `sandbox.Files.Read(...)` or by generating a signed download URL on a secured sandbox.
+
+## Download a file directly
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	contentValue, _ := sandbox.Files.Read(ctx, "/path/in/sandbox", nil)
+	content := contentValue.(string)
+
+	_ = os.WriteFile("/local/path", []byte(content), 0o644)
+}
+```
+
+## Download with a pre-signed URL
+
+Create a secured sandbox, then ask it for a download URL that can be used from a browser or another external client.
+
+```go
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	secure := true
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Secure: &secure,
+	})
+
+	expirationMs := 10_000
+	publicURL, _ := sandbox.DownloadUrl("demo.txt", &struct {
+		UseSignatureExpiration *int
+		User                   string
+	}{
+		UseSignatureExpiration: &expirationMs,
+	})
+
+	res, _ := http.Get(publicURL)
+	if res != nil {
+		defer res.Body.Close()
+		_, _ = io.ReadAll(res.Body)
+	}
+}
+```
+
+You can also set `User: "root"` when you want the signed URL to read from the root filesystem.
+

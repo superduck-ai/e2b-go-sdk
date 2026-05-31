@@ -1,0 +1,229 @@
+---
+sidebarTitle: "Errors"
+title: "Go SDK Errors"
+description: "Typed errors exposed by the Go SDK and how to match them with errors.As."
+---
+
+# Errors
+
+The Go SDK exposes typed errors through the root `e2b` package. Unlike the JS/Python reference, the important contract in Go is the `error` chain, not class inheritance syntax.
+
+In practice:
+
+- methods return `error`
+- callers use `errors.As(...)` to match specific SDK error types
+- several types unwrap into broader parent types
+
+## Base sandbox errors
+
+These types are exported from the root package:
+
+| Type | Typical meaning |
+| ---- | --------------- |
+| `*e2b.SandboxError` | generic SDK/runtime failure |
+| `*e2b.TimeoutError` | request or runtime timeout |
+| `*e2b.InvalidArgumentError` | invalid input |
+| `*e2b.NotEnoughSpaceError` | disk space exhausted |
+| `*e2b.NotFoundError` | deprecated generic not-found type |
+| `*e2b.FileNotFoundError` | filesystem-style missing path |
+| `*e2b.SandboxNotFoundError` | missing sandbox |
+| `*e2b.GitUpstreamError` | git upstream tracking is missing |
+| `*e2b.TemplateError` | template/envd compatibility problem |
+| `*e2b.RateLimitError` | API rate limiting |
+
+`FileNotFoundError` and `SandboxNotFoundError` both unwrap to `NotFoundError`, which itself unwraps to `SandboxError`.
+
+That means one value can match several levels of abstraction.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	err := &e2b.FileNotFoundError{
+		NotFoundError: e2b.NotFoundError{
+			SandboxError: e2b.SandboxError{Message: "missing file"},
+		},
+	}
+
+	var fileErr *e2b.FileNotFoundError
+	var notFoundErr *e2b.NotFoundError
+	var sandboxErr *e2b.SandboxError
+
+	fmt.Println(errors.As(err, &fileErr))
+	fmt.Println(errors.As(err, &notFoundErr))
+	fmt.Println(errors.As(err, &sandboxErr))
+}
+```
+
+## Authentication and rate limiting
+
+The root package also exports control-plane and transport-related auth errors:
+
+| Type | Meaning |
+| ---- | ------- |
+| `*e2b.AuthenticationError` | auth failed or credentials are missing/invalid |
+| `*e2b.GitAuthError` | git credentials failed |
+| `*e2b.RateLimitError` | API rate limit exceeded |
+
+`GitAuthError` unwraps to `AuthenticationError`.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	err := &e2b.GitAuthError{
+		AuthenticationError: e2b.AuthenticationError{Message: "authentication failed"},
+	}
+
+	var gitAuthErr *e2b.GitAuthError
+	var authErr *e2b.AuthenticationError
+
+	fmt.Println(errors.As(err, &gitAuthErr))
+	fmt.Println(errors.As(err, &authErr))
+}
+```
+
+## Build and upload errors
+
+Template/build flows can return:
+
+| Type | Meaning |
+| ---- | ------- |
+| `*e2b.BuildError` | template build failed |
+| `*e2b.FileUploadError` | template file upload failed |
+
+`FileUploadError` unwraps to `BuildError`.
+
+`BuildError` also carries `CallerTrace`, which the Go SDK uses to preserve builder call-site attribution.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	err := &e2b.FileUploadError{
+		BuildError: e2b.BuildError{
+			Message:     "upload failed",
+			CallerTrace: "main.main\n\t/app/main.go:42",
+		},
+	}
+
+	var uploadErr *e2b.FileUploadError
+	var buildErr *e2b.BuildError
+
+	fmt.Println(errors.As(err, &uploadErr))
+	fmt.Println(errors.As(err, &buildErr))
+	fmt.Println(buildErr.CallerTrace)
+}
+```
+
+## Command execution errors
+
+Command failures are a separate family:
+
+- `*e2b.CommandExitError`
+- `*e2b.CommandResult`
+
+This is not part of the `SandboxError` hierarchy. It represents a successfully started command that exited non-zero.
+
+`CommandExitError` includes the full `CommandResult` payload:
+
+- `ExitCode`
+- `Error`
+- `Stdout`
+- `Stderr`
+
+Foreground `Commands.Run(...)` and `CommandHandle.Wait()` both return `*e2b.CommandExitError` for non-zero exits.
+
+```go
+package main
+
+import (
+	"errors"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func handle(err error) {
+	var exitErr *e2b.CommandExitError
+	if errors.As(err, &exitErr) {
+		log.Printf("exit=%d stderr=%q\n", exitErr.ExitCode, exitErr.Stderr)
+	}
+}
+```
+
+## Volume errors
+
+Volume APIs can return:
+
+| Type | Meaning |
+| ---- | ------- |
+| `*e2b.VolumeError` | generic volume control-plane/content failure |
+| `*e2b.NotFoundError` | missing volume or missing volume path |
+
+Unlike filesystem reads, current volume missing-path behavior is generally documented at the `NotFoundError` level rather than a dedicated `FileNotFoundError`.
+
+## Common matching patterns
+
+Missing file or directory:
+
+```go
+var fileErr *e2b.FileNotFoundError
+if errors.As(err, &fileErr) {
+	// file path is missing
+}
+```
+
+Missing sandbox:
+
+```go
+var sandboxErr *e2b.SandboxNotFoundError
+if errors.As(err, &sandboxErr) {
+	// sandbox ID is missing or no longer exists
+}
+```
+
+Timeout:
+
+```go
+var timeoutErr *e2b.TimeoutError
+if errors.As(err, &timeoutErr) {
+	// request or stream timed out
+}
+```
+
+Fallback to generic sandbox error:
+
+```go
+var sandboxErr *e2b.SandboxError
+if errors.As(err, &sandboxErr) {
+	// generic SDK error message is available in sandboxErr.Message
+}
+```
+
+## Notes
+
+- `NotFoundError` is still exported for compatibility, but new code should usually prefer `FileNotFoundError` or `SandboxNotFoundError` when the source API makes that distinction.
+- `CommandExitError` is intentionally separate from the sandbox error chain.
+- `BuildError` and `FileUploadError` may include `CallerTrace`, which is useful when a template builder call fails.

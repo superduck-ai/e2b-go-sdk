@@ -1,0 +1,148 @@
+---
+title: "Sandbox lifecycle webhooks"
+sidebarTitle: Lifecycle events webhooks
+description: "Register, inspect, update, and verify sandbox lifecycle webhooks from Go."
+---
+
+# Sandbox lifecycle webhooks
+
+The Go SDK does not currently wrap webhook-management endpoints. Use `net/http` against the control-plane API when you want to register or manage lifecycle webhooks.
+
+## Manage webhooks
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+)
+
+type webhookRequest struct {
+	Name            string   `json:"name,omitempty"`
+	URL             string   `json:"url,omitempty"`
+	Enabled         *bool    `json:"enabled,omitempty"`
+	Events          []string `json:"events,omitempty"`
+	SignatureSecret string   `json:"signatureSecret,omitempty"`
+}
+
+func doJSON(ctx context.Context, client *http.Client, apiKey, method, endpoint string, body any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status: %s", resp.Status)
+	}
+
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+
+	return nil
+}
+
+func main() {
+	ctx := context.Background()
+	client := &http.Client{}
+	apiKey := os.Getenv("E2B_API_KEY")
+	baseURL := "https://api.e2b.app/events/webhooks"
+	webhookID := "wh_123"
+
+	enabled := true
+	registerBody := webhookRequest{
+		Name:    "My Sandbox Webhook",
+		URL:     "https://your-webhook-endpoint.com/webhook",
+		Enabled: &enabled,
+		Events: []string{
+			"sandbox.lifecycle.created",
+			"sandbox.lifecycle.updated",
+			"sandbox.lifecycle.killed",
+		},
+		SignatureSecret: "secret-for-event-signature-verification",
+	}
+
+	var created map[string]any
+	if err := doJSON(ctx, client, apiKey, http.MethodPost, baseURL, registerBody, &created); err != nil {
+		log.Fatal(err)
+	}
+
+	var webhooks []map[string]any
+	if err := doJSON(ctx, client, apiKey, http.MethodGet, baseURL, nil, &webhooks); err != nil {
+		log.Fatal(err)
+	}
+
+	var current map[string]any
+	if err := doJSON(ctx, client, apiKey, http.MethodGet, baseURL+"/"+webhookID, nil, &current); err != nil {
+		log.Fatal(err)
+	}
+
+	disabled := false
+	updateBody := webhookRequest{
+		URL:     "https://your-updated-webhook-endpoint.com/webhook",
+		Enabled: &disabled,
+		Events:  []string{"sandbox.lifecycle.created"},
+	}
+	if err := doJSON(ctx, client, apiKey, http.MethodPatch, baseURL+"/"+webhookID, updateBody, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := doJSON(ctx, client, apiKey, http.MethodDelete, baseURL+"/"+webhookID, nil, nil); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(created["id"], len(webhooks), current["url"])
+}
+```
+
+## Verify webhook signatures
+
+Webhook deliveries include an `e2b-signature` header. To verify it, hash the raw request body as `secret + payload`, encode the digest with base64, and strip trailing `=` padding before comparing.
+
+```go
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"strings"
+)
+
+func verifyWebhookSignature(secret, payload, payloadSignature string) bool {
+	sum := sha256.Sum256([]byte(secret + payload))
+	expected := base64.StdEncoding.EncodeToString(sum[:])
+	expected = strings.TrimRight(expected, "=")
+
+	return expected == payloadSignature
+}
+
+func main() {
+	_ = verifyWebhookSignature("secret", `{"id":"evt_123"}`, "signature")
+}
+```

@@ -1,0 +1,99 @@
+---
+title: "Read and Write Files"
+sidebarTitle: Read and Write
+description: "Read files and write single or multiple files in a Go SDK sandbox."
+---
+
+# Read and Write Files
+
+## Read files
+
+Use `sandbox.Files.Read(ctx, path, opts)`.
+
+By default, it returns a `string`. You can switch formats through `FilesystemReadOpts.Format`.
+
+```go
+package main
+
+import (
+	"context"
+	"io"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	textValue, _ := sandbox.Files.Read(ctx, "/path/to/file", nil)
+	fileContent := textValue.(string)
+
+	bytesValue, _ := sandbox.Files.Read(ctx, "/path/to/file", &e2b.FilesystemReadOpts{
+		Format: e2b.ReadFormatBytes,
+	})
+	fileBytes := bytesValue.([]byte)
+
+	streamValue, _ := sandbox.Files.Read(ctx, "/path/to/file", &e2b.FilesystemReadOpts{
+		Format: e2b.ReadFormatStream,
+	})
+	stream := streamValue.(io.ReadCloser)
+	defer stream.Close()
+
+	_ = fileContent
+	_ = fileBytes
+}
+```
+
+## Write a single file
+
+Use `sandbox.Files.Write(ctx, path, data, opts)`.
+
+Accepted Go input shapes include `string`, `[]byte`, `e2b.Blob`, and `io.Reader`.
+
+```go
+package main
+
+import (
+	"bytes"
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	_, _ = sandbox.Files.Write(ctx, "/path/to/file.txt", "file content", nil)
+	_, _ = sandbox.Files.Write(ctx, "/path/to/file.bin", []byte("file content"), nil)
+	_, _ = sandbox.Files.Write(ctx, "/path/to/stream.txt", bytes.NewReader([]byte("file content")), nil)
+}
+```
+
+## Write multiple files
+
+Use `sandbox.Files.WriteFiles(ctx, files, opts)` to write several files in one call.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	infos, _ := sandbox.Files.WriteFiles(ctx, []e2b.WriteEntry{
+		{Path: "/path/to/a", Data: "file content"},
+		{Path: "/another/path/to/b", Data: "file content"},
+	}, nil)
+
+	_ = infos
+}
+```
+

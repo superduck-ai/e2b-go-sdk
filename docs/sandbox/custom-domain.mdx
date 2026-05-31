@@ -1,0 +1,177 @@
+---
+title: "Custom domain"
+description: "Proxy sandbox ports through your own domain."
+---
+
+# Custom domain
+
+This guide shows one reference setup for fronting sandbox ports with your own domain.
+
+Example:
+
+- `8080-<sandbox-id>.mydomain.com`
+- proxies to `8080-<sandbox-id>.e2b.app`
+
+The setup below uses:
+
+- a GCP VM
+- Caddy as the reverse proxy
+- Cloudflare DNS for wildcard records and TLS
+
+You can use another VM provider or reverse proxy if you prefer. The key requirement is that the proxy preserves the sandbox ID in the hostname and forwards traffic to the matching E2B host.
+
+## Prerequisites
+
+- a domain managed in Cloudflare
+- a Cloudflare API token with DNS permissions
+- a VM with public IPv4 connectivity
+
+## Create the VM
+
+```bash
+gcloud compute instances create e2b-custom-domain-proxy \
+    --project=your-project-id \
+    --zone=us-west1-a \
+    --machine-type=n2-standard-2 \
+    --can-ip-forward \
+    --tags=http-server,https-server \
+    --image-project=debian-cloud \
+    --image-family=debian-12 \
+    --boot-disk-size=20GB
+```
+
+Then connect to it:
+
+```bash
+gcloud compute ssh e2b-custom-domain-proxy \
+    --project=your-project-id \
+    --zone=us-west1-a
+```
+
+## Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+```
+
+## Build a Caddy image with Cloudflare DNS support
+
+Create `Dockerfile`:
+
+```Dockerfile
+FROM caddy:builder AS builder
+RUN xcaddy build \
+    --with github.com/caddy-dns/cloudflare
+
+FROM caddy:latest
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+```
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+Create `Caddyfile`:
+
+```txt
+*.mydomain.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    vars sandboxId {labels.2}
+
+    reverse_proxy {vars.sandboxId}.e2b.app:443 {
+        header_up Host {vars.sandboxId}.e2b.app
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+
+        transport http {
+            tls
+            tls_server_name {vars.sandboxId}.e2b.app
+        }
+    }
+}
+```
+
+Create `.env`:
+
+```env
+CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
+```
+
+Start the proxy:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+## Configure DNS
+
+Create a wildcard `A` record in Cloudflare that points `*.mydomain.com` to the VM IP.
+
+```txt
+*.mydomain.com A GCP_VM_IP
+```
+
+## Test the setup from Go
+
+Once the proxy and DNS are ready, you can create a sandbox, start a web server, and open the same port through your custom domain.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		return
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, runErr := sandbox.Commands.Run(ctx, "sudo apt-get update && sudo apt-get install -y nginx && sudo systemctl start nginx", nil)
+	result := execution.(*e2b.CommandResult)
+
+	defaultHost := sandbox.GetHost(80)
+	customHost := "80-" + sandbox.SandboxID + ".mydomain.com"
+
+	_ = result
+	_ = runErr
+	_ = defaultHost
+	_ = customHost
+}
+```
+
+After that, the default E2B host is available at `https://` + `sandbox.GetHost(80)`, and your custom host should be available at `https://80-<sandbox-id>.mydomain.com`.

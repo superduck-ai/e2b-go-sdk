@@ -1,0 +1,201 @@
+---
+title: "SDK v2 Migration Guide"
+description: "Translate older E2B JS or Python examples to the current Go SDK surface."
+---
+
+# SDK v2 Migration Guide
+
+This repository does not ship a separate legacy Go `v1` API.
+
+Use this page when you are rewriting older E2B JavaScript, Python, or code-interpreter examples so they match the current Go SDK in this repo.
+
+The biggest migration is mental-model level:
+
+- use package-level `e2b.Create(...)` and `e2b.Connect(...)`
+- use `sandbox.Commands.Run(...)` instead of notebook-style `runCode(...)`
+- use `sandbox.Files.Write(...)`, `sandbox.Files.WriteFiles(...)`, and `sandbox.Files.Read(...)`
+- use the `e2b.List(...)` paginator when you need to find existing sandboxes
+
+For legacy template definitions, see [Template Migration Guide](/docs/template/migration-v2).
+
+## Replace notebook-style execution with commands or PTY
+
+Older code-interpreter examples often execute Python cells directly. In the Go SDK, run a process in the sandbox instead.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "base", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(
+		ctx,
+		`python3 - <<'PY'
+print("hello from sandbox")
+PY`,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+If the task is interactive, use `sandbox.Pty.Create(...)` instead of `Commands.Run(...)`.
+
+## Move file operations under `sandbox.Files`
+
+The Go SDK keeps file I/O on the `sandbox.Files` client.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "base", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, err = sandbox.Files.Write(ctx, "/home/user/app/main.go", "package main\n", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Files.WriteFiles(ctx, []e2b.WriteEntry{
+		{
+			Path: "/home/user/app/go.mod",
+			Data: "module example.com/app\n",
+		},
+		{
+			Path: "/home/user/app/README.md",
+			Data: "hello from Go",
+		},
+	}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	value, err := sandbox.Files.Read(ctx, "/home/user/app/README.md", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	text := value.(string)
+
+	log.Println(text)
+}
+```
+
+## Switch to paginator-based listing and reconnect
+
+When older examples assume a direct `list()` result, use `e2b.List(...)` and consume pages.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			State: []e2b.SandboxState{
+				e2b.SandboxState("running"),
+				e2b.SandboxState("paused"),
+			},
+		},
+	})
+
+	page, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(page) == 0 {
+		return
+	}
+
+	connected, err := e2b.Connect(ctx, page[0].SandboxID, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(connected.SandboxID)
+}
+```
+
+## Secure communication is the default
+
+Leave `SandboxOpts.Secure` unset unless you are temporarily working around a legacy template built before the secure envd flow.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	secure := false
+
+	sandbox, err := e2b.Create(ctx, "legacy-template", &e2b.SandboxOpts{
+		Secure: &secure,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Println(sandbox.SandboxID)
+}
+```
+
+Use this only as a short-term escape hatch while you rebuild the template. For current behavior and caveats, see [Secured Access](/docs/sandbox/secured-access).
+
+## Quick mapping
+
+When translating older docs, the common replacements are:
+
+- `Sandbox.create(...)` -> `e2b.Create(ctx, template, opts)`
+- `Sandbox.connect(...)` -> `e2b.Connect(ctx, sandboxID, opts)`
+- `sandbox.run_code(...)` or `sandbox.runCode(...)` -> `sandbox.Commands.Run(...)`
+- `sandbox.files.write(...)` -> `sandbox.Files.Write(...)`
+- `sandbox.files.write_files(...)` -> `sandbox.Files.WriteFiles(...)`
+- `Sandbox.list(...)` -> `e2b.List(...)`

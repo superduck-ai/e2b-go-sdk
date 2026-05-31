@@ -1,0 +1,384 @@
+---
+sidebarTitle: "Template"
+title: "Go SDK Template"
+description: "Build, serialize, and manage E2B templates from Go."
+---
+
+# Template
+
+The JS/Python docs describe `Template` as a class with static helpers. In Go, the same surface is split between:
+
+- `e2b.Template(...)`, which returns a mutable `*e2b.TemplateBase`
+- package-level helpers such as `e2b.Build(...)`, `e2b.BuildInBackground(...)`, `e2b.GetBuildStatus(...)`, `e2b.Exists(...)`, `e2b.AssignTags(...)`, `e2b.RemoveTags(...)`, and `e2b.GetTags(...)`
+
+Most builder chains still look similar because `TemplateBase` methods return `*e2b.TemplateBase`.
+
+## Go-specific notes
+
+- `e2b.Template(nil)` already starts from `e2bdev/base`
+- many builder methods take `opts ...any` instead of dedicated Go option structs
+- the safest Go form is an anonymous struct pointer with exported field names, but `map[string]any` also works with JS-style keys
+- `Copy(...)` source paths are resolved relative to `TemplateOptions.FileContextPath`
+- builder validation and build failures can surface `*e2b.BuildError`, and `BuildError.CallerTrace` is populated when the SDK can attribute the failing builder step
+
+## Core types
+
+| Type | Purpose |
+| ---- | ------- |
+| `TemplateOptions` | local file context and ignore-pattern settings |
+| `TemplateBase` | mutable template builder returned by `e2b.Template(...)` |
+| `BuildOptions` | build-time sizing, tags, logging, and connection settings |
+| `BasicBuildOptions` | embedded build-only subset inside `BuildOptions` |
+| `BuildInfo` | returned build/template identifiers |
+| `GetBuildStatusOptions` | status polling options |
+| `TemplateBuildStatusResponse` | current build status plus logs and failure reason |
+| `TemplateTag` / `TemplateTagInfo` | tag list and tag mutation results |
+| `ReadyCmd` | structured ready command helper used by `SetStartCmd` and `SetReadyCmd` |
+| `LogEntry` / `BuildLogger` | build log payload and callback type |
+
+The root package also re-exports `TemplateFromImage`, `TemplateBuilder`, `TemplateFinal`, and `TemplateClass`, but most callers work directly with `*e2b.TemplateBase`.
+
+## Choose a base
+
+`TemplateOptions` controls local file resolution:
+
+- `FileContextPath` is the base directory for `Copy(...)`, `FromDockerfile("Dockerfile")`, and `FromGCPRegistry(..., &GCPRegistryCredentials{ServiceAccountJSON: "..."})`
+- when omitted, `FileContextPath` defaults to the caller directory
+- `FileIgnorePatterns` are merged with `.dockerignore` when hashing or uploading `Copy(...)` sources, including `ToJSON(template, true)`
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	fromBase := e2b.Template(nil).FromBaseImage()
+	fromPython := e2b.Template(nil).FromPythonImage("3.12")
+	fromDockerfile := e2b.Template(&e2b.TemplateOptions{
+		FileContextPath: ".",
+	}).FromDockerfile("Dockerfile")
+
+	fromPrivate := e2b.Template(nil).FromImage("ghcr.io/acme/private:latest", &e2b.RegistryCredentials{
+		Username: "user",
+		Password: "token",
+	})
+
+	fromAWS := e2b.Template(nil).FromAWSRegistry(
+		"123456789.dkr.ecr.us-west-2.amazonaws.com/app:latest",
+		&e2b.AWSRegistryCredentials{
+			AccessKeyID:     "AKIA...",
+			SecretAccessKey: "...",
+			Region:          "us-west-2",
+		},
+	)
+
+	fromGCP := e2b.Template(&e2b.TemplateOptions{FileContextPath: "."}).FromGCPRegistry(
+		"gcr.io/myproject/app:latest",
+		&e2b.GCPRegistryCredentials{ServiceAccountJSON: "service-account.json"},
+	)
+
+	fromExisting := e2b.Template(nil).FromTemplate("base-template")
+
+	_, _, _, _, _, _ = fromBase, fromPython, fromDockerfile, fromPrivate, fromAWS, fromGCP
+	_ = fromExisting
+}
+```
+
+Convenience image helpers use these defaults:
+
+- `FromBaseImage()` -> `e2bdev/base`
+- `FromDebianImage()` -> `debian:stable`
+- `FromUbuntuImage()` -> `ubuntu:latest`
+- `FromPythonImage()` -> `python:3`
+- `FromNodeImage()` -> `node:lts`
+- `FromBunImage()` -> `oven/bun:latest`
+
+## Add build steps
+
+The TS/Python reference shows typed option objects. In Go, the builder reads option values dynamically from either struct fields or map keys.
+
+| Method | Input | Common option fields |
+| ------ | ----- | -------------------- |
+| `Copy` | `string` or `[]string` | `ForceUpload`, `User`, `Mode`, `ResolveSymlinks` |
+| `CopyItems` | `[]e2b.CopyItem` | per-item `Src`, `Dest`, `ForceUpload`, `User`, `Mode`, `ResolveSymlinks` |
+| `Remove` | `string` or `[]string` | `Recursive`, `Force`, `User` |
+| `Rename` | `src`, `dest` | `Force`, `User` |
+| `MakeDir` | `string` or `[]string` | `Mode`, `User` |
+| `MakeSymlink` | `src`, `dest` | `Force`, `User` |
+| `RunCmd` | `string` or `[]string` | `Force`, `User` |
+| `AptInstall` | `string` or `[]string` | `NoInstallRecommends`, `FixMissing` |
+| `GitClone` | `GitClone(url, path, opts)` or `GitClone(url, opts)` | `Branch`, `Depth`, `User` |
+
+`Copy(...)` source paths must stay inside `FileContextPath`. Absolute paths or `..` escapes panic with `*e2b.BuildError`.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		Copy("app.ts", "/app/", map[string]any{
+			"forceUpload": true,
+			"mode":        0o755,
+		}).
+		CopyItems([]e2b.CopyItem{
+			{Src: "config.yaml", Dest: "/app/"},
+			{Src: []string{"one.txt", "two.txt"}, Dest: "/assets", Mode: 0o644},
+		}).
+		Remove("/tmp/cache", &struct {
+			Recursive bool
+			Force     bool
+		}{Recursive: true, Force: true}).
+		Rename("/app/config.yaml", "/app/config.example.yaml", nil).
+		MakeDir("/app/logs", &struct{ Mode int }{Mode: 0o755}).
+		MakeSymlink("/usr/bin/python3", "/usr/bin/python", &struct{ Force bool }{Force: true}).
+		RunCmd([]string{"go mod download", "go build ./..."}, &struct{ User string }{User: "root"}).
+		SetWorkdir("/app").
+		SetUser("user").
+		SetEnvs(map[string]string{
+			"APP_ENV": "production",
+			"PORT":    "8000",
+		}).
+		PipInstall("requests", nil).
+		NpmInstall("tsx", &struct{ G bool }{G: true}).
+		BunInstall("typescript", &struct{ Dev bool }{Dev: true}).
+		AptInstall([]string{"git", "curl"}, &struct {
+			NoInstallRecommends bool
+		}{NoInstallRecommends: true}).
+		GitClone("https://github.com/e2b-dev/e2b.git", "/src", &struct {
+			Branch string
+			Depth  int
+		}{Branch: "main", Depth: 1})
+
+	_ = template
+}
+```
+
+Install helper behavior follows the current Go implementation:
+
+- `PipInstall()` with no package argument installs `.`
+- `PipInstall` defaults to a global install as `root`; pass `&struct{ G bool }{G: false}` to use `--user`
+- `NpmInstall()` and `BunInstall()` with no package argument install from the current package manifest
+- `NpmInstall` and `BunInstall` only go global when `G: true`
+- `SkipCache()` forces the next builder layer; `BuildOptions.SkipCache` forces the entire build request
+
+## Start, readiness, and advanced helpers
+
+`SetStartCmd(start, ready...)` sets the sandbox start command and optionally a ready command. `SetReadyCmd(...)` can be used separately and accepts either a raw string or `*e2b.ReadyCmd`.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromUbuntuImage("22.04").
+		SetStartCmd("python -m http.server 8000", e2b.WaitForPort(8000)).
+		SetReadyCmd("curl -fsS http://127.0.0.1:8000/health")
+
+	_ = template
+}
+```
+
+Ready-command helpers:
+
+- `WaitForPort(port)`
+- `WaitForURL(url, statusCode...)`
+- `WaitForProcess(processName)`
+- `WaitForFile(path)`
+- `WaitForTimeout(timeoutMs)` using milliseconds, with a minimum of one second
+
+Template-specific helpers:
+
+- `AddMcpServer(...)` only works with `FromTemplate("mcp-gateway")`
+- `BetaDevContainerPrebuild(...)` and `BetaSetDevContainerStart(...)` only work with `FromTemplate("devcontainer")`
+- unsupported base-template combinations panic with `*e2b.BuildError`
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	mcp := e2b.Template(nil).
+		FromTemplate("mcp-gateway").
+		AddMcpServer("exa", []string{"brave", "duckduckgo"})
+
+	devcontainer := e2b.Template(nil).
+		FromTemplate("devcontainer").
+		BetaDevContainerPrebuild("/workspace").
+		BetaSetDevContainerStart("/workspace")
+
+	_ = mcp
+	_ = devcontainer
+}
+```
+
+## Build and manage templates
+
+`BuildOptions` embeds `BasicBuildOptions`, so composite literals use `BasicBuildOptions: e2b.BasicBuildOptions{...}`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd(`echo "hello"`).
+		SetStartCmd(`python -m http.server 8000`, e2b.WaitForPort(8000))
+
+	timeoutMs := 120000
+
+info, err := e2b.Build(ctx, template, "docs-template", &e2b.BuildOptions{
+	BasicBuildOptions: e2b.BasicBuildOptions{
+		Tags:        []string{"stable"},
+		CpuCount:    2,
+		MemoryMB:    1024,
+		OnBuildLogs: e2b.DefaultBuildLogger(),
+	},
+		RequestTimeoutMs: &timeoutMs,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	bg, err := e2b.BuildInBackground(ctx, template, "", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			Alias: "docs-template-bg",
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	status, err := e2b.GetBuildStatus(ctx, bg, &e2b.GetBuildStatusOptions{
+		LogsOffset: 0,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(info.TemplateID, status.Status)
+}
+```
+
+Important behavior:
+
+- `Build(...)` waits until the build reaches `ready` or `error`
+- `BuildInBackground(...)` returns after the build is created and triggered
+- if `name == ""`, `BuildOptions.BasicBuildOptions.Alias` is used as a legacy fallback
+- `BuildOptions.BasicBuildOptions.Tags` are additional tag labels for the build name you pass to `Build(...)`
+- zero `CpuCount` and `MemoryMB` default to `2` and `1024`
+- `BuildInfo.Name` and `BuildInfo.Alias` currently carry the same template name for parity
+- `GetBuildStatus(...)` returns `TemplateBuildStatusResponse{Status, LogEntries, Logs, Reason}`
+- `status.Status` is an `e2b.TemplateBuildStatus`; current values are `"building"`, `"waiting"`, `"ready"`, and `"error"`
+
+Template existence and tags use the root `ConnectionOpts`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	info := &e2b.BuildInfo{TemplateID: "tmpl_123"}
+
+	exists, err := e2b.Exists(ctx, "docs-template", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tagInfo, err := e2b.AssignTags(ctx, "docs-template:stable", []string{"production"}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := e2b.RemoveTags(ctx, "docs-template", "production", nil); err != nil {
+		log.Fatal(err)
+	}
+
+	tags, err := e2b.GetTags(ctx, info.TemplateID, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(exists, tagInfo.BuildID, len(tags))
+}
+```
+
+Notes:
+
+- `Exists(...)` is preferred over deprecated `AliasExists(...)`
+- `AssignTags(...)` and `RemoveTags(...)` accept either `string` or `[]string`
+- `GetTags(...)` takes a template ID, not a template alias
+- `ConnectionOpts`, `BuildOptions`, and `GetBuildStatusOptions` all expose shared connection fields such as `ApiKey`, `AccessToken`, `Domain`, `ApiUrl`, `SandboxUrl`, `Debug`, `Signal`, `Headers`, `RequestTimeoutMs`, and `Proxy`
+
+## Serialize and log
+
+`ToJSON(...)` serializes the template payload. `ToJSON(template, true)` also computes copy-step hashes from the local file context. `ToDockerfile(...)` renders image-based templates to Dockerfile syntax, but it does not support templates created with `FromTemplate(...)`.
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromPythonImage("3.12").
+		SetEnvs(map[string]string{"PORT": "8000"}).
+		SetStartCmd("python main.py", e2b.WaitForPort(8000))
+
+	jsonText, err := e2b.ToJSON(template, true)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dockerfile, err := e2b.ToDockerfile(template)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var logger e2b.BuildLogger = func(entry *e2b.LogEntry) {
+		log.Println(entry.String())
+	}
+
+	start := e2b.NewLogEntryStart("uploading files")
+	end := e2b.NewLogEntryEnd("build finished")
+	defaultLogger := e2b.DefaultBuildLogger()
+
+	_, _, _ = jsonText, dockerfile, logger
+	_, _, _ = start, end, defaultLogger
+}
+```
+
+`DefaultBuildLogger()` prints info, warn, and error lines while stripping ANSI codes. It ignores debug entries, so `NewLogEntryStart(...)` and `NewLogEntryEnd(...)` are mainly useful when you provide your own `BuildLogger`.

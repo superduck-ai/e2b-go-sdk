@@ -1,0 +1,278 @@
+---
+title: "Interactive Terminal (PTY)"
+sidebarTitle: "Interactive Terminal"
+description: "Create, resize, reconnect, and stop PTY sessions in a Go sandbox."
+---
+
+# Interactive Terminal (PTY)
+
+Use `sandbox.Pty` when you need an interactive terminal instead of a one-shot command.
+
+The main PTY methods are:
+
+- `Create(ctx, opts)`
+- `Connect(ctx, pid, opts)`
+- `SendInput(ctx, pid, data, opts)`
+- `Resize(ctx, pid, size, opts)`
+- `Kill(ctx, pid, opts)`
+
+The returned handle is a `*e2b.CommandHandle`, so you can also call `Wait()`, `Disconnect()`, and `Kill()` on it directly.
+
+## Create a PTY session
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("%q\n", string(data))
+		},
+		Envs: map[string]string{
+			"MY_VAR": "hello",
+		},
+		Cwd:  "/home/user",
+		User: "root",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(terminal.Pid)
+}
+```
+
+The current Go SDK starts an interactive Bash shell and sets terminal defaults such as `TERM=xterm-256color`.
+
+## Keep a PTY session open
+
+`TimeoutMs: 0` keeps the PTY session open until you disconnect or kill it.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	timeoutMs := 0
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols:      80,
+		Rows:      24,
+		TimeoutMs: &timeoutMs,
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("%q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(terminal.Pid)
+}
+```
+
+## Send input
+
+Use `SendInput(...)` to write raw bytes to the terminal.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("%q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Pty.SendInput(ctx, terminal.Pid, []byte("echo 'hello from PTY'\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Resize the terminal
+
+Use `e2b.PtySize` for resize events.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("%q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Pty.Resize(ctx, terminal.Pid, e2b.PtySize{
+		Cols: 120,
+		Rows: 40,
+	}, nil); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Disconnect and reconnect
+
+`Disconnect()` stops streaming without killing the PTY, and `Connect(...)` attaches a new handler later.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("handler 1: %q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Pty.SendInput(ctx, terminal.Pid, []byte("echo hello\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+
+	terminal.Disconnect()
+
+	reconnected, err := sandbox.Pty.Connect(ctx, terminal.Pid, &e2b.PtyConnectOpts{
+		OnData: func(data e2b.PtyOutput) {
+			log.Printf("handler 2: %q\n", string(data))
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sandbox.Pty.SendInput(ctx, reconnected.Pid, []byte("echo world\n"), nil); err != nil {
+		log.Fatal(err)
+	}
+
+	_, _ = reconnected.Wait()
+}
+```
+
+## Kill the PTY
+
+You can stop a PTY through either the sandbox client or the handle itself.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Create(ctx, "", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	terminal, err := sandbox.Pty.Create(ctx, &e2b.PtyCreateOpts{
+		Cols: 80,
+		Rows: 24,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	killed, err := sandbox.Pty.Kill(ctx, terminal.Pid, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(killed)
+
+	_, _ = terminal.Kill()
+}
+```
+

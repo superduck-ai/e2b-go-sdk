@@ -1,0 +1,88 @@
+---
+title: "Examples"
+description: "Representative MCP patterns you can build with the Go SDK."
+---
+
+# Examples
+
+The Go SDK does not currently bundle end-to-end cookbook projects in this repo, but the MCP-related building blocks map to a few common patterns:
+
+- start a sandbox with `SandboxOpts.Mcp`
+- fetch the gateway URL with `GetMcpUrl()`
+- fetch the token with `GetMcpToken()`
+- pre-pull servers into a template with `AddMcpServer(...)`
+
+## Example: runtime MCP gateway
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"exa": map[string]any{
+				"apiKey": "exa-api-key",
+			},
+		},
+	})
+	defer sandbox.Kill(context.Background(), nil)
+
+	_, _ = sandbox.GetMcpToken()
+	_ = sandbox.GetMcpUrl()
+}
+```
+
+## Example: pre-pulled MCP template
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromTemplate("mcp-gateway").
+		AddMcpServer("exa", "browserbase")
+
+	_ = template
+}
+```
+
+## Example: custom MCP server entry
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, _ := e2b.Create(ctx, "", &e2b.SandboxOpts{
+		Mcp: e2b.McpServer{
+			"github/modelcontextprotocol/servers": map[string]any{
+				"installCmd": "npm install",
+				"runCmd":     "sudo npx -y @modelcontextprotocol/server-filesystem /root",
+			},
+		},
+	})
+	defer sandbox.Kill(context.Background(), nil)
+}
+```
+
+If you need a full MCP client workflow, use these values with whichever Go or external MCP client you run outside this repository.
+

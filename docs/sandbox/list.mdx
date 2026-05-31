@@ -1,0 +1,162 @@
+---
+title: "List Sandboxes"
+description: "List running or paused sandboxes with the Go SDK paginator."
+---
+
+# List Sandboxes
+
+Use `e2b.List(opts)` to list sandboxes.
+
+The Go SDK returns a `*e2b.SandboxPaginator`, which exposes:
+
+- `NextItems(...)`
+- `NextItemsContext(ctx, ...)`
+- `HasNext`
+- `NextToken`
+
+Once you have a `SandboxInfo`, you can use its `SandboxID` with [Connect](/docs/sandbox/connect).
+
+## Basic listing
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(nil)
+
+	firstPage, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(firstPage) == 0 {
+		return
+	}
+
+	sandbox := firstPage[0]
+	log.Println("sandbox id:", sandbox.SandboxID)
+	log.Println("state:", sandbox.State)
+	log.Println("metadata:", sandbox.Metadata)
+	log.Println("template id:", sandbox.TemplateID)
+}
+```
+
+`SandboxInfo` includes fields such as `SandboxID`, `TemplateID`, `State`, `Metadata`, `StartedAt`, and `EndAt`.
+
+## Filter by state
+
+Use `SandboxListOpts.Query.State` with `[]e2b.SandboxState`.
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			State: []e2b.SandboxState{
+				e2b.SandboxState("running"),
+				e2b.SandboxState("paused"),
+			},
+		},
+	})
+
+	sandboxes, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(sandboxes))
+}
+```
+
+## Filter by metadata
+
+Use `SandboxListOpts.Query.Metadata` to match exact key-value pairs set when the sandbox was created.
+
+```go
+package main
+
+import (
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Query: &struct {
+			Metadata map[string]string
+			State    []e2b.SandboxState
+		}{
+			Metadata: map[string]string{
+				"userID": "123",
+				"env":    "dev",
+			},
+		},
+	})
+
+	sandboxes, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(len(sandboxes))
+}
+```
+
+## Pagination
+
+Set `Limit` and `NextToken` in `SandboxListOpts` when you want to control page size or resume from a previous page.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	paginator := e2b.List(&e2b.SandboxListOpts{
+		Limit:     100,
+		NextToken: "<base64-encoded-token>",
+	})
+
+	log.Println("has next:", paginator.HasNext)
+	log.Println("next token:", paginator.NextToken)
+
+	page, err := paginator.NextItems()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(len(page))
+
+	allSandboxes := append([]e2b.SandboxInfo{}, page...)
+	for paginator.HasNext {
+		items, err := paginator.NextItemsContext(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		allSandboxes = append(allSandboxes, items...)
+	}
+
+	log.Println("total:", len(allSandboxes))
+}
+```
+

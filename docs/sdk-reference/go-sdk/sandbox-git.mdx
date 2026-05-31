@@ -1,0 +1,381 @@
+---
+sidebarTitle: "Git"
+title: "Go SDK Sandbox Git"
+description: "Run git operations inside a sandbox with sandbox.Git."
+---
+
+# Git
+
+`sandbox.Git` is a thin git helper built on top of `sandbox.Commands`. It runs `git` inside the sandbox and returns parsed results or `*e2b.CommandResult`.
+
+## Core types
+
+| Type | Purpose |
+| ---- | ------- |
+| `Git` | helper stored on `sandbox.Git` |
+| `GitRequestOpts` | shared command/request options for git calls |
+| `GitCloneOpts` | clone-specific options |
+| `GitInitOpts` | `git init` options |
+| `GitCommitOpts` | commit author and empty-commit options |
+| `GitRemoteAddOpts` | remote add/update behavior |
+| `GitAddOpts` | staged file selection |
+| `GitResetOpts` | reset mode, target, and path selection |
+| `GitRestoreOpts` | restore path selection and staged/worktree behavior |
+| `GitPushOpts` | push remote/branch/auth options |
+| `GitPullOpts` | pull remote/branch/auth options |
+| `GitDeleteBranchOpts` | branch deletion options |
+| `GitConfigOpts` | git config scope/path options |
+| `GitDangerouslyAuthenticateOpts` | credential-helper bootstrap options |
+| `GitStatus` | parsed `git status --porcelain=1 -b` result |
+| `GitBranches` | parsed branch list |
+| `GitFileStatus` | one file entry inside `GitStatus.FileStatus` |
+
+All git methods take `context.Context`. `GitRequestOpts` forwards to the underlying command runner:
+
+- `RequestTimeoutMs`
+- `Signal`
+- `TimeoutMs`
+- `User`
+- `Cwd`
+- `Envs`
+
+## Initialize and clone repositories
+
+Use `Init(...)` to create a repo and `Clone(...)` to fetch an existing one.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := sandbox.Git.Init(ctx, "/tmp/repo", &e2b.GitInitOpts{
+		InitialBranch: "main",
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	depth := 1
+	if _, err := sandbox.Git.Clone(ctx, "https://github.com/e2b-dev/e2b.git", &e2b.GitCloneOpts{
+		Path:   "/tmp/e2b",
+		Branch: "main",
+		Depth:  &depth,
+	}); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`GitCloneOpts.Depth` uses `*int`, so omission and explicit depth are distinct.
+
+## Authenticate for private repositories
+
+### Inline credentials
+
+Pass `Username` and `Password` directly in `Clone`, `Push`, or `Pull`.
+
+```go
+_, err := sandbox.Git.Clone(ctx, "https://git.example.com/org/repo.git", &e2b.GitCloneOpts{
+	Path:     "/tmp/repo",
+	Username: "git",
+	Password: "token",
+})
+```
+
+By default, Go strips inline credentials from the stored remote URL after clone. Set `DangerouslyStoreCredentials: true` to keep them in `.git/config`.
+
+### Credential helper
+
+`DangerouslyAuthenticate(...)` configures `credential.helper=store` and pipes credentials into `git credential approve`.
+
+```go
+_, err := sandbox.Git.DangerouslyAuthenticate(ctx, &e2b.GitDangerouslyAuthenticateOpts{
+	Username: "git",
+	Password: "token",
+	Host:     "git.example.com",
+	Protocol: "https",
+})
+```
+
+This stores credentials on disk inside the sandbox. Use it only when you accept that risk.
+
+## Configure identity and remotes
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	repoPath := "/tmp/repo"
+
+	if _, err := sandbox.Git.ConfigureUser(ctx, "E2B Bot", "bot@example.com", &e2b.GitConfigOpts{
+		Scope: e2b.GitConfigScope("local"),
+		Path:  repoPath,
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := sandbox.Git.RemoteAdd(ctx, repoPath, "origin", "https://git.example.com/org/repo.git", &e2b.GitRemoteAddOpts{
+		Overwrite: true,
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	url, err := sandbox.Git.RemoteGet(ctx, repoPath, "origin", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(url)
+}
+```
+
+`GitConfigScope` is a string type. Use values such as:
+
+- `e2b.GitConfigScope("local")`
+- `e2b.GitConfigScope("global")`
+- `e2b.GitConfigScope("system")`
+
+## Status and branches
+
+`Status(...)` returns parsed branch and file-state information. `Branches(...)` returns the current branch plus all branch names.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	status, err := sandbox.Git.Status(ctx, "/tmp/repo", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("branch=%s ahead=%d behind=%d clean=%v\n", status.CurrentBranch, status.Ahead, status.Behind, status.IsClean)
+
+	for _, file := range status.FileStatus {
+		log.Printf("%s %s staged=%v\n", file.Name, file.Status, file.Staged)
+	}
+
+	branches, err := sandbox.Git.Branches(ctx, "/tmp/repo", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("current=%s all=%v\n", branches.CurrentBranch, branches.Branches)
+}
+```
+
+Useful `GitStatus` fields:
+
+- `CurrentBranch`
+- `Upstream`
+- `Ahead`
+- `Behind`
+- `Detached`
+- `FileStatus`
+- `IsClean`
+- `HasChanges`
+- `HasStaged`
+- `HasUntracked`
+- `HasConflicts`
+
+## Branch management
+
+```go
+_, err = sandbox.Git.CreateBranch(ctx, "/tmp/repo", "feature/docs", nil)
+_, err = sandbox.Git.CheckoutBranch(ctx, "/tmp/repo", "main", nil)
+_, err = sandbox.Git.DeleteBranch(ctx, "/tmp/repo", "feature/docs", &e2b.GitDeleteBranchOpts{
+	Force: true,
+})
+```
+
+## Add, commit, restore, and reset
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	repoPath := "/tmp/repo"
+
+	_, err = sandbox.Git.Add(ctx, repoPath, &e2b.GitAddOpts{
+		Files: []string{"README.md"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Git.Commit(ctx, repoPath, "Update docs", &e2b.GitCommitOpts{
+		AuthorName:  "E2B Bot",
+		AuthorEmail: "bot@example.com",
+		AllowEmpty:  false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	staged := true
+	worktree := false
+	_, err = sandbox.Git.Restore(ctx, repoPath, &e2b.GitRestoreOpts{
+		Paths:    []string{"README.md"},
+		Staged:   &staged,
+		Worktree: &worktree,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Git.Reset(ctx, repoPath, &e2b.GitResetOpts{
+		Mode:   e2b.GitResetMode("hard"),
+		Target: "HEAD",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`GitRestoreOpts.Paths` matches the current JS/Python contract. `Files` still exists as a deprecated compatibility alias for older Go callers.
+
+`GitResetMode` is also a string type. Use values such as:
+
+- `e2b.GitResetMode("soft")`
+- `e2b.GitResetMode("mixed")`
+- `e2b.GitResetMode("hard")`
+- `e2b.GitResetMode("merge")`
+- `e2b.GitResetMode("keep")`
+
+## Push and pull
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	repoPath := "/tmp/repo"
+
+	_, err = sandbox.Git.Push(ctx, repoPath, &e2b.GitPushOpts{
+		Remote: "origin",
+		Branch: "main",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = sandbox.Git.Pull(ctx, repoPath, &e2b.GitPullOpts{
+		Remote: "origin",
+		Branch: "main",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+If credentials are supplied for `Push` or `Pull`, the helper temporarily rewrites the remote URL, runs the operation, and restores the original URL afterward.
+
+## Error behavior
+
+Common typed errors:
+
+- `*e2b.GitAuthError` for HTTP(S) or SSH auth failures
+- `*e2b.GitUpstreamError` when a branch has no configured upstream
+- `*e2b.CommandExitError` when git starts successfully but exits non-zero for another reason
+
+```go
+var authErr *e2b.GitAuthError
+if errors.As(err, &authErr) {
+	// credentials failed
+}
+
+var upstreamErr *e2b.GitUpstreamError
+if errors.As(err, &upstreamErr) {
+	// no upstream branch configured
+}
+
+var exitErr *e2b.CommandExitError
+if errors.As(err, &exitErr) {
+	// other git process failure
+}
+```
+
+## Method summary
+
+| Method | Signature summary |
+| ------ | ----------------- |
+| `Clone` | `Clone(ctx, repoURL, *GitCloneOpts) (*CommandResult, error)` |
+| `Init` | `Init(ctx, path, *GitInitOpts) (*CommandResult, error)` |
+| `RemoteAdd` | `RemoteAdd(ctx, path, name, url, *GitRemoteAddOpts) (*CommandResult, error)` |
+| `RemoteGet` | `RemoteGet(ctx, path, name, *GitRequestOpts) (string, error)` |
+| `Status` | `Status(ctx, path, *GitRequestOpts) (*GitStatus, error)` |
+| `Branches` | `Branches(ctx, path, *GitRequestOpts) (*GitBranches, error)` |
+| `CreateBranch` | `CreateBranch(ctx, path, branch, *GitRequestOpts) (*CommandResult, error)` |
+| `CheckoutBranch` | `CheckoutBranch(ctx, path, branch, *GitRequestOpts) (*CommandResult, error)` |
+| `DeleteBranch` | `DeleteBranch(ctx, path, branch, *GitDeleteBranchOpts) (*CommandResult, error)` |
+| `Add` | `Add(ctx, path, *GitAddOpts) (*CommandResult, error)` |
+| `Commit` | `Commit(ctx, path, message, *GitCommitOpts) (*CommandResult, error)` |
+| `Reset` | `Reset(ctx, path, *GitResetOpts) (*CommandResult, error)` |
+| `Restore` | `Restore(ctx, path, *GitRestoreOpts) (*CommandResult, error)` |
+| `Push` | `Push(ctx, path, *GitPushOpts) (*CommandResult, error)` |
+| `Pull` | `Pull(ctx, path, *GitPullOpts) (*CommandResult, error)` |
+| `SetConfig` | `SetConfig(ctx, key, value, *GitConfigOpts) (*CommandResult, error)` |
+| `GetConfig` | `GetConfig(ctx, key, *GitConfigOpts) (string, error)` |
+| `DangerouslyAuthenticate` | `DangerouslyAuthenticate(ctx, *GitDangerouslyAuthenticateOpts) (*CommandResult, error)` |
+| `ConfigureUser` | `ConfigureUser(ctx, name, email, *GitConfigOpts) (*CommandResult, error)` |

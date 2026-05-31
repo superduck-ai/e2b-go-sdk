@@ -1,0 +1,237 @@
+---
+title: "Proxy tunneling"
+description: "Tunnel sandbox traffic through a proxy server."
+---
+
+# Proxy tunneling
+
+This guide shows how to route sandbox traffic through a dedicated proxy. The reference setup below uses a Shadowsocks server on a VM and a Go-built E2B template that runs the client inside the sandbox.
+
+There are two common patterns:
+
+- a local SOCKS proxy for selected requests
+- a transparent proxy that redirects all outbound traffic
+
+## Set up the proxy server
+
+Create a VM, open port `8388`, install `shadowsocks-rust`, and start `ssserver`.
+
+### Example firewall rule
+
+```bash
+gcloud compute firewall-rules create shadowsocks \
+    --project=your-project-id \
+    --direction=INGRESS \
+    --priority=1000 \
+    --network=default \
+    --action=ALLOW \
+    --rules=tcp:8388,udp:8388 \
+    --source-ranges=0.0.0.0/0 \
+    --target-tags=allow-shadowsocks
+```
+
+### Example server config
+
+```json
+{
+  "server": "0.0.0.0",
+  "server_port": 8388,
+  "password": "STRONG_PASSWORD_HERE",
+  "method": "aes-256-gcm",
+  "mode": "tcp_and_udp",
+  "timeout": 300,
+  "fast_open": true
+}
+```
+
+## Local proxy template
+
+Create `config.json` in your template project:
+
+```json
+{
+  "server": "SERVER_IP",
+  "server_port": 8388,
+  "password": "STRONG_PASSWORD_HERE",
+  "method": "aes-256-gcm",
+  "local_address": "0.0.0.0",
+  "local_port": 1080,
+  "mode": "tcp"
+}
+```
+
+Build the template in Go:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd([]string{
+			"wget https://github.com/shadowsocks/shadowsocks-rust/releases/latest/download/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz",
+			"tar -xf shadowsocks-*.tar.xz",
+			"sudo mv sslocal /usr/local/bin/",
+		}).
+		Copy("config.json", "/root/config.json", nil).
+		SetStartCmd(
+			"sudo sslocal -c /root/config.json --daemonize",
+			e2b.WaitForPort(1080),
+		)
+
+	_, err := e2b.Build(context.Background(), template, "shadowsocks-client-local", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    1,
+			MemoryMB:    1024,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Use the local proxy:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "shadowsocks-client-local", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "curl --socks5 127.0.0.1:1080 https://ifconfig.me", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+## Transparent proxy template
+
+Create `config.json`:
+
+```json
+{
+  "server": "SERVER_IP",
+  "server_port": 8388,
+  "password": "STRONG_PASSWORD_HERE",
+  "method": "aes-256-gcm",
+  "local_address": "0.0.0.0",
+  "local_port": 1080,
+  "mode": "tcp"
+}
+```
+
+Create `iptables-rules.sh`:
+
+```bash
+iptables -t nat -N SHADOWSOCKS
+iptables -t nat -A SHADOWSOCKS -d SERVER_IP -j RETURN
+iptables -t nat -A SHADOWSOCKS -d 0.0.0.0/8 -j RETURN
+iptables -t nat -A SHADOWSOCKS -d 127.0.0.0/8 -j RETURN
+iptables -t nat -A SHADOWSOCKS -d 169.254.0.0/16 -j RETURN
+iptables -t nat -A SHADOWSOCKS -p tcp -j REDIRECT --to-ports 12345
+iptables -t nat -A OUTPUT -p tcp -j SHADOWSOCKS
+```
+
+Build the transparent-proxy template:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	template := e2b.Template(nil).
+		FromBaseImage().
+		AptInstall("iptables", nil).
+		RunCmd([]string{
+			"wget https://github.com/shadowsocks/shadowsocks-rust/releases/latest/download/shadowsocks-v1.24.0.x86_64-unknown-linux-gnu.tar.xz",
+			"tar -xf shadowsocks-*.tar.xz",
+			"sudo mv sslocal /usr/local/bin/",
+		}).
+		Copy("config.json", "/root/config.json", nil).
+		Copy("iptables-rules.sh", "/root/iptables-rules.sh", &struct{ Mode int }{Mode: 0o755}).
+		SetStartCmd(
+			"sudo sslocal -c /root/config.json --protocol redir -b 0.0.0.0:12345 --daemonize && sudo /root/iptables-rules.sh",
+			e2b.WaitForProcess("sslocal"),
+		)
+
+	_, err := e2b.Build(context.Background(), template, "shadowsocks-client-transparent", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    1,
+			MemoryMB:    1024,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Use the transparent proxy:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	sandbox, err := e2b.Create(ctx, "shadowsocks-client-transparent", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	execution, err := sandbox.Commands.Run(ctx, "curl https://ifconfig.me", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := execution.(*e2b.CommandResult)
+
+	log.Println(result.Stdout)
+}
+```
+
+## Notes
+
+- Replace `SERVER_IP` and the example password before building.
+- Use separate template names for the local and transparent variants.
+- If you use owner-based iptables rules, see the [`xt_owner` FAQ](/docs/faq/iptables-xt-owner).

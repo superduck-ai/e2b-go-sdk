@@ -1,0 +1,191 @@
+---
+sidebarTitle: "Logger"
+title: "Go SDK Template Logger"
+description: "Use LogEntry and BuildLogger to observe template build progress in the Go SDK."
+---
+
+# Template Logger
+
+Template builds can emit lifecycle and status logs through `BuildOptions.BasicBuildOptions.OnBuildLogs`.
+
+The root `e2b` package exports:
+
+- `type LogEntryLevel`
+- `type LogEntry`
+- `type LogEntryStart`
+- `type LogEntryEnd`
+- `type BuildLogger`
+- `NewLogEntryStart(...)`
+- `NewLogEntryEnd(...)`
+- `DefaultBuildLogger()`
+
+## Go-specific behavior
+
+Compared with the JS/Python docs:
+
+- `DefaultBuildLogger()` does not accept options
+- the default logger always filters out debug messages and prints info, warn, and error lines
+- the root package re-exports `LogEntryLevel`, but it does not re-export named `LogLevel*` constants
+- for root-package code, compare against typed string values such as `e2b.LogEntryLevel("info")`
+
+## LogEntry and LogEntryLevel
+
+`LogEntry` is the payload passed into every `BuildLogger` callback:
+
+| Field | Type |
+| ----- | ---- |
+| `Timestamp` | `time.Time` |
+| `Level` | `e2b.LogEntryLevel` |
+| `Message` | `string` |
+
+Current level values are:
+
+- `e2b.LogEntryLevel("debug")`
+- `e2b.LogEntryLevel("info")`
+- `e2b.LogEntryLevel("warn")`
+- `e2b.LogEntryLevel("error")`
+
+`(*LogEntry).String()` formats the entry as:
+
+```text
+[2026-05-30T12:00:00Z] [info] message
+```
+
+It also strips ANSI escape sequences from `Message`.
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	entry := &e2b.LogEntry{
+		Timestamp: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+		Level:     e2b.LogEntryLevel("info"),
+		Message:   "Uploaded 'src'",
+	}
+
+	fmt.Println(entry.String())
+}
+```
+
+## LogEntryStart and LogEntryEnd
+
+`NewLogEntryStart(...)` and `NewLogEntryEnd(...)` return specialized wrapper types that embed `LogEntry`.
+
+Both helpers currently:
+
+- set `Timestamp` to `time.Now()`
+- set `Level` to `e2b.LogEntryLevel("debug")`
+- copy the provided message into `Message`
+
+```go
+package main
+
+import (
+	"fmt"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	start := e2b.NewLogEntryStart("Build started")
+	end := e2b.NewLogEntryEnd("Build finished")
+
+	fmt.Println(start.Level, start.Message)
+	fmt.Println(end.Level, end.Message)
+}
+```
+
+These helper types are useful when you want the same start/end marker pattern that the template build flow emits internally.
+
+## BuildLogger
+
+`BuildLogger` is a function type:
+
+```go
+type BuildLogger func(entry *e2b.LogEntry)
+```
+
+Use it with `Build(...)` or `BuildInBackground(...)` through `BuildOptions.BasicBuildOptions.OnBuildLogs`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	template := e2b.Template(nil).
+		FromBaseImage().
+		RunCmd(`echo "hello"`)
+
+	logger := e2b.BuildLogger(func(entry *e2b.LogEntry) {
+		switch entry.Level {
+		case e2b.LogEntryLevel("error"):
+			log.Printf("build error: %s\n", entry.Message)
+		default:
+			log.Println(entry.String())
+		}
+	})
+
+	_, _ = e2b.Build(ctx, template, "docs-template", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			OnBuildLogs: logger,
+		},
+	})
+}
+```
+
+The build flow can emit:
+
+- SDK lifecycle messages such as `Build started`, `Starting building...`, and `Build finished`
+- upload progress messages such as `Uploaded 'src'`
+- control-plane build logs returned by `GetBuildStatus(...)`
+
+## DefaultBuildLogger
+
+`DefaultBuildLogger()` returns a ready-to-use `BuildLogger`.
+
+```go
+package main
+
+import (
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	logger := e2b.DefaultBuildLogger()
+
+	logger(&e2b.LogEntry{
+		Level:   e2b.LogEntryLevel("info"),
+		Message: "Uploaded 'src'\n",
+	})
+}
+```
+
+Current behavior:
+
+- debug entries are ignored
+- ANSI escape sequences are removed
+- trailing newlines are trimmed from `Message`
+- output is printed as `[level] message`
+
+So the example above prints:
+
+```text
+[info] Uploaded 'src'
+```
+
+If you need debug output or custom formatting, provide your own `BuildLogger` instead of `DefaultBuildLogger()`.

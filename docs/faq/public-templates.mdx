@@ -1,0 +1,28 @@
+---
+title: "Can I make a template public so other teams can use it?"
+sidebarTitle: Public templates
+---
+
+# Can I make a template public so other teams can use it?
+
+Yes. Template publishing is managed through the dashboard or CLI. Once a template is public, other teams can create sandboxes from it by using the namespaced template name.
+
+## Use a public template from Go
+
+In Go, pass the full `team-slug/template-name` form to `Create(...)`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	_, _ = e2b.Create(context.Background(), "your-team-slug/template-name", nil)
+}
+```
+
+Publishing and unpublishing are currently dashboard or CLI actions rather than Go SDK helpers.

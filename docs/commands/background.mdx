@@ -1,0 +1,105 @@
+---
+title: "Run Commands in Background"
+sidebarTitle: Run Commands in Background
+description: "Start background commands in a Go SDK sandbox and manage them through CommandHandle."
+---
+
+# Run Commands in Background
+
+To run a command in the background, set `Background: true` in `e2b.CommandStartOpts`. In Go, that changes the return value of `Run(...)` from `*e2b.CommandResult` to `*e2b.CommandHandle`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Create(ctx, "", nil)
+
+	execution, _ := sandbox.Commands.Run(ctx, "echo hello; sleep 10; echo world", &e2b.CommandStartOpts{
+		Background: true,
+		OnStdout: func(data e2b.Stdout) {
+			_ = data
+		},
+	})
+
+	command := execution.(*e2b.CommandHandle)
+
+	state := command.State()
+	_ = state.Stdout
+	_ = state.Stderr
+	_ = state.ExitCode
+	_ = state.Error
+
+	_, _ = command.Kill()
+}
+```
+
+## Wait for the process
+
+Use `Wait()` when you want the final command result.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Connect(ctx, "sbx_123", nil)
+
+	execution, _ := sandbox.Commands.Run(ctx, "sleep 1 && echo done", &e2b.CommandStartOpts{
+		Background: true,
+	})
+	handle := execution.(*e2b.CommandHandle)
+
+	result, err := handle.Wait()
+	var exitErr *e2b.CommandExitError
+	_ = errors.As(err, &exitErr)
+
+	_ = result
+}
+```
+
+If the process exits with a non-zero status, `Wait()` returns `*e2b.CommandExitError`.
+
+## Reconnect or kill later
+
+You can reconnect to running processes and kill them through `sandbox.Commands`.
+
+```go
+package main
+
+import (
+	"context"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	sandbox, _ := e2b.Connect(ctx, "sbx_123", nil)
+
+	processes, _ := sandbox.Commands.List(ctx, nil)
+	if len(processes) == 0 {
+		return
+	}
+
+	handle, _ := sandbox.Commands.Connect(ctx, processes[0].Pid, nil)
+	if handle != nil {
+		handle.Disconnect()
+	}
+
+	_, _ = sandbox.Commands.Kill(ctx, processes[0].Pid, nil)
+}
+```

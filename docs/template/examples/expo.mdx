@@ -1,0 +1,75 @@
+---
+title: "Expo app"
+description: "Build an Expo web app template with Node.js."
+---
+
+# Expo app
+
+This example bootstraps an Expo app during the template build and starts the development server when the sandbox boots.
+
+## Template definition
+
+```go
+package main
+
+import e2b "github.com/superduck-ai/e2b-go-sdk"
+
+var template = e2b.Template(nil).
+	FromNodeImage().
+	SetWorkdir("/home/user/expo-app").
+	RunCmd("npx create-expo-app@latest . --yes").
+	RunCmd("mv /home/user/expo-app/* /home/user/ && rm -rf /home/user/expo-app").
+	SetWorkdir("/home/user").
+	SetStartCmd("npx expo start --web --port 8081", e2b.WaitForURL("http://127.0.0.1:8081"))
+```
+
+## Build
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	buildInfo, err := e2b.Build(context.Background(), template, "expo-app", &e2b.BuildOptions{
+		BasicBuildOptions: e2b.BasicBuildOptions{
+			CpuCount:    4,
+			MemoryMB:    8192,
+			OnBuildLogs: e2b.DefaultBuildLogger(),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println(buildInfo.TemplateID)
+}
+```
+
+## Create a sandbox and open the app
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	sandbox, err := e2b.Create(context.Background(), "expo-app", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Println("Expo URL:", "https://"+sandbox.GetHost(8081))
+}
+```

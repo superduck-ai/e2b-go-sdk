@@ -1,0 +1,184 @@
+---
+title: "Error Handling"
+description: "Handle template build and validation errors in the Go SDK."
+---
+
+# Error Handling
+
+Template APIs in the Go SDK return ordinary `error` values. Unlike the JS/Python docs, Go callers inspect the error chain with `errors.As(...)`.
+
+Template-related flows can surface:
+
+- `*e2b.AuthenticationError`
+- `*e2b.GitAuthError`
+- `*e2b.TemplateError`
+- `*e2b.BuildError`
+- `*e2b.FileUploadError`
+
+## Go-specific behavior
+
+- `Build(...)`, `BuildInBackground(...)`, `GetBuildStatus(...)`, `Exists(...)`, `AssignTags(...)`, and `RemoveTags(...)` return `error`
+- `FileUploadError` also matches `BuildError`
+- `BuildError` may include `CallerTrace`
+- some builder validations fail immediately by panicking with `*e2b.BuildError` instead of returning an error later
+
+## Match template build errors
+
+Use `errors.As(...)` to distinguish authentication problems, upload failures, and build failures.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+	template := e2b.Template(nil).FromBaseImage()
+
+	_, err := e2b.Build(ctx, template, "my-template", nil)
+	if err == nil {
+		return
+	}
+
+	var authErr *e2b.AuthenticationError
+	var uploadErr *e2b.FileUploadError
+	var buildErr *e2b.BuildError
+
+	switch {
+	case errors.As(err, &authErr):
+		log.Printf("authentication failed: %s\n", authErr.Message)
+	case errors.As(err, &uploadErr):
+		log.Printf("file upload failed: %s\n", uploadErr.Message)
+	case errors.As(err, &buildErr):
+		log.Printf("build failed: %s\n", buildErr.Message)
+	default:
+		log.Printf("unexpected template error: %v\n", err)
+	}
+}
+```
+
+`FileUploadError` unwraps to `BuildError`, so one error can match both levels.
+
+## Inspect caller trace
+
+When a build fails on a specific template step, `BuildError.CallerTrace` can tell you which builder call site produced the failing step.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	_, err := e2b.Build(ctx, e2b.Template(nil).FromTemplate("this-template-does-not-exist"), "my-template", nil)
+	if err == nil {
+		return
+	}
+
+	var buildErr *e2b.BuildError
+	if errors.As(err, &buildErr) {
+		log.Printf("build failed: %s\n", buildErr.Message)
+		if buildErr.CallerTrace != "" {
+			log.Printf("caller trace:\n%s\n", buildErr.CallerTrace)
+		}
+	}
+}
+```
+
+This is especially useful for:
+
+- failed remote template bases
+- failed build steps returned by the control plane
+- local file hashing or upload failures tied to a `Copy(...)` call
+
+## Handle template helper validation errors
+
+Some template helper APIs return `*e2b.TemplateError` when the input shape is invalid.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	_, err := e2b.AssignTags(ctx, "tmpl:latest", 123, nil)
+	if err == nil {
+		return
+	}
+
+	var templateErr *e2b.TemplateError
+	if errors.As(err, &templateErr) {
+		log.Printf("template validation failed: %s\n", templateErr.Message)
+	}
+}
+```
+
+Examples of current validation that can return `TemplateError`:
+
+- `Build(...)` or `BuildInBackground(...)` without a template name or legacy alias
+- `GetBuildStatus(...)` with `nil` `BuildInfo`
+- `AssignTags(...)` or `RemoveTags(...)` with a tags value that is not `string` or `[]string`
+
+## Recover from immediate builder validation failures
+
+Some template-builder methods validate local input immediately and panic with `*e2b.BuildError`. For example, `Copy(...)` rejects absolute paths and `..` escapes in the source path.
+
+```go
+package main
+
+import (
+	"errors"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+)
+
+func main() {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+
+		err, ok := recovered.(error)
+		if !ok {
+			panic(recovered)
+		}
+
+		var buildErr *e2b.BuildError
+		if errors.As(err, &buildErr) {
+			log.Printf("builder validation failed: %s\n", buildErr.Message)
+			return
+		}
+
+		panic(recovered)
+	}()
+
+	e2b.Template(nil).FromBaseImage().Copy("/absolute/path", "/app", nil)
+}
+```
+
+This pattern is mainly useful for wrappers, tooling, or tests. In ordinary application code, the simpler approach is to avoid invalid local paths up front.
+
+For the full exported error surface, see the [Go SDK Errors reference](/docs/sdk-reference/go-sdk/errors).

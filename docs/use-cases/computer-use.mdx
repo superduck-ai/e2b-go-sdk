@@ -1,0 +1,44 @@
+---
+title: "Computer use"
+description: "Build desktop-control agents with the E2B Desktop product line."
+icon: "desktop"
+---
+
+# Computer use
+
+Computer-use agents act on a graphical desktop by taking screenshots, clicking, typing, and scrolling.
+
+That capability is not part of the Go SDK in this repository. It belongs to the separate E2B Desktop product line, which provides desktop-specific APIs such as:
+
+- screen capture
+- mouse movement and clicks
+- keyboard input
+- desktop streaming
+
+## How this relates to the Go SDK
+
+The Go SDK in this repository focuses on:
+
+- sandbox lifecycle
+- commands
+- filesystem
+- Git
+- templates
+- networking and MCP
+
+If your workflow needs graphical desktop control rather than terminal and filesystem automation, use the dedicated Desktop SDK or service instead of the APIs documented here.
+
+## Recommended split
+
+- Use this Go SDK for code execution, build environments, Git workflows, and backend sandbox orchestration.
+- Use the desktop-specific E2B product for GUI automation and computer-use agents.
+
+## Practical architecture
+
+A common system design is:
+
+1. orchestrate tasks, files, and agent state from your Go backend
+2. delegate graphical actions to a desktop-specific runtime
+3. feed screenshots or action results back into your orchestration layer
+
+That keeps the separation between terminal-based sandbox automation and GUI-based computer-use automation clear.
