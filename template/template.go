@@ -17,18 +17,19 @@ import (
 )
 
 type TemplateBase struct {
-	baseImage      string
-	baseTemplate   string
-	registryConfig *registryConfigPayload
-	startCmd       string
-	readyCmd       string
-	force          bool
-	forceNextLayer bool
-	instructions   []Instruction
-	callerTraces   []string
-	callerEnabled  bool
-	callerOverride string
-	options        *TemplateOptions
+	baseImage               string
+	baseTemplate            string
+	registryConfig          *registryConfigPayload
+	startCmd                string
+	readyCmd                string
+	force                   bool
+	forceNextLayer          bool
+	instructions            []Instruction
+	callerTraces            []string
+	instructionCallerTraces []string
+	callerEnabled           bool
+	callerOverride          string
+	options                 *TemplateOptions
 }
 
 const defaultTemplateRequestTimeoutMs = 60000
@@ -204,7 +205,7 @@ func (t *TemplateBase) Copy(src any, dest string, opts ...any) *TemplateBase {
 			ResolveSymlinks: resolveSymlinks,
 		})
 	}
-	t.collectCallerTrace()
+	t.collectInstructionCallerTrace()
 	return t
 }
 
@@ -294,19 +295,19 @@ func (t *TemplateBase) RunCmd(command any, opts ...any) *TemplateBase {
 		args = append(args, user)
 	}
 	t.instructions = append(t.instructions, Instruction{Type: InstructionRun, Args: args, Force: force})
-	t.collectCallerTrace()
+	t.collectInstructionCallerTrace()
 	return t
 }
 
 func (t *TemplateBase) SetWorkdir(workdir string) *TemplateBase {
 	t.instructions = append(t.instructions, Instruction{Type: InstructionWorkdir, Args: []string{workdir}, Force: t.forceNextLayer})
-	t.collectCallerTrace()
+	t.collectInstructionCallerTrace()
 	return t
 }
 
 func (t *TemplateBase) SetUser(user string) *TemplateBase {
 	t.instructions = append(t.instructions, Instruction{Type: InstructionUser, Args: []string{user}, Force: t.forceNextLayer})
-	t.collectCallerTrace()
+	t.collectInstructionCallerTrace()
 	return t
 }
 
@@ -454,7 +455,7 @@ func (t *TemplateBase) SetEnvs(envs map[string]string) *TemplateBase {
 		args = append(args, k, envs[k])
 	}
 	t.instructions = append(t.instructions, Instruction{Type: InstructionEnv, Args: args, Force: t.forceNextLayer})
-	t.collectCallerTrace()
+	t.collectInstructionCallerTrace()
 	return t
 }
 
@@ -513,16 +514,32 @@ func (t *TemplateBase) callerTracesList() []string {
 	return append([]string{}, t.callerTraces...)
 }
 
+func (t *TemplateBase) currentCallerTrace() string {
+	trace := t.callerOverride
+	if trace == "" {
+		trace = captureTemplateCallerTrace()
+	}
+	return trace
+}
+
 func (t *TemplateBase) collectCallerTrace() *TemplateBase {
 	if !t.callerEnabled {
 		return t
 	}
 
-	trace := t.callerOverride
-	if trace == "" {
-		trace = captureTemplateCallerTrace()
-	}
+	trace := t.currentCallerTrace()
 	t.callerTraces = append(t.callerTraces, trace)
+	return t
+}
+
+func (t *TemplateBase) collectInstructionCallerTrace() *TemplateBase {
+	if !t.callerEnabled {
+		return t
+	}
+
+	trace := t.currentCallerTrace()
+	t.callerTraces = append(t.callerTraces, trace)
+	t.instructionCallerTraces = append(t.instructionCallerTraces, trace)
 	return t
 }
 
@@ -554,11 +571,10 @@ func (t *TemplateBase) withCallerOverride(trace string, fn func()) {
 }
 
 func (t *TemplateBase) instructionCallerTrace(index int) string {
-	traceIndex := index + 1
-	if traceIndex < 0 || traceIndex >= len(t.callerTraces) {
+	if index < 0 || index >= len(t.instructionCallerTraces) {
 		return ""
 	}
-	return t.callerTraces[traceIndex]
+	return t.instructionCallerTraces[index]
 }
 
 func templateCallerSkipFiles() map[string]struct{} {
@@ -691,6 +707,10 @@ func (t *TemplateBase) serialize() triggerBuildTemplate {
 }
 
 func (t *TemplateBase) serializeWithSteps(steps []Instruction) triggerBuildTemplate {
+	return t.serializeWithStepsAndForce(steps, t.force)
+}
+
+func (t *TemplateBase) serializeWithStepsAndForce(steps []Instruction, force bool) triggerBuildTemplate {
 	payloads := make([]instructionPayload, len(steps))
 	for i, inst := range steps {
 		payloads[i] = instructionPayload{
@@ -707,7 +727,7 @@ func (t *TemplateBase) serializeWithSteps(steps []Instruction) triggerBuildTempl
 		StartCmd:          t.startCmd,
 		ReadyCmd:          t.readyCmd,
 		Steps:             payloads,
-		Force:             t.force,
+		Force:             force,
 		FromImage:         t.baseImage,
 		FromTemplate:      t.baseTemplate,
 		FromImageRegistry: t.registryConfig,
@@ -1209,10 +1229,6 @@ func logBuildMessage(logger BuildLogger, level LogEntryLevel, format string, arg
 }
 
 func runTemplateBuild(ctx context.Context, client *api.ApiClient, template *TemplateBase, name string, opts *BuildOptions, logger BuildLogger) (*BuildInfo, error) {
-	if opts.SkipCache {
-		template.force = true
-	}
-
 	tagsMsg := ""
 	if len(opts.Tags) > 0 {
 		tagsMsg = " with tags " + strings.Join(opts.Tags, ", ")
@@ -1247,7 +1263,13 @@ func runTemplateBuild(ctx context.Context, client *api.ApiClient, template *Temp
 	logBuildMessage(logger, LogLevelInfo, "All file uploads completed")
 	logBuildMessage(logger, LogLevelInfo, "Starting building...")
 
-	err = triggerBuild(ctx, client, buildInfo.TemplateID, buildInfo.BuildID, template.serializeWithSteps(steps))
+	err = triggerBuild(
+		ctx,
+		client,
+		buildInfo.TemplateID,
+		buildInfo.BuildID,
+		template.serializeWithStepsAndForce(steps, template.force || opts.SkipCache),
+	)
 	if err != nil {
 		return nil, err
 	}

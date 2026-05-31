@@ -189,6 +189,8 @@ func (s *Sandbox) Connect(ctx context.Context, opts *SandboxConnectOpts) (*Sandb
 	if opts != nil {
 		*mergedOpts = *opts
 	}
+	ctx, cancel := shared.MergeContexts(ctx, mergedOpts.Signal)
+	defer cancel()
 
 	connConfig := s.resolveConnectionConfig(&mergedOpts.ConnectionOpts)
 	mergedOpts.ConnectionOpts = ConnectionOpts{
@@ -198,6 +200,7 @@ func (s *Sandbox) Connect(ctx context.Context, opts *SandboxConnectOpts) (*Sandb
 		ApiUrl:           connConfig.ApiUrl,
 		SandboxUrl:       connConfig.SandboxUrl,
 		Debug:            boolRef(connConfig.Debug),
+		Signal:           mergedOpts.Signal,
 		RequestTimeoutMs: intPtr(connConfig.RequestTimeoutMs),
 		Logger:           connConfig.Logger,
 		Headers:          connConfig.Headers,

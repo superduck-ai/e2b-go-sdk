@@ -139,12 +139,12 @@ func MergeContexts(primary context.Context, secondary context.Context) (context.
 	}
 
 	if err := primary.Err(); err != nil {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(primary)
 		cancel()
 		return ctx, func() {}
 	}
 	if err := secondary.Err(); err != nil {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(primary)
 		cancel()
 		return ctx, func() {}
 	}
@@ -165,9 +165,9 @@ func MergeContexts(primary context.Context, secondary context.Context) (context.
 		cancel context.CancelFunc
 	)
 	if hasDeadline {
-		ctx, cancel = context.WithDeadline(context.Background(), deadline)
+		ctx, cancel = context.WithDeadline(primary, deadline)
 	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		ctx, cancel = context.WithCancel(primary)
 	}
 
 	go func() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2187,6 +2188,76 @@ func TestBuildOptionSkipCacheMarksWholeTemplateForBuildInBackground(t *testing.T
 
 	if !triggerBody.Force {
 		t.Fatalf("expected BuildOptions.SkipCache to force whole template build, got %#v", triggerBody)
+	}
+}
+
+func TestBuildOptionSkipCacheDoesNotStickAcrossReusedTemplates(t *testing.T) {
+	var triggerBodies []triggerBuildTemplate
+	buildNumber := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/templates":
+			buildNumber++
+			if err := json.NewEncoder(w).Encode(requestBuildResponse{
+				TemplateID: fmt.Sprintf("tmpl-%d", buildNumber),
+				BuildID:    fmt.Sprintf("bld-%d", buildNumber),
+			}); err != nil {
+				t.Fatalf("failed to encode create response: %v", err)
+			}
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v2/templates/"):
+			var triggerBody triggerBuildTemplate
+			if err := json.NewDecoder(r.Body).Decode(&triggerBody); err != nil {
+				t.Fatalf("failed to decode trigger body: %v", err)
+			}
+			triggerBodies = append(triggerBodies, triggerBody)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	timeout := 1000
+	template := Template(nil).FromBaseImage()
+	for _, skipCache := range []bool{true, false} {
+		_, err := BuildInBackground(context.Background(), template, "tmpl:v1", &BuildOptions{
+			BasicBuildOptions: BasicBuildOptions{
+				SkipCache: skipCache,
+				CpuCount:  1,
+				MemoryMB:  1024,
+			},
+			ApiKey:           "e2b_0000000000000000000000000000000000000000",
+			ApiUrl:           server.URL,
+			RequestTimeoutMs: &timeout,
+		})
+		if err != nil {
+			t.Fatalf("BuildInBackground(skipCache=%t) returned error: %v", skipCache, err)
+		}
+	}
+
+	if len(triggerBodies) != 2 {
+		t.Fatalf("expected 2 trigger builds, got %d", len(triggerBodies))
+	}
+	if !triggerBodies[0].Force {
+		t.Fatalf("expected first build to force cache bypass, got %#v", triggerBodies[0])
+	}
+	if triggerBodies[1].Force {
+		t.Fatalf("expected second build to preserve cache usage, got %#v", triggerBodies[1])
+	}
+}
+
+func TestInstructionsWithHashesPreservesCallerTraceForImplicitBaseTemplate(t *testing.T) {
+	template := Template(&TemplateOptions{FileContextPath: t.TempDir()}).
+		Copy("missing.txt", "/app/missing.txt")
+
+	_, err := template.instructionsWithHashes()
+	var buildErr *shared.BuildError
+	if !errors.As(err, &buildErr) {
+		t.Fatalf("expected BuildError, got %T %v", err, err)
+	}
+	if !strings.Contains(buildErr.CallerTrace, "TestInstructionsWithHashesPreservesCallerTraceForImplicitBaseTemplate") {
+		t.Fatalf("expected implicit-base instruction caller trace, got %q", buildErr.CallerTrace)
 	}
 }
 

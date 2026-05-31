@@ -84,3 +84,18 @@ func TestMergeContextsCancelFuncCancelsMergedContext(t *testing.T) {
 		t.Fatalf("expected cancel func to cancel merged context, got %v", ctx.Err())
 	}
 }
+
+func TestMergeContextsPreservesPrimaryContextValues(t *testing.T) {
+	type contextKey string
+
+	primary := context.WithValue(context.Background(), contextKey("trace_id"), "trace-123")
+	secondary, cancelSecondary := context.WithCancel(context.Background())
+	defer cancelSecondary()
+
+	ctx, cancel := MergeContexts(primary, secondary)
+	defer cancel()
+
+	if got := ctx.Value(contextKey("trace_id")); got != "trace-123" {
+		t.Fatalf("expected merged context to preserve primary values, got %#v", got)
+	}
+}

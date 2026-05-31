@@ -666,6 +666,28 @@ func TestSandboxApisHonorSignalContext(t *testing.T) {
 			}{RequestTimeoutMs: intPtr(1000), Signal: signal})
 		})
 	})
+
+	t.Run("instance_connect", func(t *testing.T) {
+		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
+			sandbox := &Sandbox{
+				SandboxID: "sbx-1",
+				connectionConfig: &ConnectionConfig{
+					ApiKey:           "e2b_0000000000000000000000000000000000000000",
+					ApiUrl:           apiURL,
+					Domain:           "e2b.app",
+					RequestTimeoutMs: 1000,
+					Headers:          map[string]string{},
+				},
+			}
+			_, err := sandbox.Connect(context.Background(), &SandboxConnectOpts{
+				ConnectionOpts: ConnectionOpts{
+					RequestTimeoutMs: intPtr(1000),
+					Signal:           signal,
+				},
+			})
+			return err
+		})
+	})
 }
 
 func TestListSandboxSnapshotsIgnoresOverriddenSandboxID(t *testing.T) {
