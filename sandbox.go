@@ -822,6 +822,10 @@ func newSandboxFromResponse(resp *api.SandboxResponse, connConfig *ConnectionCon
 
 	envdApiUrl := connConfig.GetSandboxUrl(resp.SandboxID, sandboxDomain, envdPort)
 	envdDirectUrl := connConfig.GetSandboxDirectUrl(resp.SandboxID, sandboxDomain, envdPort)
+	if strings.TrimSpace(resp.EnvdURL) != "" {
+		envdApiUrl = strings.TrimRight(resp.EnvdURL, "/")
+		envdDirectUrl = envdApiUrl
+	}
 	sandboxHeaders := sandboxTransportHeaders(resp.SandboxID, envdPort, resp.EnvdAccessToken, connConfig.Headers)
 	envdHeaders := sandboxHTTPHeaders(resp.SandboxID, envdPort, resp.EnvdAccessToken, connConfig.Headers)
 

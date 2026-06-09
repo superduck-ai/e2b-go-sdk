@@ -66,6 +66,7 @@ type SandboxResponse struct {
 	State               string             `json:"state"`
 	CpuCount            int                `json:"cpuCount"`
 	MemoryMB            int                `json:"memoryMB"`
+	EnvdURL             string             `json:"envdURL,omitempty"`
 	EnvdVersion         string             `json:"envdVersion"`
 	AllowInternetAccess *bool              `json:"allowInternetAccess,omitempty"`
 	Domain              string             `json:"domain,omitempty"`

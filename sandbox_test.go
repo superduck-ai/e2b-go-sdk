@@ -3671,6 +3671,27 @@ func TestNewSandboxFromResponseUsesStableApiUrlAndDirectFileUrlForSupportedDomai
 	}
 }
 
+func TestNewSandboxFromResponsePrefersEnvdURL(t *testing.T) {
+	sandbox := newSandboxFromResponse(&api.SandboxResponse{
+		SandboxID:   "sbx-1",
+		Domain:      "e2b.app",
+		EnvdURL:     "http://127.0.0.1:50123/",
+		EnvdVersion: "1.0.0",
+	}, &ConnectionConfig{
+		Domain:           "e2b.app",
+		SandboxUrl:       "http://127.0.0.1:49984",
+		RequestTimeoutMs: 1000,
+		Headers:          map[string]string{},
+	})
+
+	if sandbox.envdApiUrl != "http://127.0.0.1:50123" {
+		t.Fatalf("expected envd API URL from response, got %q", sandbox.envdApiUrl)
+	}
+	if sandbox.envdDirectUrl != "http://127.0.0.1:50123" {
+		t.Fatalf("expected envd direct URL from response, got %q", sandbox.envdDirectUrl)
+	}
+}
+
 func TestNewSandboxFromResponseKeepsPerSandboxApiUrlOutsideSupportedDomains(t *testing.T) {
 	sandbox := newSandboxFromResponse(&api.SandboxResponse{
 		SandboxID:   "sbx-1",
