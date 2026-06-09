@@ -8,6 +8,8 @@ import (
 
 type TemplateBase = roottmpl.TemplateBase
 type TemplateFromImage = roottmpl.TemplateFromImage
+type TemplateInfo = roottmpl.TemplateInfo
+type ListTemplatesOpts = roottmpl.ListTemplatesOpts
 type TemplateBuilder = roottmpl.TemplateBuilder
 type TemplateFinal = roottmpl.TemplateFinal
 type TemplateClass = roottmpl.TemplateClass
@@ -133,4 +135,8 @@ func NewLogEntryEnd(message string) *LogEntryEnd {
 
 func DefaultBuildLogger() BuildLogger {
 	return roottmpl.DefaultBuildLogger()
+}
+
+func ListTemplates(ctx context.Context, opts *ListTemplatesOpts) ([]TemplateInfo, error) {
+	return roottmpl.ListTemplates(ctx, opts)
 }
