@@ -40,6 +40,9 @@ func TestBuildApiClientConfigAllowsExplicitZeroRequestTimeout(t *testing.T) {
 }
 
 func TestNewVolumeConnectionConfigUsesApiDomainByDefault(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
+
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{
 		Domain: "example.test",
 	})
@@ -50,6 +53,9 @@ func TestNewVolumeConnectionConfigUsesApiDomainByDefault(t *testing.T) {
 }
 
 func TestNewVolumeConnectionConfigUsesDebugApiURL(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
+
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{
 		Debug: boolPtr(true),
 	})
@@ -61,6 +67,7 @@ func TestNewVolumeConnectionConfigUsesDebugApiURL(t *testing.T) {
 
 func TestNewVolumeConnectionConfigPreservesExplicitFalseDebugOverEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
 	t.Setenv("E2B_DEBUG", "true")
 
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{
@@ -78,6 +85,7 @@ func TestNewVolumeConnectionConfigPreservesExplicitFalseDebugOverEnv(t *testing.
 
 func TestNewVolumeConnectionConfigUsesApiUrlFromEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "http://localhost:8080")
+	t.Setenv("E2B_API_URL", "http://localhost:3000")
 
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{})
 
@@ -86,8 +94,20 @@ func TestNewVolumeConnectionConfigUsesApiUrlFromEnv(t *testing.T) {
 	}
 }
 
+func TestNewVolumeConnectionConfigFallsBackToControlPlaneApiUrlEnv(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "http://localhost:3000")
+
+	config := NewVolumeConnectionConfig(&VolumeApiOpts{})
+
+	if config.ApiUrl != "http://localhost:3000" {
+		t.Fatalf("expected volume API URL to fall back to E2B_API_URL, got %q", config.ApiUrl)
+	}
+}
+
 func TestNewVolumeConnectionConfigApiUrlArgsHavePriorityOverEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "http://localhost:1111")
+	t.Setenv("E2B_API_URL", "http://localhost:3000")
 
 	config := NewVolumeConnectionConfig(&VolumeApiOpts{
 		ApiUrl: "http://localhost:8080",
@@ -100,6 +120,7 @@ func TestNewVolumeConnectionConfigApiUrlArgsHavePriorityOverEnv(t *testing.T) {
 
 func TestNewVolumeConnectionConfigUsesDebugApiURLFromEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
 	t.Setenv("E2B_DOMAIN", "")
 	t.Setenv("E2B_DEBUG", "true")
 
@@ -112,6 +133,7 @@ func TestNewVolumeConnectionConfigUsesDebugApiURLFromEnv(t *testing.T) {
 
 func TestNewVolumeConnectionConfigUsesDomainFromEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
 	t.Setenv("E2B_DEBUG", "")
 	t.Setenv("E2B_DOMAIN", "custom.com")
 
@@ -160,14 +182,14 @@ func TestNewVolumeConnectionConfigAllowsHeaderOverrides(t *testing.T) {
 	}
 }
 
-func TestNewVolumeApiClientUsesVolumeApiDefaultsInsteadOfControlPlaneApiURL(t *testing.T) {
+func TestNewVolumeApiClientUsesExplicitApiURL(t *testing.T) {
 	client := newVolumeApiClient("vol-1", "token", &ConnectionOpts{
 		Domain: "example.test",
 		ApiUrl: "https://custom-volume-api.example.test",
 	})
 
-	if client.config.ApiUrl != "https://api.example.test" {
-		t.Fatalf("expected volume client to use volume API default, got %q", client.config.ApiUrl)
+	if client.config.ApiUrl != "https://custom-volume-api.example.test" {
+		t.Fatalf("expected volume client to use explicit API URL, got %q", client.config.ApiUrl)
 	}
 }
 
@@ -200,9 +222,15 @@ func TestCreateExposesJsStyleVolumeMetadataFields(t *testing.T) {
 	if volume.Debug == nil || !*volume.Debug {
 		t.Fatal("expected debug flag to be exported on Volume")
 	}
+	if volume.ApiUrl != server.URL {
+		t.Fatalf("expected apiUrl to be exported on Volume, got %q", volume.ApiUrl)
+	}
 }
 
 func TestResolveClientUsesPersistedVolumeFieldsWhenOptsNil(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
+
 	v := &Volume{
 		VolumeID: "vol-1",
 		Name:     "test-volume",
@@ -226,6 +254,22 @@ func TestResolveClientUsesPersistedVolumeFieldsWhenOptsNil(t *testing.T) {
 	}
 	if client.config.Headers["X-Test"] != "" {
 		t.Fatalf("did not expect inherited create/connect-only headers, got %#v", client.config.Headers)
+	}
+}
+
+func TestResolveClientUsesPersistedApiURL(t *testing.T) {
+	v := &Volume{
+		VolumeID: "vol-1",
+		Name:     "test-volume",
+		Token:    "secret-token",
+		Domain:   "example.test",
+		ApiUrl:   "http://localhost:3000",
+	}
+
+	client := v.resolveClient(nil)
+
+	if client.config.ApiUrl != "http://localhost:3000" {
+		t.Fatalf("expected persisted apiUrl to be used, got %q", client.config.ApiUrl)
 	}
 }
 
@@ -264,10 +308,14 @@ func TestConnectAllowsNilOptsAndExposesJsStyleVolumeMetadataFields(t *testing.T)
 	if volume.Debug == nil || *volume.Debug {
 		t.Fatal("expected debug flag to default to false when opts are nil")
 	}
+	if volume.ApiUrl != server.URL {
+		t.Fatalf("expected apiUrl to fall back to E2B_API_URL, got %q", volume.ApiUrl)
+	}
 }
 
 func TestResolveClientPreservesPersistedExplicitFalseDebugOverEnv(t *testing.T) {
 	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
 	t.Setenv("E2B_DEBUG", "true")
 
 	v := &Volume{
@@ -289,6 +337,9 @@ func TestResolveClientPreservesPersistedExplicitFalseDebugOverEnv(t *testing.T) 
 }
 
 func TestResolveClientAllowsExplicitFalseDebugOverride(t *testing.T) {
+	t.Setenv("E2B_VOLUME_API_URL", "")
+	t.Setenv("E2B_API_URL", "")
+
 	v := &Volume{
 		VolumeID: "vol-1",
 		Name:     "test-volume",

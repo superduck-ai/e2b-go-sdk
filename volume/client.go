@@ -72,6 +72,9 @@ func NewVolumeConnectionConfig(opts *VolumeApiOpts) *VolumeConnectionConfig {
 	if apiUrl == "" {
 		apiUrl = os.Getenv("E2B_VOLUME_API_URL")
 		if apiUrl == "" {
+			apiUrl = os.Getenv("E2B_API_URL")
+		}
+		if apiUrl == "" {
 			if debug {
 				apiUrl = "http://localhost:8080"
 			} else {

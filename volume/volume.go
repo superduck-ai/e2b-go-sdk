@@ -37,6 +37,7 @@ type Volume struct {
 	Token    string
 	Domain   string
 	Debug    *bool
+	ApiUrl   string
 }
 
 type Blob = shared.Blob
@@ -136,6 +137,7 @@ func newVolumeApiClient(volumeID string, token string, opts *ConnectionOpts) *vo
 		Token:            token,
 		Domain:           opts.Domain,
 		Debug:            volumeApiDebugFromConnectionOpts(opts.Debug),
+		ApiUrl:           opts.ApiUrl,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Logger:           opts.Logger,
 		Headers:          opts.Headers,
@@ -187,9 +189,11 @@ func Create(ctx context.Context, name string, opts *ConnectionOpts) (*Volume, er
 		Token:  v.Token,
 		Domain: opts.Domain,
 		Debug:  volumeApiDebugFromConnectionOpts(opts.Debug),
+		ApiUrl: opts.ApiUrl,
 	})
 	v.Domain = config.Domain
 	v.Debug = boolPtr(config.Debug)
+	v.ApiUrl = config.ApiUrl
 	return v, nil
 }
 
@@ -216,9 +220,11 @@ func Connect(ctx context.Context, volumeId string, opts *ConnectionOpts) (*Volum
 		Token:  v.Token,
 		Domain: opts.Domain,
 		Debug:  volumeApiDebugFromConnectionOpts(opts.Debug),
+		ApiUrl: opts.ApiUrl,
 	})
 	v.Domain = config.Domain
 	v.Debug = boolPtr(config.Debug)
+	v.ApiUrl = config.ApiUrl
 	return v, nil
 }
 
@@ -623,6 +629,7 @@ func (v *Volume) resolveClient(opts *VolumeApiOpts) *volumeApiClient {
 		Token:  v.Token,
 		Domain: v.Domain,
 		Debug:  v.Debug,
+		ApiUrl: v.ApiUrl,
 	}
 
 	if opts.Token != "" {
