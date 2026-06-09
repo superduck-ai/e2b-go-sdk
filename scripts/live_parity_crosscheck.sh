@@ -38,7 +38,27 @@ run_with_timeout() {
 
   local exit_code=0
   set +e
-  timeout --foreground "${RUNNER_TIMEOUT_SEC}s" "$@"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "${RUNNER_TIMEOUT_SEC}s" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --foreground "${RUNNER_TIMEOUT_SEC}s" "$@"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$RUNNER_TIMEOUT_SEC" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+cmd = sys.argv[2:]
+
+try:
+    completed = subprocess.run(cmd, timeout=timeout)
+    raise SystemExit(completed.returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+PY
+  else
+    "$@"
+  fi
   exit_code=$?
   set -e
 
