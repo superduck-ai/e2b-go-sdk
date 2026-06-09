@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/joho/godotenv"
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -15,40 +16,48 @@ func TestDocsQuickstartDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/quickstart.mdx aligned with the exported Go SDK
-// sandbox quickstart surface. The closures are compile-only examples and are
-// intentionally never executed.
 func TestDocsQuickstartExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "first-sandbox",
-			fn: func() {
+			fn: func(t *testing.T) {
 				_ = godotenv.Load()
 				ctx := context.Background()
 
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
 				defer sandbox.Kill(context.Background(), nil)
 
 				execution, runErr := sandbox.Commands.Run(ctx, `python3 -c "print('hello world')"`, nil)
+				if !assert.NoError(t, runErr, "failed to run python") {
+					return
+				}
 				result := execution.(*e2b.CommandResult)
 
 				entries, listErr := sandbox.Files.List(ctx, "/", nil)
+				if !assert.NoError(t, listErr, "failed to list /") {
+					return
+				}
 
 				_ = result.Stdout
 				_ = entries
-				_ = runErr
-				_ = listErr
 			},
 		},
 	}
 
 	if got := len(snippets); got != 1 {
 		t.Fatalf("expected 1 quickstart doc snippet, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

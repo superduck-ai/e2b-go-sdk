@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -15,38 +16,41 @@ func TestDocsSandboxCommandsReferenceDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/sdk-reference/go-sdk/sandbox-commands.mdx aligned with
-// the exported Go SDK surface. The closures are compile-only examples and are
-// intentionally never executed.
 func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "foreground-run",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
 				execution, runErr := sandbox.Commands.Run(ctx, "echo hello", nil)
+				if !assert.NoError(t, runErr, "failed to run") {
+					return
+				}
 				result := execution.(*e2b.CommandResult)
 
 				_ = result.ExitCode
 				_ = result.Stdout
 				_ = result.Stderr
-				_ = runErr
 			},
 		},
 		{
 			name: "background-run-and-state",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
@@ -61,9 +65,12 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 						_ = data
 					},
 				})
+				if !assert.NoError(t, runErr, "failed to start bg command") {
+					return
+				}
 				handle := execution.(*e2b.CommandHandle)
-				sendErr := sandbox.Commands.SendStdin(ctx, handle.Pid, []byte("hello\n"), nil)
-				closeErr := sandbox.Commands.CloseStdin(ctx, handle.Pid, nil)
+				assert.NoError(t, sandbox.Commands.SendStdin(ctx, handle.Pid, []byte("hello\n"), nil), "send stdin")
+				assert.NoError(t, sandbox.Commands.CloseStdin(ctx, handle.Pid, nil), "close stdin")
 
 				state := handle.State()
 				_ = state.Stdout
@@ -72,31 +79,31 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 				_ = state.Error
 
 				killed, killErr := handle.Kill()
+				assert.NoError(t, killErr, "kill")
 				_ = killed
 
 				result, waitErr := handle.Wait()
 				var exitErr *e2b.CommandExitError
 				_ = errors.As(waitErr, &exitErr)
-
 				_ = result
-				_ = runErr
-				_ = sendErr
-				_ = closeErr
-				_ = killErr
 			},
 		},
 		{
 			name: "list-and-connect",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
 				processes, listErr := sandbox.Commands.List(ctx, nil)
+				if !assert.NoError(t, listErr, "failed to list") {
+					return
+				}
 				if len(processes) == 0 {
-					_ = listErr
 					return
 				}
 
@@ -115,20 +122,19 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 						_ = data
 					},
 				})
+				assert.NoError(t, connectErr, "failed to connect to command")
 				if handle != nil {
 					handle.Disconnect()
 				}
 
 				killed, killErr := sandbox.Commands.Kill(ctx, processes[0].Pid, nil)
+				assert.NoError(t, killErr, "kill command")
 				_ = killed
-				_ = listErr
-				_ = connectErr
-				_ = killErr
 			},
 		},
 		{
 			name: "pty-size-type",
-			fn: func() {
+			fn: func(t *testing.T) {
 				size := e2b.PtySize{
 					Cols: 80,
 					Rows: 24,
@@ -140,10 +146,12 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 		},
 		{
 			name: "pty",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
@@ -156,32 +164,31 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 						_ = data
 					},
 				})
+				if !assert.NoError(t, createErr, "failed to create pty") {
+					return
+				}
 				if handle != nil {
-					resizeErr := sandbox.Pty.Resize(ctx, handle.Pid, e2b.PtySize{Cols: 100, Rows: 30}, nil)
-					sendErr := sandbox.Pty.SendInput(ctx, handle.Pid, []byte("echo $FOO\n"), nil)
+					assert.NoError(t, sandbox.Pty.Resize(ctx, handle.Pid, e2b.PtySize{Cols: 100, Rows: 30}, nil), "resize")
+					assert.NoError(t, sandbox.Pty.SendInput(ctx, handle.Pid, []byte("echo $FOO\n"), nil), "send input")
 					killed, killErr := sandbox.Pty.Kill(ctx, handle.Pid, nil)
+					assert.NoError(t, killErr, "kill pty")
+					_ = killed
+
 					reconnected, connectErr := sandbox.Pty.Connect(ctx, handle.Pid, &e2b.PtyConnectOpts{
 						OnData: func(data e2b.PtyOutput) {
 							_ = data
 						},
 					})
+					assert.NoError(t, connectErr, "reconnect pty")
 					if reconnected != nil {
 						reconnected.Disconnect()
 					}
-
-					_ = resizeErr
-					_ = sendErr
-					_ = killed
-					_ = killErr
-					_ = connectErr
 				}
-
-				_ = createErr
 			},
 		},
 		{
 			name: "option-shapes",
-			fn: func() {
+			fn: func(t *testing.T) {
 				timeoutMs := 30_000
 				requestTimeoutMs := 15_000
 				signal := context.Background()
@@ -242,5 +249,12 @@ func TestDocsSandboxCommandsReferenceExamplesCompile(t *testing.T) {
 
 	if got := len(snippets); got != 6 {
 		t.Fatalf("expected 6 commands doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

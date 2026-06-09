@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/joho/godotenv"
 )
 
 var (
@@ -26,6 +28,8 @@ func TestMain(m *testing.M) {
 	if err := os.Chdir(repoRootDir); err != nil {
 		panic(err)
 	}
+
+	_ = godotenv.Load(filepath.Join(repoRootDir, ".env"))
 
 	os.Exit(m.Run())
 }

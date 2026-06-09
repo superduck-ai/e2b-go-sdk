@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -14,27 +15,30 @@ func TestDocsFilesystemInfoDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/filesystem/info.mdx aligned with the exported Go SDK
-// file-info surface. The closures are compile-only examples and are
-// intentionally never executed.
 func TestDocsFilesystemInfoExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "file-info",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
-				_, _ = sandbox.Files.Write(ctx, "test_file.txt", "Hello, world!", nil)
-				info, _ := sandbox.Files.GetInfo(ctx, "test_file.txt", nil)
-
-				if info != nil {
+				_, writeErr := sandbox.Files.Write(ctx, "test_file.txt", "Hello, world!", nil)
+				if !assert.NoError(t, writeErr, "failed to write file") {
+					return
+				}
+				info, infoErr := sandbox.Files.GetInfo(ctx, "test_file.txt", nil)
+				if !assert.NoError(t, infoErr, "failed to get file info") {
+					return
+				}
+				if assert.NotNil(t, info, "info should not be nil") {
 					_ = info.Name
 					_ = info.Type
 					_ = info.Path
@@ -50,17 +54,23 @@ func TestDocsFilesystemInfoExamplesCompile(t *testing.T) {
 		},
 		{
 			name: "directory-info",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
-				_, _ = sandbox.Files.MakeDir(ctx, "test_dir", nil)
-				info, _ := sandbox.Files.GetInfo(ctx, "test_dir", nil)
-
-				if info != nil {
+				_, mkErr := sandbox.Files.MakeDir(ctx, "test_dir", nil)
+				if !assert.NoError(t, mkErr, "failed to make dir") {
+					return
+				}
+				info, infoErr := sandbox.Files.GetInfo(ctx, "test_dir", nil)
+				if !assert.NoError(t, infoErr, "failed to get dir info") {
+					return
+				}
+				if assert.NotNil(t, info, "info should not be nil") {
 					_ = info.Name
 					_ = info.Type
 					_ = info.Path
@@ -71,5 +81,12 @@ func TestDocsFilesystemInfoExamplesCompile(t *testing.T) {
 
 	if got := len(snippets); got != 2 {
 		t.Fatalf("expected 2 filesystem info doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

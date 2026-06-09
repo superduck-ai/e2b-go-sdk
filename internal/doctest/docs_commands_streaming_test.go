@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -14,22 +15,20 @@ func TestDocsCommandsStreamingDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/commands/streaming.mdx aligned with the exported Go SDK
-// streaming-command surface. The closures are compile-only examples and are
-// intentionally never executed.
 func TestDocsCommandsStreamingExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "stream-foreground-command",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				execution, runErr := sandbox.Commands.Run(ctx, "echo hello; sleep 1; echo world", &e2b.CommandStartOpts{
 					OnStdout: func(data e2b.Stdout) {
@@ -39,19 +38,23 @@ func TestDocsCommandsStreamingExamplesCompile(t *testing.T) {
 						_ = data
 					},
 				})
+				if !assert.NoError(t, runErr, "failed to run streaming command") {
+					return
+				}
 
 				result := execution.(*e2b.CommandResult)
 				_ = result.Stdout
 				_ = result.Stderr
-				_ = runErr
 			},
 		},
 		{
 			name: "stream-background-command",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect to sandbox") {
 					return
 				}
 
@@ -64,6 +67,9 @@ func TestDocsCommandsStreamingExamplesCompile(t *testing.T) {
 						_ = data
 					},
 				})
+				if !assert.NoError(t, runErr, "failed to start background streaming command") {
+					return
+				}
 
 				handle := execution.(*e2b.CommandHandle)
 				state := handle.State()
@@ -71,12 +77,18 @@ func TestDocsCommandsStreamingExamplesCompile(t *testing.T) {
 				_ = state.Stdout
 				_ = state.Stderr
 				_, _ = handle.Kill()
-				_ = runErr
 			},
 		},
 	}
 
 	if got := len(snippets); got != 2 {
 		t.Fatalf("expected 2 commands streaming doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

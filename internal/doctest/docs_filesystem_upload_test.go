@@ -6,8 +6,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -17,41 +19,48 @@ func TestDocsFilesystemUploadDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/filesystem/upload.mdx aligned with the exported Go SDK
-// upload surface. The closures are compile-only examples and are intentionally
-// never executed.
 func TestDocsFilesystemUploadExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "upload-single-file",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
+					return
+				}
+				defer sandbox.Kill(context.Background(), nil)
+
+				localPath := filepath.Join(t.TempDir(), "upload.txt")
+				if !assert.NoError(t, os.WriteFile(localPath, []byte("file content"), 0o644), "failed to seed local file") {
 					return
 				}
 
-				content, readErr := os.ReadFile("/local/path")
-				_, writeErr := sandbox.Files.Write(ctx, "/path/in/sandbox", content, nil)
-
-				_ = readErr
-				_ = writeErr
+				content, readErr := os.ReadFile(localPath)
+				if !assert.NoError(t, readErr, "failed to read local file") {
+					return
+				}
+				_, writeErr := sandbox.Files.Write(ctx, "/home/user/upload-target.txt", content, nil)
+				assert.NoError(t, writeErr, "failed to upload to sandbox")
 			},
 		},
 		{
 			name: "upload-with-signed-url",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires Secure sandbox + reachable signed URL endpoint")
+
 				ctx := context.Background()
 				secure := true
 				sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
 					Secure: &secure,
 				})
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create secure sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				expirationMs := 10_000
 				publicUploadURL, urlErr := sandbox.UploadUrl("demo.txt", &struct {
@@ -60,6 +69,9 @@ func TestDocsFilesystemUploadExamplesCompile(t *testing.T) {
 				}{
 					UseSignatureExpiration: &expirationMs,
 				})
+				if !assert.NoError(t, urlErr, "failed to obtain signed upload URL") {
+					return
+				}
 
 				var body bytes.Buffer
 				writer := multipart.NewWriter(&body)
@@ -68,23 +80,28 @@ func TestDocsFilesystemUploadExamplesCompile(t *testing.T) {
 				_ = writer.Close()
 
 				req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, publicUploadURL, &body)
-				if req != nil {
-					req.Header.Set("Content-Type", writer.FormDataContentType())
+				if !assert.NoError(t, reqErr, "failed to build upload request") {
+					return
 				}
+				req.Header.Set("Content-Type", writer.FormDataContentType())
 
 				resp, doErr := http.DefaultClient.Do(req)
-				if resp != nil {
-					resp.Body.Close()
+				if !assert.NoError(t, doErr, "failed to POST to signed URL") {
+					return
 				}
-
-				_ = urlErr
-				_ = reqErr
-				_ = doErr
+				resp.Body.Close()
 			},
 		},
 	}
 
 	if got := len(snippets); got != 2 {
 		t.Fatalf("expected 2 filesystem upload doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -16,42 +18,52 @@ func TestDocsFilesystemDownloadDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/filesystem/download.mdx aligned with the exported Go
-// SDK download surface. The closures are compile-only examples and are
-// intentionally never executed.
 func TestDocsFilesystemDownloadExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "download-directly",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
+					return
+				}
+				defer sandbox.Kill(context.Background(), nil)
+
+				sandboxPath := "/home/user/download-source.txt"
+				_, prepErr := sandbox.Files.Write(ctx, sandboxPath, "file content", nil)
+				if !assert.NoError(t, prepErr, "failed to prepare sandbox file") {
 					return
 				}
 
-				contentValue, readErr := sandbox.Files.Read(ctx, "/path/in/sandbox", nil)
+				contentValue, readErr := sandbox.Files.Read(ctx, sandboxPath, nil)
+				if !assert.NoError(t, readErr, "failed to read sandbox file") {
+					return
+				}
 				content := contentValue.(string)
 
-				writeErr := os.WriteFile("/local/path", []byte(content), 0o644)
-				_ = readErr
-				_ = writeErr
+				localPath := filepath.Join(t.TempDir(), "download.txt")
+				writeErr := os.WriteFile(localPath, []byte(content), 0o644)
+				assert.NoError(t, writeErr, "failed to write local file")
 			},
 		},
 		{
 			name: "download-with-signed-url",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires Secure sandbox + reachable signed URL endpoint")
+
 				ctx := context.Background()
 				secure := true
 				sandbox, err := e2b.Create(ctx, "", &e2b.SandboxOpts{
 					Secure: &secure,
 				})
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create secure sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				expirationMs := 10_000
 				publicURL, urlErr := sandbox.DownloadUrl("demo.txt", &struct {
@@ -60,20 +72,28 @@ func TestDocsFilesystemDownloadExamplesCompile(t *testing.T) {
 				}{
 					UseSignatureExpiration: &expirationMs,
 				})
-
-				res, getErr := http.Get(publicURL)
-				if res != nil {
-					defer res.Body.Close()
-					_, _ = io.ReadAll(res.Body)
+				if !assert.NoError(t, urlErr, "failed to obtain signed URL") {
+					return
 				}
 
-				_ = urlErr
-				_ = getErr
+				res, getErr := http.Get(publicURL)
+				if !assert.NoError(t, getErr, "failed to GET signed URL") {
+					return
+				}
+				defer res.Body.Close()
+				_, _ = io.ReadAll(res.Body)
 			},
 		},
 	}
 
 	if got := len(snippets); got != 2 {
 		t.Fatalf("expected 2 filesystem download doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

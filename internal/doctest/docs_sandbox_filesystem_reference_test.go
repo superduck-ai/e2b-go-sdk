@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -17,39 +18,50 @@ func TestDocsSandboxFilesystemReferenceDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/sdk-reference/go-sdk/sandbox-filesystem.mdx aligned
-// with the exported Go SDK surface. The closures are compile-only examples and
-// are intentionally never executed.
 func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "read",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
 				textValue, textErr := sandbox.Files.Read(ctx, "/tmp/app.txt", nil)
+				if !assert.NoError(t, textErr, "read text") {
+					return
+				}
 				text := textValue.(string)
 
 				bytesValue, bytesErr := sandbox.Files.Read(ctx, "/tmp/app.txt", &e2b.FilesystemReadOpts{
 					Format: e2b.ReadFormatBytes,
 				})
+				if !assert.NoError(t, bytesErr, "read bytes") {
+					return
+				}
 				data := bytesValue.([]byte)
 
 				blobValue, blobErr := sandbox.Files.Read(ctx, "/tmp/app.txt", &e2b.FilesystemReadOpts{
 					Format: e2b.ReadFormatBlob,
 				})
+				if !assert.NoError(t, blobErr, "read blob") {
+					return
+				}
 				blob := blobValue.(e2b.Blob)
 
 				streamValue, streamErr := sandbox.Files.Read(ctx, "/tmp/app.txt", &e2b.FilesystemReadOpts{
 					Format: e2b.ReadFormatStream,
 				})
+				if !assert.NoError(t, streamErr, "read stream") {
+					return
+				}
 				stream := streamValue.(io.ReadCloser)
 				defer stream.Close()
 
@@ -58,68 +70,73 @@ func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 				_ = text
 				_ = data
 				_ = blob
-				_ = textErr
-				_ = bytesErr
-				_ = blobErr
-				_ = streamErr
 			},
 		},
 		{
 			name: "write",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
 				blob := e2b.Blob([]byte("blob payload"))
 
 				info1, err1 := sandbox.Files.Write(ctx, "/tmp/notes.txt", "hello from go", nil)
+				assert.NoError(t, err1, "write string")
 				info2, err2 := sandbox.Files.Write(ctx, "/tmp/data.bin", []byte("bytes payload"), nil)
+				assert.NoError(t, err2, "write bytes")
 				info3, err3 := sandbox.Files.Write(ctx, "/tmp/blob.txt", blob, nil)
+				assert.NoError(t, err3, "write blob")
 				info4, err4 := sandbox.Files.Write(ctx, "/tmp/stream.txt", bytes.NewReader([]byte("stream payload")), &e2b.FilesystemWriteOpts{
 					Gzip:           true,
 					UseOctetStream: true,
 				})
+				assert.NoError(t, err4, "write stream")
 
 				infos, batchErr := sandbox.Files.WriteFiles(ctx, []e2b.WriteEntry{
 					{Path: "/tmp/batch/one.txt", Data: "one"},
 					{Path: "/tmp/batch/two.bin", Data: bytes.NewReader([]byte("two"))},
 				}, nil)
+				assert.NoError(t, batchErr, "write batch")
 
 				_ = info1
 				_ = info2
 				_ = info3
 				_ = info4
 				_ = infos
-				_ = err1
-				_ = err2
-				_ = err3
-				_ = err4
-				_ = batchErr
 			},
 		},
 		{
 			name: "path-ops",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
 				created, createErr := sandbox.Files.MakeDir(ctx, "/tmp/project/data", nil)
+				assert.NoError(t, createErr, "mkdir")
 				exists, existsErr := sandbox.Files.Exists(ctx, "/tmp/project/data", nil)
+				assert.NoError(t, existsErr, "exists")
 
 				depth := 2
 				entries, listErr := sandbox.Files.List(ctx, "/tmp/project", &e2b.FilesystemListOpts{
 					Depth: &depth,
 				})
+				assert.NoError(t, listErr, "list")
 
 				info, infoErr := sandbox.Files.GetInfo(ctx, "/tmp/project", nil)
+				assert.NoError(t, infoErr, "info")
 				renamed, renameErr := sandbox.Files.Rename(ctx, "/tmp/project/data", "/tmp/project/assets", nil)
-				removeErr := sandbox.Files.Remove(ctx, "/tmp/project/assets", nil)
+				assert.NoError(t, renameErr, "rename")
+				assert.NoError(t, sandbox.Files.Remove(ctx, "/tmp/project/assets", nil), "remove")
 
 				_, notFoundErr := sandbox.Files.Read(ctx, "/tmp/missing.txt", nil)
 				var fileErr *e2b.FileNotFoundError
@@ -131,20 +148,16 @@ func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 				_ = info
 				_ = renamed
 				_ = notFoundMatches
-				_ = createErr
-				_ = existsErr
-				_ = listErr
-				_ = infoErr
-				_ = renameErr
-				_ = removeErr
 			},
 		},
 		{
 			name: "watch",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
@@ -159,6 +172,7 @@ func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 						_ = err
 					},
 				})
+				assert.NoError(t, watchErr, "watch")
 				if handle != nil {
 					handle.Stop()
 				}
@@ -168,15 +182,16 @@ func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 				_ = e2b.FilesystemEventRename
 				_ = e2b.FilesystemEventRemove
 				_ = e2b.FilesystemEventChmod
-				_ = watchErr
 			},
 		},
 		{
 			name: "request-options",
-			fn: func() {
+			fn: func(t *testing.T) {
+				t.Skip("requires an existing sandbox ID (sbx_123)")
+
 				ctx := context.Background()
 				sandbox, err := e2b.Connect(ctx, "sbx_123", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to connect") {
 					return
 				}
 
@@ -190,21 +205,27 @@ func TestDocsSandboxFilesystemReferenceExamplesCompile(t *testing.T) {
 					FilesystemRequestOpts: *opts,
 					Gzip:                  true,
 				})
+				assert.NoError(t, readErr, "read with opts")
 				_, writeErr := sandbox.Files.Write(ctx, "relative.txt", "hello", &e2b.FilesystemWriteOpts{
 					FilesystemRequestOpts: *opts,
 				})
+				assert.NoError(t, writeErr, "write with opts")
 				_, listErr := sandbox.Files.List(ctx, ".", &e2b.FilesystemListOpts{
 					FilesystemRequestOpts: *opts,
 				})
-
-				_ = readErr
-				_ = writeErr
-				_ = listErr
+				assert.NoError(t, listErr, "list with opts")
 			},
 		},
 	}
 
 	if got := len(snippets); got != 5 {
 		t.Fatalf("expected 5 filesystem doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

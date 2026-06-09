@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -14,44 +15,45 @@ func TestDocsFilesystemWatchDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/filesystem/watch.mdx aligned with the exported Go SDK
-// watch surface. The closures are compile-only examples and are intentionally
-// never executed.
 func TestDocsFilesystemWatchExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "watch-directory",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				handle, watchErr := sandbox.Files.WatchDir(ctx, "/home/user", func(event e2b.FilesystemEvent) {
 					_ = event.Name
 					_ = event.Type
 				}, nil)
+				if !assert.NoError(t, watchErr, "failed to watch dir") {
+					return
+				}
 				if handle != nil {
 					defer handle.Stop()
 				}
 
 				_, writeErr := sandbox.Files.Write(ctx, "/home/user/my-file", "hello", nil)
-				_ = watchErr
-				_ = writeErr
+				assert.NoError(t, writeErr, "failed to write file")
 			},
 		},
 		{
 			name: "watch-directory-recursive",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				timeoutMs := 30_000
 				handle, watchErr := sandbox.Files.WatchDir(ctx, "/home/user", func(event e2b.FilesystemEvent) {
@@ -64,24 +66,33 @@ func TestDocsFilesystemWatchExamplesCompile(t *testing.T) {
 						_ = err
 					},
 				})
+				if !assert.NoError(t, watchErr, "failed to watch dir (recursive)") {
+					return
+				}
 				if handle != nil {
 					defer handle.Stop()
 				}
 
 				_, writeErr := sandbox.Files.Write(ctx, "/home/user/my-folder/my-file", "hello", nil)
+				assert.NoError(t, writeErr, "failed to write file in subfolder")
 
 				_ = e2b.FilesystemEventCreate
 				_ = e2b.FilesystemEventWrite
 				_ = e2b.FilesystemEventRename
 				_ = e2b.FilesystemEventRemove
 				_ = e2b.FilesystemEventChmod
-				_ = watchErr
-				_ = writeErr
 			},
 		},
 	}
 
 	if got := len(snippets); got != 2 {
 		t.Fatalf("expected 2 filesystem watch doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

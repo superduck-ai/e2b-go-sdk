@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	e2b "github.com/superduck-ai/e2b-go-sdk"
 )
 
@@ -16,83 +17,103 @@ func TestDocsFilesystemReadWriteDocumentExists(t *testing.T) {
 	}
 }
 
-// This test keeps docs/filesystem/read-write.mdx aligned with the exported Go
-// SDK read/write filesystem surface. The closures are compile-only examples and
-// are intentionally never executed.
 func TestDocsFilesystemReadWriteExamplesCompile(t *testing.T) {
 	snippets := []struct {
 		name string
-		fn   func()
+		fn   func(t *testing.T)
 	}{
 		{
 			name: "read-files",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
+					return
+				}
+				defer sandbox.Kill(context.Background(), nil)
+
+				path := "/home/user/read-target.txt"
+				_, prepErr := sandbox.Files.Write(ctx, path, "file content", nil)
+				if !assert.NoError(t, prepErr, "failed to prepare file") {
 					return
 				}
 
-				textValue, textErr := sandbox.Files.Read(ctx, "/path/to/file", nil)
+				textValue, textErr := sandbox.Files.Read(ctx, path, nil)
+				if !assert.NoError(t, textErr, "failed to read text") {
+					return
+				}
 				fileContent := textValue.(string)
 
-				bytesValue, bytesErr := sandbox.Files.Read(ctx, "/path/to/file", &e2b.FilesystemReadOpts{
+				bytesValue, bytesErr := sandbox.Files.Read(ctx, path, &e2b.FilesystemReadOpts{
 					Format: e2b.ReadFormatBytes,
 				})
+				if !assert.NoError(t, bytesErr, "failed to read bytes") {
+					return
+				}
 				fileBytes := bytesValue.([]byte)
 
-				streamValue, streamErr := sandbox.Files.Read(ctx, "/path/to/file", &e2b.FilesystemReadOpts{
+				streamValue, streamErr := sandbox.Files.Read(ctx, path, &e2b.FilesystemReadOpts{
 					Format: e2b.ReadFormatStream,
 				})
+				if !assert.NoError(t, streamErr, "failed to read stream") {
+					return
+				}
 				stream := streamValue.(io.ReadCloser)
 				defer stream.Close()
 
 				_ = fileContent
 				_ = fileBytes
-				_ = textErr
-				_ = bytesErr
-				_ = streamErr
 			},
 		},
 		{
 			name: "write-single-file",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
-				_, err1 := sandbox.Files.Write(ctx, "/path/to/file.txt", "file content", nil)
-				_, err2 := sandbox.Files.Write(ctx, "/path/to/file.bin", []byte("file content"), nil)
-				_, err3 := sandbox.Files.Write(ctx, "/path/to/stream.txt", bytes.NewReader([]byte("file content")), nil)
+				_, err1 := sandbox.Files.Write(ctx, "/home/user/file.txt", "file content", nil)
+				assert.NoError(t, err1, "failed to write string")
 
-				_ = err1
-				_ = err2
-				_ = err3
+				_, err2 := sandbox.Files.Write(ctx, "/home/user/file.bin", []byte("file content"), nil)
+				assert.NoError(t, err2, "failed to write bytes")
+
+				_, err3 := sandbox.Files.Write(ctx, "/home/user/stream.txt", bytes.NewReader([]byte("file content")), nil)
+				assert.NoError(t, err3, "failed to write stream")
 			},
 		},
 		{
 			name: "write-multiple-files",
-			fn: func() {
+			fn: func(t *testing.T) {
 				ctx := context.Background()
 				sandbox, err := e2b.Create(ctx, "", nil)
-				if err != nil {
+				if !assert.NoError(t, err, "failed to create sandbox") {
 					return
 				}
+				defer sandbox.Kill(context.Background(), nil)
 
 				infos, batchErr := sandbox.Files.WriteFiles(ctx, []e2b.WriteEntry{
-					{Path: "/path/to/a", Data: "file content"},
-					{Path: "/another/path/to/b", Data: "file content"},
+					{Path: "/home/user/a", Data: "file content"},
+					{Path: "/home/user/sub/b", Data: "file content"},
 				}, nil)
+				assert.NoError(t, batchErr, "failed to write files in batch")
 
 				_ = infos
-				_ = batchErr
 			},
 		},
 	}
 
 	if got := len(snippets); got != 3 {
 		t.Fatalf("expected 3 filesystem read-write doc snippets, got %d", got)
+	}
+
+	for _, snippet := range snippets {
+		snippet := snippet
+		t.Run(snippet.name, func(t *testing.T) {
+			snippet.fn(t)
+		})
 	}
 }

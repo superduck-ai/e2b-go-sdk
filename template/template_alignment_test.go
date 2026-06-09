@@ -1232,7 +1232,17 @@ func TestTemplateDefaultsFileContextPathToCallerDirectory(t *testing.T) {
 		t.Fatalf("failed to get temp cwd: %v", err)
 	}
 	if callerDir != tmpDir {
-		t.Fatalf("expected cwd to change to temp dir, got %q", callerDir)
+		callerInfo, err := os.Stat(callerDir)
+		if err != nil {
+			t.Fatalf("failed to stat caller dir: %v", err)
+		}
+		tmpInfo, err := os.Stat(tmpDir)
+		if err != nil {
+			t.Fatalf("failed to stat temp dir: %v", err)
+		}
+		if !os.SameFile(callerInfo, tmpInfo) {
+			t.Fatalf("expected cwd to change to temp dir %q, got %q", tmpDir, callerDir)
+		}
 	}
 
 	template := Template(nil)
