@@ -15,6 +15,7 @@ import (
 
 	"github.com/superduck-ai/e2b-go-sdk/api"
 	"github.com/superduck-ai/e2b-go-sdk/internal/shared"
+	"github.com/superduck-ai/e2b-go-sdk/runtime/applecontainer"
 )
 
 const (
@@ -138,7 +139,12 @@ type SandboxOpts struct {
 	Network             *SandboxNetworkOpts
 	Lifecycle           *SandboxLifecycle
 	VolumeMounts        map[string]any
+
+	runtime        string
+	appleContainer *applecontainer.RuntimeOptions
 }
+
+type SandboxOptions = SandboxOpts
 
 type SandboxBetaCreateOpts struct {
 	SandboxOpts
@@ -148,6 +154,9 @@ type SandboxBetaCreateOpts struct {
 type SandboxConnectOpts struct {
 	ConnectionOpts
 	TimeoutMs *int
+
+	runtime        string
+	appleContainer *applecontainer.RuntimeOptions
 }
 
 type SandboxApiOpts struct {
@@ -159,6 +168,9 @@ type SandboxApiOpts struct {
 	Headers          map[string]string
 	Proxy            string
 	apiUrl           string
+
+	runtime        string
+	appleContainer *applecontainer.RuntimeOptions
 }
 
 type SandboxListOpts struct {
@@ -361,6 +373,14 @@ func Kill(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, er
 		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
 		defer cancel()
 	}
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		runtime, err := newAppleContainerSandboxRuntime(opts.appleContainer)
+		if err != nil {
+			return false, err
+		}
+		defer runtime.Close()
+		return runtime.KillSandbox(ctx, sandboxId)
+	}
 	return (&sandboxApi{}).Kill(ctx, sandboxId, opts)
 }
 
@@ -369,6 +389,19 @@ func GetInfo(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (*Sand
 		var cancel context.CancelFunc
 		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
 		defer cancel()
+	}
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		runtime, err := newAppleContainerSandboxRuntime(opts.appleContainer)
+		if err != nil {
+			return nil, err
+		}
+		defer runtime.Close()
+		resp, err := runtime.GetSandbox(ctx, sandboxId)
+		if err != nil {
+			return nil, wrapSandboxNotFoundError(sandboxId, err)
+		}
+		info := sandboxResponseToInfo(resp)
+		return &info, nil
 	}
 	return (&sandboxApi{}).GetInfo(ctx, sandboxId, opts)
 }
@@ -388,6 +421,18 @@ func GetMetrics(ctx context.Context, sandboxId string, opts *SandboxMetricsOpts)
 		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
 		defer cancel()
 	}
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		runtime, err := newAppleContainerSandboxRuntime(opts.appleContainer)
+		if err != nil {
+			return nil, err
+		}
+		defer runtime.Close()
+		metrics, err := runtime.GetMetrics(ctx, sandboxId)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxMetricsFromAPI(metrics), nil
+	}
 	return (&sandboxApi{}).GetMetrics(ctx, sandboxId, opts)
 }
 
@@ -396,6 +441,9 @@ func SetTimeout(ctx context.Context, sandboxId string, timeoutMs int, opts *Sand
 		var cancel context.CancelFunc
 		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
 		defer cancel()
+	}
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		return nil
 	}
 	return (&sandboxApi{}).SetTimeout(ctx, sandboxId, timeoutMs, opts)
 }
@@ -406,16 +454,30 @@ func UpdateNetwork(ctx context.Context, sandboxId string, network SandboxNetwork
 		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
 		defer cancel()
 	}
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		return fmt.Errorf("network updates are not supported by the applecontainer runtime")
+	}
 	return (&sandboxApi{}).UpdateNetwork(ctx, sandboxId, network, opts)
 }
 
 func Pause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
+	if opts != nil && isAppleContainerRuntime(opts.runtime) {
+		var cancel context.CancelFunc
+		ctx, cancel = shared.MergeContexts(ctx, opts.Signal)
+		defer cancel()
+		runtime, err := newAppleContainerSandboxRuntime(opts.appleContainer)
+		if err != nil {
+			return false, err
+		}
+		defer runtime.Close()
+		return runtime.PauseSandbox(ctx, sandboxId)
+	}
 	return (&sandboxApi{}).Pause(ctx, sandboxId, opts)
 }
 
 // BetaPause is deprecated. Use Pause instead.
 func BetaPause(ctx context.Context, sandboxId string, opts *SandboxApiOpts) (bool, error) {
-	return (&sandboxApi{}).BetaPause(ctx, sandboxId, opts)
+	return Pause(ctx, sandboxId, opts)
 }
 
 func CreateSnapshot(ctx context.Context, sandboxId string, opts *CreateSnapshotOpts) (*SnapshotInfo, error) {

@@ -21,6 +21,7 @@ Use `Create(ctx, template, opts)` to start a sandbox and return a connected `*Sa
 
 - Pass `""` for `template` to use `opts.Template` or the default `base` template.
 - Use `SandboxOpts` to configure metadata, env vars, lifecycle, network, secure mode, volume mounts, MCP, and startup timeout.
+- Use `WithAppleContainerRuntime(...)` to create a local Apple Container sandbox on macOS without the HTTP control plane.
 
 ```go
 package main
@@ -81,6 +82,23 @@ func main() {
 ```
 
 If you already have a connected handle, `sandbox.Connect(ctx, opts)` reconnects the same instance in place.
+
+## Use Apple Container locally
+
+The Go SDK includes a native Apple Container runtime in `runtime/applecontainer`. This path talks directly to `com.apple.container.apiserver` and the Apple Container image service through XPC, then returns the normal `*Sandbox` handle backed by the sandbox's local `envd` URL.
+
+Use this runtime on macOS with Apple Container running, `CGO_ENABLED=1`, and a locally pulled Linux image. Configure it with `e2b.WithAppleContainerRuntime(...)`. The default template ID is still `base`; by default it maps to `docker.io/library/debian:bookworm-slim`, or to `E2B_APPLE_CONTAINER_BASE_IMAGE` when that environment variable is set. Set `E2B_APPLE_CONTAINER_ENVD_BINARY` or `RuntimeOptions.EnvdBinary` to the `envd` binary that should be copied into each container, or set `TemplateOptions.PrebakedEnvdPath` when the image already contains `envd`.
+
+Apple Container sandboxes support create, connect, pause, kill, info, metrics, commands, filesystem, PTY, Git, environment variables, and volume mounts through `envd`. The native runtime retries host-port allocation when Apple Container reports a port conflict, but still uses explicit localhost published ports. Runtime network updates, snapshots, and native volume create/list/delete still require the HTTP control plane or `e2b-local`.
+
+| Capability | Native Apple Container runtime |
+| --- | --- |
+| Create/connect/pause/kill/info/metrics | Supported |
+| Commands, filesystem, PTY, Git | Supported through `envd` |
+| Volume mounts | Supported for existing Apple Container volumes |
+| Volume create/list/delete | Not supported in the native SDK runtime |
+| Network update | Not supported |
+| Snapshots | Not supported |
 
 ## Inspect and manage a sandbox
 

@@ -2,7 +2,6 @@ package e2b
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/superduck-ai/e2b-go-sdk/api"
 	"github.com/superduck-ai/e2b-go-sdk/commands"
 	"github.com/superduck-ai/e2b-go-sdk/envd"
@@ -28,6 +26,7 @@ type Sandbox struct {
 	SandboxID          string
 	SandboxDomain      string
 	TrafficAccessToken string
+	localRuntime       localSandboxRuntime
 	envdPort           int
 	mcpPort            int
 	connectionConfig   *ConnectionConfig
@@ -59,6 +58,9 @@ func createSandbox(ctx context.Context, template string, opts *SandboxOpts, auto
 		} else {
 			template = defaultSandboxTemplate
 		}
+	}
+	if isAppleContainerRuntime(opts.runtime) {
+		return createAppleContainerSandbox(ctx, template, opts, autoPause)
 	}
 
 	connConfig := NewConnectionConfig(&opts.ConnectionOpts)
@@ -95,32 +97,8 @@ func createSandbox(ctx context.Context, template string, opts *SandboxOpts, auto
 
 	sbx := newSandboxFromResponse(&sandboxResp, connConfig)
 
-	if opts.Mcp != nil {
-		configJSON, err := json.Marshal(opts.Mcp)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal MCP config: %w", err)
-		}
-		sbx.mcpToken = uuid.NewString()
-		execution, err := sbx.Commands.Run(ctx, "mcp-gateway --config "+shellQuote(string(configJSON)), &commands.CommandStartOpts{
-			User: "root",
-			Envs: map[string]string{
-				"GATEWAY_ACCESS_TOKEN": sbx.mcpToken,
-			},
-		})
-		if err != nil {
-			var exitErr *commands.CommandExitError
-			if errors.As(err, &exitErr) {
-				return nil, fmt.Errorf("Failed to start MCP gateway: %s", exitErr.Stderr)
-			}
-			return nil, fmt.Errorf("Failed to start MCP gateway: %w", err)
-		}
-		res, ok := execution.(*commands.CommandResult)
-		if !ok {
-			return nil, fmt.Errorf("Failed to start MCP gateway: expected foreground command result, got %T", execution)
-		}
-		if res.ExitCode != 0 {
-			return nil, fmt.Errorf("Failed to start MCP gateway: %s", res.Stderr)
-		}
+	if err := startMcpGateway(ctx, sbx, opts.Mcp); err != nil {
+		return nil, err
 	}
 
 	return sbx, nil
@@ -147,6 +125,10 @@ func Connect(ctx context.Context, sandboxId string, opts *SandboxConnectOpts) (*
 	}
 	ctx, cancel := shared.MergeContexts(ctx, opts.Signal)
 	defer cancel()
+
+	if isAppleContainerRuntime(opts.runtime) {
+		return connectAppleContainerSandbox(ctx, sandboxId, opts)
+	}
 
 	connConfig := NewConnectionConfig(&opts.ConnectionOpts)
 
@@ -191,6 +173,18 @@ func (s *Sandbox) Connect(ctx context.Context, opts *SandboxConnectOpts) (*Sandb
 	}
 	ctx, cancel := shared.MergeContexts(ctx, mergedOpts.Signal)
 	defer cancel()
+
+	if s.localRuntime != nil {
+		connConfig := s.resolveConnectionConfig(&mergedOpts.ConnectionOpts)
+		resp, err := s.localRuntime.ConnectSandbox(ctx, s.SandboxID)
+		if err != nil {
+			return nil, err
+		}
+		connected := newSandboxFromResponse(resp, connConfig)
+		connected.localRuntime = s.localRuntime
+		*s = *connected
+		return s, nil
+	}
 
 	connConfig := s.resolveConnectionConfig(&mergedOpts.ConnectionOpts)
 	mergedOpts.ConnectionOpts = ConnectionOpts{
@@ -360,6 +354,9 @@ func (s *Sandbox) SetTimeout(ctx context.Context, timeoutMs int, opts *struct {
 	ctx, cancel := shared.MergeContexts(ctx, signal)
 	defer cancel()
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
+	if s.localRuntime != nil {
+		return nil
+	}
 	if connConfig.Debug {
 		return nil
 	}
@@ -385,6 +382,9 @@ func (s *Sandbox) UpdateNetwork(ctx context.Context, network SandboxNetworkUpdat
 	}
 	ctx, cancel := shared.MergeContexts(ctx, signal)
 	defer cancel()
+	if s.localRuntime != nil {
+		return fmt.Errorf("network updates are not supported by the applecontainer runtime")
+	}
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -412,6 +412,11 @@ func (s *Sandbox) Kill(ctx context.Context, opts *struct {
 	}
 	ctx, cancel := shared.MergeContexts(ctx, signal)
 	defer cancel()
+	if s.localRuntime != nil {
+		_, err := s.localRuntime.KillSandbox(ctx, s.SandboxID)
+		s.localRuntime.Close()
+		return err
+	}
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	if connConfig.Debug {
 		return nil
@@ -441,6 +446,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts *ConnectionOpts) (bool, error)
 	}
 	ctx, cancel := shared.MergeContexts(ctx, signal)
 	defer cancel()
+	if s.localRuntime != nil {
+		return s.localRuntime.PauseSandbox(ctx, s.SandboxID)
+	}
 	connConfig := s.resolveConnectionConfig(opts)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -704,6 +712,14 @@ func (s *Sandbox) GetInfo(ctx context.Context, opts *struct {
 	}
 	ctx, cancel := shared.MergeContexts(ctx, signal)
 	defer cancel()
+	if s.localRuntime != nil {
+		resp, err := s.localRuntime.GetSandbox(ctx, s.SandboxID)
+		if err != nil {
+			return nil, wrapSandboxNotFoundError(s.SandboxID, err)
+		}
+		info := sandboxResponseToInfo(resp)
+		return &info, nil
+	}
 	connConfig := s.resolveSandboxRequestTimeoutConnectionConfig(requestTimeoutMs)
 	apiClient, err := api.NewApiClient(toClientConfig(connConfig), api.WithRequireApiKey())
 	if err != nil {
@@ -726,6 +742,13 @@ func (s *Sandbox) GetMetrics(ctx context.Context, opts *SandboxMetricsOpts) ([]S
 	}
 	ctx, cancel := shared.MergeContexts(ctx, opts.Signal)
 	defer cancel()
+	if s.localRuntime != nil {
+		metricsResp, err := s.localRuntime.GetMetrics(ctx, s.SandboxID)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxMetricsFromAPI(metricsResp), nil
+	}
 	envdVersion := s.envdVersion
 	if envdVersion == "" && s.envdApi != nil {
 		envdVersion = s.envdApi.Version

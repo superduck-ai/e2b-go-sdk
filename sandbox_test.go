@@ -3025,6 +3025,28 @@ func TestCreateOptionsKeepDeprecatedAutoPauseBetaOnly(t *testing.T) {
 	if _, ok := createOptsType.FieldByName("AutoPause"); ok {
 		t.Fatal("did not expect SandboxOpts to expose deprecated AutoPause")
 	}
+	if _, ok := createOptsType.FieldByName("Runtime"); ok {
+		t.Fatal("did not expect SandboxOpts to expose runtime selection fields")
+	}
+	if _, ok := createOptsType.FieldByName("AppleContainer"); ok {
+		t.Fatal("did not expect SandboxOpts to expose Apple Container runtime config")
+	}
+
+	connectOptsType := reflect.TypeOf(SandboxConnectOpts{})
+	if _, ok := connectOptsType.FieldByName("Runtime"); ok {
+		t.Fatal("did not expect SandboxConnectOpts to expose runtime selection fields")
+	}
+	if _, ok := connectOptsType.FieldByName("AppleContainer"); ok {
+		t.Fatal("did not expect SandboxConnectOpts to expose Apple Container runtime config")
+	}
+
+	apiOptsType := reflect.TypeOf(SandboxApiOpts{})
+	if _, ok := apiOptsType.FieldByName("Runtime"); ok {
+		t.Fatal("did not expect SandboxApiOpts to expose runtime selection fields")
+	}
+	if _, ok := apiOptsType.FieldByName("AppleContainer"); ok {
+		t.Fatal("did not expect SandboxApiOpts to expose Apple Container runtime config")
+	}
 
 	betaOptsType := reflect.TypeOf(SandboxBetaCreateOpts{})
 	if _, ok := betaOptsType.FieldByName("AutoPause"); !ok {

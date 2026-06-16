@@ -26,6 +26,8 @@ Optional environment variables:
 - `E2B_API_URL`
 - `E2B_SANDBOX_URL`
 - `E2B_DEBUG`
+- `E2B_APPLE_CONTAINER_ENVD_BINARY`
+- `E2B_APPLE_CONTAINER_BASE_IMAGE`
 
 ## Install
 
@@ -90,6 +92,66 @@ func main() {
 - `e2b.Template(...)` and `e2b.Build(...)` define and build templates
 
 The root package re-exports most commonly used command, filesystem, Git, template, and volume types so application code can stay in the `e2b` package for the common path.
+
+## Apple Container runtime
+
+On Apple Silicon macOS, `e2b.Create` can create a local Apple Container sandbox directly through Apple Container XPC services instead of calling the E2B HTTP API or an `e2b-local` gateway.
+
+Requirements:
+
+- macOS with Apple Container installed and running
+- `CGO_ENABLED=1`
+- a locally pulled Linux image, for example `docker.io/library/debian:bookworm-slim`
+- a Linux `envd` binary path in `RuntimeOptions.EnvdBinary` or `E2B_APPLE_CONTAINER_ENVD_BINARY`, unless every template sets `PrebakedEnvdPath`
+
+Use `e2b.WithAppleContainerRuntime(...)` to create sandbox options configured for the native runtime, then fill any additional sandbox options on the returned struct.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	e2b "github.com/superduck-ai/e2b-go-sdk"
+	"github.com/superduck-ai/e2b-go-sdk/runtime/applecontainer"
+)
+
+func main() {
+	ctx := context.Background()
+
+	opts := e2b.WithAppleContainerRuntime(&applecontainer.RuntimeOptions{
+		EnvdBinary: "/absolute/path/to/envd-linux-arm64",
+		Templates: map[string]applecontainer.TemplateOptions{
+			"base": {
+				Image: "docker.io/library/debian:bookworm-slim",
+			},
+		},
+	})
+	sandbox, err := e2b.Create(ctx, "", opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sandbox.Kill(context.Background(), nil)
+
+	log.Println(sandbox.SandboxID)
+}
+```
+
+If the image already includes `envd`, set `TemplateOptions.PrebakedEnvdPath` to the executable path inside the image. The runtime then skips copying `RuntimeOptions.EnvdBinary` on each cold create.
+
+Capability notes:
+
+| Capability | Native Apple Container runtime |
+| ---------- | ------------------------------ |
+| Create/connect/pause/kill/info/metrics | Supported |
+| Commands, filesystem, PTY, Git | Supported through `envd` |
+| Volume mounts | Supported for existing Apple Container volumes |
+| Volume create/list/delete | Use `e2b-local` gateway or Apple Container CLI |
+| Network update | Not supported |
+| Snapshots | Not supported |
+
+The runtime retries host-port allocation when Apple Container reports a port conflict, but Apple Container still requires explicit localhost published ports. This runtime is intended as an experimental local macOS backend, not as a drop-in replacement for the remote E2B control plane.
 
 ## Development
 
