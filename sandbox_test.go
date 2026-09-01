@@ -41,7 +41,7 @@ func (l *testLogger) Warn(args ...interface{}) {
 func testSandboxApiOpts(serverURL string) SandboxApiOpts {
 	return SandboxApiOpts{
 		ApiKey:           "e2b_0000000000000000000000000000000000000000",
-		apiUrl:           serverURL,
+		ApiUrl:           serverURL,
 		Domain:           "e2b.app",
 		RequestTimeoutMs: intPtr(1000),
 		Headers:          map[string]string{},
@@ -51,6 +51,28 @@ func testSandboxApiOpts(serverURL string) SandboxApiOpts {
 func testSandboxApiOptsPtr(serverURL string) *SandboxApiOpts {
 	opts := testSandboxApiOpts(serverURL)
 	return &opts
+}
+
+func TestSandboxApiOptsApiUrlOverridesEnvironment(t *testing.T) {
+	t.Setenv("E2B_API_URL", "http://127.0.0.1:1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/sandboxes/sbx-explicit-api-url" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	deleted, err := Kill(context.Background(), "sbx-explicit-api-url", &SandboxApiOpts{
+		ApiKey: "e2b_0000000000000000000000000000000000000000",
+		ApiUrl: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("kill sandbox: %v", err)
+	}
+	if !deleted {
+		t.Fatal("expected sandbox to be deleted")
+	}
 }
 
 func writeProcessEnvelope(t *testing.T, buf *bytes.Buffer, flags byte, payload []byte) {
@@ -342,7 +364,7 @@ func TestKillSandboxHonorsCanceledContext(t *testing.T) {
 
 	_, err := Kill(ctx, "sbx-1", &SandboxApiOpts{
 		ApiKey:           "e2b_0000000000000000000000000000000000000000",
-		apiUrl:           server.URL,
+		ApiUrl:           server.URL,
 		Domain:           "e2b.app",
 		RequestTimeoutMs: intPtr(1000),
 	})
@@ -364,7 +386,7 @@ func TestKillSandboxHonorsPreCanceledSignalContext(t *testing.T) {
 
 	_, err := Kill(context.Background(), "sbx-1", &SandboxApiOpts{
 		ApiKey:           "e2b_0000000000000000000000000000000000000000",
-		apiUrl:           server.URL,
+		ApiUrl:           server.URL,
 		Domain:           "e2b.app",
 		RequestTimeoutMs: intPtr(1000),
 		Signal:           signal,
@@ -393,7 +415,7 @@ func TestUpdateNetworkHonorsPreCanceledSignalContext(t *testing.T) {
 
 	err := UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, &SandboxApiOpts{
 		ApiKey:           "e2b_0000000000000000000000000000000000000000",
-		apiUrl:           server.URL,
+		ApiUrl:           server.URL,
 		Domain:           "e2b.app",
 		RequestTimeoutMs: intPtr(1000),
 		Signal:           signal,
@@ -519,7 +541,7 @@ func TestSandboxAPIsHonorInFlightCancellation(t *testing.T) {
 		go func() {
 			_, err := Kill(ctx, "sbx-1", &SandboxApiOpts{
 				ApiKey:           "e2b_0000000000000000000000000000000000000000",
-				apiUrl:           server.URL,
+				ApiUrl:           server.URL,
 				Domain:           "e2b.app",
 				RequestTimeoutMs: intPtr(1000),
 			})
@@ -608,7 +630,7 @@ func TestSandboxApisHonorSignalContext(t *testing.T) {
 		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
 			_, err := Kill(context.Background(), "sbx-1", &SandboxApiOpts{
 				ApiKey:           "e2b_0000000000000000000000000000000000000000",
-				apiUrl:           apiURL,
+				ApiUrl:           apiURL,
 				Domain:           "e2b.app",
 				RequestTimeoutMs: intPtr(1000),
 				Signal:           signal,
@@ -621,7 +643,7 @@ func TestSandboxApisHonorSignalContext(t *testing.T) {
 		runSignalCancellation(t, func(signal context.Context, apiURL string) error {
 			return UpdateNetwork(context.Background(), "sbx-1", SandboxNetworkUpdate{}, &SandboxApiOpts{
 				ApiKey:           "e2b_0000000000000000000000000000000000000000",
-				apiUrl:           apiURL,
+				ApiUrl:           apiURL,
 				Domain:           "e2b.app",
 				RequestTimeoutMs: intPtr(1000),
 				Signal:           signal,
@@ -845,7 +867,7 @@ func TestSandboxApiListSnapshotsIgnoresNames(t *testing.T) {
 	apiClient := &sandboxApi{}
 	paginator := apiClient.ListSnapshots(&SnapshotListOpts{
 		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
-		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		apiUrl:           testSandboxApiOpts(server.URL).ApiUrl,
 		Domain:           testSandboxApiOpts(server.URL).Domain,
 		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
 		Headers:          testSandboxApiOpts(server.URL).Headers,
@@ -889,7 +911,7 @@ func TestListSandboxesUsesQueryFilters(t *testing.T) {
 
 	paginator := List(&SandboxListOpts{
 		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
-		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		apiUrl:           testSandboxApiOpts(server.URL).ApiUrl,
 		Domain:           testSandboxApiOpts(server.URL).Domain,
 		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
 		Headers:          testSandboxApiOpts(server.URL).Headers,
@@ -945,7 +967,7 @@ func TestListSandboxesDoesNotExposeRawNameWithoutAlias(t *testing.T) {
 
 	paginator := List(&SandboxListOpts{
 		ApiKey:           testSandboxApiOpts(server.URL).ApiKey,
-		apiUrl:           testSandboxApiOpts(server.URL).apiUrl,
+		apiUrl:           testSandboxApiOpts(server.URL).ApiUrl,
 		Domain:           testSandboxApiOpts(server.URL).Domain,
 		RequestTimeoutMs: testSandboxApiOpts(server.URL).RequestTimeoutMs,
 		Headers:          testSandboxApiOpts(server.URL).Headers,
@@ -3076,14 +3098,14 @@ func TestSandboxLifecycleAndNetworkOptionalBooleanShapesMatchJsAndPython(t *test
 	}
 }
 
-func TestSandboxApiOptsExposeOnlyPublicJsFields(t *testing.T) {
+func TestSandboxApiOptsExposeSupportedPublicFields(t *testing.T) {
 	optsType := reflect.TypeOf(SandboxApiOpts{})
 
 	if _, ok := optsType.FieldByName("AccessToken"); ok {
 		t.Fatal("did not expect SandboxApiOpts to expose AccessToken")
 	}
-	if _, ok := optsType.FieldByName("ApiUrl"); ok {
-		t.Fatal("did not expect SandboxApiOpts to expose ApiUrl")
+	if _, ok := optsType.FieldByName("ApiUrl"); !ok {
+		t.Fatal("expected SandboxApiOpts to expose ApiUrl")
 	}
 	if _, ok := optsType.FieldByName("SandboxUrl"); ok {
 		t.Fatal("did not expect SandboxApiOpts to expose SandboxUrl")

@@ -998,8 +998,8 @@ func (s *Sandbox) resolveSandboxApiConnectionConfig(opts *SandboxApiOpts) *Conne
 	if opts.Debug != nil {
 		merged.Debug = *opts.Debug
 	}
-	if opts.apiUrl != "" {
-		merged.ApiUrl = opts.apiUrl
+	if opts.ApiUrl != "" {
+		merged.ApiUrl = opts.ApiUrl
 	}
 	if opts.RequestTimeoutMs != nil {
 		merged.RequestTimeoutMs = *opts.RequestTimeoutMs

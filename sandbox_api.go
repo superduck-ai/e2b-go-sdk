@@ -158,7 +158,7 @@ type SandboxApiOpts struct {
 	RequestTimeoutMs *int
 	Headers          map[string]string
 	Proxy            string
-	apiUrl           string
+	ApiUrl           string
 }
 
 type SandboxListOpts struct {
@@ -255,7 +255,7 @@ func newConnectionConfigFromSandboxApiOpts(opts *SandboxApiOpts) *ConnectionConf
 	return NewConnectionConfig(&ConnectionOpts{
 		ApiKey:           opts.ApiKey,
 		Domain:           opts.Domain,
-		ApiUrl:           opts.apiUrl,
+		ApiUrl:           opts.ApiUrl,
 		Debug:            opts.Debug,
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Headers:          opts.Headers,
@@ -274,7 +274,7 @@ func sandboxApiOptsFromSandboxListOpts(opts *SandboxListOpts) SandboxApiOpts {
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Headers:          opts.Headers,
 		Proxy:            opts.Proxy,
-		apiUrl:           opts.apiUrl,
+		ApiUrl:           opts.apiUrl,
 	}
 }
 
@@ -289,7 +289,7 @@ func sandboxApiOptsFromSnapshotListOpts(opts *SnapshotListOpts) SandboxApiOpts {
 		RequestTimeoutMs: opts.RequestTimeoutMs,
 		Headers:          opts.Headers,
 		Proxy:            opts.Proxy,
-		apiUrl:           opts.apiUrl,
+		ApiUrl:           opts.apiUrl,
 	}
 }
 
@@ -323,8 +323,8 @@ func mergeSandboxApiOpts(base, override SandboxApiOpts) SandboxApiOpts {
 	if override.Proxy != "" {
 		merged.Proxy = override.Proxy
 	}
-	if override.apiUrl != "" {
-		merged.apiUrl = override.apiUrl
+	if override.ApiUrl != "" {
+		merged.ApiUrl = override.ApiUrl
 	}
 	return merged
 }
